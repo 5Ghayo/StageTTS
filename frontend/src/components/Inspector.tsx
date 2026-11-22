@@ -48,7 +48,6 @@ export const Inspector: React.FC = () => {
   // 自定义极简试听条状态
   const audioRef = useRef<HTMLAudioElement>(null);
   const sourceAudioRef = useRef<HTMLAudioElement>(null);
-  const simRafRef = useRef<number>(0);
   const [isAuditionPlaying, setIsAuditionPlaying] = useState(false);
   const [auditionTime, setAuditionTime] = useState(0);
   const [auditionDuration, setAuditionDuration] = useState(0);
@@ -65,7 +64,6 @@ export const Inspector: React.FC = () => {
     : 0;
 
   useEffect(() => {
-    cancelAnimationFrame(simRafRef.current);
     const el = audioRef.current;
     if (el) {
       el.pause();
@@ -75,10 +73,6 @@ export const Inspector: React.FC = () => {
     setAuditionTime(0);
     setAuditionDuration(fallbackDuration);
   }, [segment?.id, auditionUrl, fallbackDuration]);
-
-  useEffect(() => {
-    return () => cancelAnimationFrame(simRafRef.current);
-  }, []);
 
   useEffect(() => {
     sourceAudioRef.current?.pause();
@@ -115,51 +109,26 @@ export const Inspector: React.FC = () => {
       ? Math.min(100, Math.max(0, (auditionTime / effectiveDuration) * 100))
       : 0;
 
-  const startSimulatedAudition = (startFrom: number) => {
-    cancelAnimationFrame(simRafRef.current);
-    let lastTs = performance.now();
-    let cursor = startFrom >= effectiveDuration ? 0 : startFrom;
-    setIsAuditionPlaying(true);
-
-    const tick = (now: number) => {
-      const dt = (now - lastTs) / 1000;
-      lastTs = now;
-      cursor += dt;
-      if (cursor >= effectiveDuration) {
-        setAuditionTime(0);
-        setIsAuditionPlaying(false);
-        return;
-      }
-      setAuditionTime(cursor);
-      simRafRef.current = requestAnimationFrame(tick);
-    };
-    simRafRef.current = requestAnimationFrame(tick);
-  };
-
   const toggleAuditionPlay = async () => {
     const el = audioRef.current;
-    if (isAuditionPlaying) {
-      cancelAnimationFrame(simRafRef.current);
-      if (el && !el.paused) {
-        el.pause();
-      }
+    if (!el || !auditionUrl) return;
+    if (!el.paused) {
+      el.pause();
       setIsAuditionPlaying(false);
       return;
     }
 
-    if (el && auditionUrl) {
-      try {
-        if (el.currentTime >= (el.duration || effectiveDuration)) {
-          el.currentTime = 0;
-        }
-        await el.play();
-        setIsAuditionPlaying(true);
-        return;
-      } catch {
-        // 离线或演示音频文件不存在时，优雅降级为平滑进度演示
+    try {
+      if (el.ended) {
+        el.currentTime = 0;
+      }
+      await el.play();
+      if (audioRef.current === el && !el.paused) setIsAuditionPlaying(true);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setSynthNote("无法播放当前句，请检查配音文件或重试合成");
       }
     }
-    startSimulatedAudition(auditionTime);
   };
 
   const handleAuditionSeek = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -490,6 +459,7 @@ export const Inspector: React.FC = () => {
                 当前句试听
               </span>
               <audio
+                key={auditionUrl}
                 ref={audioRef}
                 src={auditionUrl}
                 preload="metadata"

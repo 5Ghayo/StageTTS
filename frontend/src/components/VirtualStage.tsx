@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { Pause, Play } from "lucide-react";
-import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
+import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
+import { TimelineAudio, useDubClips } from "./TimelineAudio";
 
 const EMOTION_LABELS: Record<EmotionType, string> = {
   neutral: "平淡",
@@ -20,12 +21,11 @@ export const VirtualStage: React.FC = () => {
   const currentTime = useProjectStore((s) => s.currentTime);
   const isPlaying = useProjectStore((s) => s.isPlaying);
   const selectedSegmentId = useProjectStore((s) => s.selectedSegmentId);
-  const audioVersionMap = useProjectStore((s) => s.audioVersionMap);
+  const trackStates = useProjectStore((s) => s.trackStates);
   const setIsPlaying = useProjectStore((s) => s.setIsPlaying);
   const stepSegment = useProjectStore((s) => s.stepSegment);
 
   const pixiContainerRef = useRef<HTMLDivElement>(null);
-  const stageAudioRef = useRef<HTMLAudioElement>(null);
 
   const activeSegment = useMemo(() => {
     if (!script) {
@@ -45,9 +45,7 @@ export const VirtualStage: React.FC = () => {
     ? script?.characters[activeSegment.speaker]
     : undefined;
 
-  const stageAudioSrc = activeSegment
-    ? getCacheBustedUrl(activeSegment.tts_wav, audioVersionMap[activeSegment.id])
-    : null;
+  const { upcomingClips } = useDubClips(currentTime);
 
   const rmsEnergy = useMemo(() => {
     if (!isPlaying || !activeSegment) {
@@ -117,9 +115,7 @@ export const VirtualStage: React.FC = () => {
         ref={pixiContainerRef}
         className="relative flex min-h-0 flex-1 flex-col items-center justify-center overflow-hidden bg-[#161616] p-6"
       >
-        {stageAudioSrc && (
-          <audio ref={stageAudioRef} src={stageAudioSrc} preload="none" />
-        )}
+        <TimelineAudio clips={upcomingClips} time={currentTime} playing={isPlaying} dubMuted={trackStates.dubMuted} />
 
         {/* 虚拟角色口型实时演出 */}
         <div

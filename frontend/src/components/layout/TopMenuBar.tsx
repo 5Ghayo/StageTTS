@@ -140,6 +140,9 @@ export const TopMenuBar: React.FC = () => {
         script.project_id,
         pipelineConfig.burnWatermark
       );
+      useProjectStore.setState((state) => state.script?.project_id === res.project_id
+        ? { script: { ...state.script, media: { ...state.script.media, output_video: res.output_video } } }
+        : state);
       setActionToast("已导出成片");
       appendLog("env_backend", `导出成功: ${res.output_video}`, "success");
     } catch (err) {

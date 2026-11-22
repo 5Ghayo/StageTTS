@@ -704,24 +704,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         issues,
       };
     } catch (err) {
-      const isUnavailableOrOffline =
-        err instanceof ApiError &&
-        (err.status === 502 ||
-          err.status === 504 ||
-          err.isNotImplemented ||
-          err.isNetworkError);
-      if (!isUnavailableOrOffline) {
-        set({
-          isSynthesizing: false,
-          error: err instanceof Error ? err.message : "合成失败",
-        });
-        return {
-          simulated: false,
-          message: err instanceof Error ? err.message : "合成失败",
-          issues: [err instanceof Error ? err.message : "合成失败"],
-        };
-      }
-      return applyLocalSimulatedSynth("语音服务未启动，已执行本地演示合成");
+      const message = err instanceof Error ? err.message : "合成失败";
+      set({ isSynthesizing: false, error: message });
+      return { simulated: false, message, issues: [message] };
     }
   },
 }));
