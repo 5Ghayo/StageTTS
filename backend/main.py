@@ -14,8 +14,14 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
-from backend.agent.orchestrator import LLMNotConfiguredError, run_agent_chat
-from backend.agent.tools import load_project_script, save_project_script
+from backend.agent.orchestrator import run_agent_chat
+from backend.agent.tools import (
+    load_project_script,
+    project_task_guard,
+    render_final_video,
+    save_project_script,
+    synthesize_project,
+)
 from backend.schemas import (
     AgentChatRequest,
     AgentChatResponse,
@@ -28,9 +34,11 @@ from backend.schemas import (
     SynthesizeRequest,
     SynthesizeResponse,
 )
-from backend.services.media_mixer import check_ffmpeg_available, mix_and_render
+from backend.services.media_mixer import check_ffmpeg_available
+from backend.services.synthesis import LLMNotConfiguredError
 from backend.services.task_runner import (
     GpuBusyError,
+    ParseWorkerError,
     get_parse_progress,
     is_gpu_busy,
     probe_media_duration,
@@ -39,7 +47,6 @@ from backend.services.task_runner import (
 from backend.services.tts_client import (
     TTSServiceUnavailableError,
     check_tts_service,
-    synthesize_segments_grouped,
 )
 
 # 确保挂载目录存在，避免 StaticFiles 初始化报错
@@ -81,6 +88,11 @@ def _err_detail(exc: Exception) -> str:
 @app.exception_handler(GpuBusyError)
 def _gpu_busy_handler(_: Request, exc: GpuBusyError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": _err_detail(exc)})
+
+
+@app.exception_handler(ParseWorkerError)
+def _parse_worker_handler(_: Request, exc: ParseWorkerError) -> JSONResponse:
+    return JSONResponse(status_code=500, content={"detail": _err_detail(exc)})
 
 
 @app.exception_handler(TTSServiceUnavailableError)
@@ -251,42 +263,31 @@ def get_project_parse_status(project_id: str) -> Dict[str, object]:
 def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
     """启动 env_parse 子进程执行离线解析并生成 script.json（受 GPU 单任务锁保护）。"""
     safe_id = _validate_project_id(project_id)
-    existing_script: ProjectScript | None = None
-    try:
-        existing_script = load_project_script(safe_id)
-    except FileNotFoundError:
-        existing_script = None
+    with project_task_guard(safe_id):
+        existing_script: ProjectScript | None = None
+        try:
+            existing_script = load_project_script(safe_id)
+        except FileNotFoundError:
+            existing_script = None
 
-    input_path = _find_input_media(safe_id, existing_script)
-    mode = existing_script.mode if existing_script else "video_dubbing"
+        input_path = _find_input_media(safe_id, existing_script)
+        mode = existing_script.mode if existing_script else "video_dubbing"
 
-    run_parse_worker(
-        project_id=safe_id,
-        input_path=input_path,
-        target_lang=req.target_lang,
-        compute_type=req.compute_type,
-        mode=mode,
-    )
-    return load_project_script(safe_id)
+        run_parse_worker(
+            project_id=safe_id,
+            input_path=input_path,
+            target_lang=req.target_lang,
+            compute_type=req.compute_type,
+            mode=mode,
+            allow_demucs_cpu=req.allow_demucs_cpu,
+        )
+        return load_project_script(safe_id)
 
 
 @app.post("/api/projects/{project_id}/synthesize", response_model=SynthesizeResponse)
 def synthesize_project_segments(project_id: str, req: SynthesizeRequest) -> SynthesizeResponse:
-    """按 speaker 分组调用 GPT-SoVITS 合成片段，保存 script.json 并返回时长质检结果。"""
-    safe_id = _validate_project_id(project_id)
-    script = load_project_script(safe_id)
-    synthesized_ids, overflow_segments, errors = synthesize_segments_grouped(
-        script,
-        segment_ids=req.segment_ids,
-    )
-    save_project_script(script)
-    return SynthesizeResponse(
-        project_id=safe_id,
-        synthesized_ids=synthesized_ids,
-        overflow_segments=overflow_segments,
-        errors=errors,
-        script=script,
-    )
+    """分组配音并执行时长闭环，返回最终剧本和剩余超长。"""
+    return synthesize_project(_validate_project_id(project_id), req.segment_ids)
 
 
 @app.post("/api/projects/{project_id}/agent/chat", response_model=AgentChatResponse)
@@ -304,13 +305,7 @@ def agent_chat(project_id: str, req: AgentChatRequest) -> AgentChatResponse:
 def render_project_video(project_id: str, req: RenderRequest) -> RenderResponse:
     """执行 pydub 毫秒拼轨与 FFmpeg 混音封装，导出 output.mp4（或虚拟舞台音频）。"""
     safe_id = _validate_project_id(project_id)
-    script = load_project_script(safe_id)
-    output_video, duration = mix_and_render(script, burn_watermark=req.burn_watermark)
-    script.media.output_video = output_video
-    save_project_script(script)
     return RenderResponse(
         project_id=safe_id,
-        output_video=output_video,
-        duration=duration,
-        burn_watermark=req.burn_watermark,
+        **render_final_video(safe_id, burn_watermark=req.burn_watermark),
     )

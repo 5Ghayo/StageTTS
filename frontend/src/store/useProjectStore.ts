@@ -15,6 +15,7 @@ import type {
   ProjectScript,
   SegmentPatch,
 } from "../types/script";
+import { synthesisIssues } from "../utils/synthesisIssues";
 
 /**
  * 为静态音频/视频资源 URL 拼接防缓存时间戳（ARCHITECTURE.md 铁律 #8）。
@@ -88,6 +89,7 @@ interface ProjectState {
   synthesizeSegment: (segmentIds?: number[]) => Promise<{
     simulated: boolean;
     message: string;
+    issues?: string[];
   }>;
 }
 
@@ -109,6 +111,7 @@ function applyPatchToSegments(
     "target_lang",
     "emotion",
     "keep_original",
+    "speed_factor",
   ]);
   const patchMap = new Map<number, SegmentPatch>();
   for (const p of patches) {
@@ -589,24 +592,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     set({ isSynthesizing: true, error: null });
     try {
+      if (state.isDirty) {
+        await apiSaveProjectScript(script);
+      }
       const res = await apiSynthesizeSegments(script.project_id, targetIds);
+      const issues = synthesisIssues(res);
+      const message = `已合成 ${res.synthesized_ids.length} 条${issues.length ? ` · ${issues[0]}` : ""}`;
       get().bumpAudioVersion(res.synthesized_ids);
       set({
         script: res.script,
         isSynthesizing: false,
         isDirty: false,
         backendStatus: "online",
-        lastSyncMessage: `已完成 ${res.synthesized_ids.length} 条配音合成`,
+        lastSyncMessage: message,
       });
       return {
         simulated: false,
-        message: `已完成 ${res.synthesized_ids.length} 条配音合成`,
+        message,
+        issues,
       };
     } catch (err) {
       const isUnavailableOrOffline =
         err instanceof ApiError &&
-        (err.status === 503 ||
-          err.status === 502 ||
+        (err.status === 502 ||
           err.status === 504 ||
           err.isNotImplemented ||
           err.isNetworkError);
@@ -618,6 +626,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         return {
           simulated: false,
           message: err instanceof Error ? err.message : "合成失败",
+          issues: [err instanceof Error ? err.message : "合成失败"],
         };
       }
       return applyLocalSimulatedSynth("语音服务未启动，已执行本地演示合成");

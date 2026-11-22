@@ -82,9 +82,16 @@ export const TopMenuBar: React.FC = () => {
       return;
     }
     setActionToast("正在按需启动 GPT-SoVITS 并配音...");
-    const res = await synthesizeSegment();
+    const ids = pendingCount === 0
+      ? script.segments.filter((seg) => !seg.keep_original).map((seg) => seg.id)
+      : undefined;
+    const res = await synthesizeSegment(ids);
     setActionToast(res.message);
-    appendLog("env_tts", res.message, res.simulated ? "warn" : "success");
+    if (res.issues?.length) {
+      res.issues.forEach((issue) => appendLog("env_tts", issue, "warn"));
+    } else {
+      appendLog("env_tts", res.message, res.simulated ? "warn" : "success");
+    }
     window.setTimeout(() => setActionToast(null), 4000);
   };
 

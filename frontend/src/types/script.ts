@@ -53,6 +53,7 @@ export interface Segment {
   keep_original: boolean;
   speed_factor: number;
   tts_wav: string | null;
+  applied_speed_factor?: number | null;
   actual_duration: number | null;
   status: SegmentStatus;
 }
@@ -103,6 +104,7 @@ export interface AgentChatResponse {
   project_id: string;
   reply: string;
   tool_logs: ToolCallLog[];
+  synthesized_ids: number[];
   script: ProjectScript;
 }
 

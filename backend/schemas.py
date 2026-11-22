@@ -69,6 +69,7 @@ class Segment(BaseModel):
     keep_original: bool = Field(default=False, description="为 True 时保留原声不走 TTS 替换")
     speed_factor: float = Field(default=1.0, ge=0.5, le=2.0, description="温和变速系数（反思闭环后建议 <= 1.15）")
     tts_wav: Optional[str] = Field(default=None, description="合成后单句音频 URL")
+    applied_speed_factor: Optional[float] = Field(default=None, ge=0.5, le=2.0, description="已写入 WAV 的倍率，旧音频为空")
     actual_duration: Optional[float] = Field(default=None, ge=0.0, description="实际合成音频时长（秒）")
     status: SegmentStatus = Field(default="pending", description="片段当前合成状态")
 
@@ -99,6 +100,7 @@ class ParseRequest(BaseModel):
 
     target_lang: str = Field(default="zh", description="目标翻译语种")
     compute_type: Literal["float16", "int8"] = Field(default="float16", description="WhisperX 计算精度")
+    allow_demucs_cpu: bool = Field(default=False, description="允许使用 CPU 运行 Demucs，可能耗时较长")
 
 
 class SegmentPatch(BaseModel):
@@ -165,6 +167,7 @@ class AgentChatResponse(BaseModel):
     project_id: str
     reply: str
     tool_logs: List[ToolCallLog] = Field(default_factory=list)
+    synthesized_ids: List[int] = Field(default_factory=list)
     script: ProjectScript
 
 

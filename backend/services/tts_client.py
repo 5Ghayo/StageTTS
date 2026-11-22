@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import wave
 from collections import defaultdict
 from pathlib import Path
@@ -16,8 +17,8 @@ from backend.schemas import (
     EmotionRef,
     ProjectScript,
     Segment,
-    SegmentDurationCheck,
 )
+from backend.services.media_mixer import apply_gentle_tempo
 from backend.services.task_runner import ensure_tts_running, gpu_task_guard
 
 
@@ -95,7 +96,8 @@ def _extract_zeroshot_ref(
     start_ms = max(0, int(chosen.start * 1000))
     end_ms = max(start_ms + 3000, min(int(chosen.end * 1000), start_ms + 8000))
 
-    audio = AudioSegment.from_file(str(vocals_path))
+    with vocals_path.open("rb") as source:
+        audio = AudioSegment.from_file(source)
     if start_ms >= len(audio):
         return None
     clip = audio[start_ms : min(len(audio), end_ms)]
@@ -103,7 +105,8 @@ def _extract_zeroshot_ref(
         return None
 
     out_path = tts_dir / f"_zeroshot_{speaker}.wav"
-    clip.export(str(out_path), format="wav")
+    with out_path.open("wb") as output:
+        clip.export(output, format="wav")
     prompt_text = chosen.orig_text.strip() or chosen.target_text.strip() or "这是一段参考语音。"
     prompt_lang = _guess_prompt_lang(prompt_text, chosen.target_lang or "zh")
     return EmotionRef(wav=str(out_path), text=prompt_text, lang=prompt_lang), out_path
@@ -173,7 +176,7 @@ def _switch_weights(
             _active_sovits_weights = resolved_sovits
 
 
-def _measure_wav_duration(wav_path: Path) -> float:
+def measure_wav_duration(wav_path: Path) -> float:
     """精确测量合成 WAV 文件时长（秒）。"""
     try:
         with wave.open(str(wav_path), "rb") as wf:
@@ -182,7 +185,8 @@ def _measure_wav_duration(wav_path: Path) -> float:
                 return round(wf.getnframes() / float(rate), 3)
     except (wave.Error, EOFError):
         pass
-    audio = AudioSegment.from_file(str(wav_path))
+    with wav_path.open("rb") as source:
+        audio = AudioSegment.from_wav(source)
     return round(len(audio) / 1000.0, 3)
 
 
@@ -192,14 +196,14 @@ def _synthesize_single_line(
     ref: EmotionRef,
     ref_path: Path,
     out_wav: Path,
-) -> float:
+) -> None:
     payload = {
         "text": seg.target_text,
         "text_lang": seg.target_lang or "zh",
         "ref_audio_path": str(ref_path),
         "prompt_text": ref.text,
         "prompt_lang": ref.lang or "zh",
-        "speed_factor": float(seg.speed_factor),
+        "speed_factor": 1.0,
         "media_type": "wav",
     }
     try:
@@ -221,20 +225,21 @@ def _synthesize_single_line(
         raise RuntimeError(f"片段 #{seg.id} TTS 返回空音频流")
 
     out_wav.write_bytes(resp.content)
-    return _measure_wav_duration(out_wav)
 
 
 def synthesize_segments_grouped(
     script: ProjectScript,
     segment_ids: Optional[List[int]] = None,
-) -> Tuple[List[int], List[SegmentDurationCheck], List[str]]:
+    *,
+    require_shorter: bool = False,
+) -> Tuple[List[int], List[str]]:
     """按 speaker 分组批量调用 GPT-SoVITS (api_v2.py) 合成单句 WAV。
 
     严格遵守 ARCHITECTURE.md 铁律：
     1. 过滤 keep_original == True 的片段；segment_ids 为 None 时合成全部非 ready 片段。
     2. 先按 speaker 分组，每个角色最多切换一次 GPT/SoVITS 权重。
     3. 动态情绪参考音频路由 + 缺失时零样本截取 vocals.wav 兜底。
-    4. 检测 actual_duration > (end - start) * 1.15 并返回 overflow_segments 供反思闭环处理。
+    4. 测量调速后的成品，成功后替换试听 WAV。
     """
     target_set = set(segment_ids) if segment_ids is not None else None
     grouped: Dict[str, List[Segment]] = defaultdict(list)
@@ -249,13 +254,12 @@ def synthesize_segments_grouped(
         grouped[seg.speaker].append(seg)
 
     if not grouped:
-        return [], [], []
+        return [], []
 
     tts_dir = config.WORKSPACE_DIR / script.project_id / "tts"
     tts_dir.mkdir(parents=True, exist_ok=True)
 
     synthesized_ids: List[int] = []
-    overflow_segments: List[SegmentDurationCheck] = []
     errors: List[str] = []
 
     with gpu_task_guard():
@@ -263,15 +267,18 @@ def synthesize_segments_grouped(
             ensure_tts_running()
         except RuntimeError as exc:
             raise TTSServiceUnavailableError(str(exc)) from exc
-        with requests.Session() as session:
+        with requests.Session() as session, tempfile.TemporaryDirectory(dir=tts_dir) as tmp_name:
+            tmp_dir = Path(tmp_name)
             for speaker, segs in grouped.items():
                 character = script.characters.get(speaker)
                 if character and (character.gpt_weights or character.sovits_weights):
-                    _switch_weights(
-                        session,
-                        character.gpt_weights,
-                        character.sovits_weights,
-                    )
+                    try:
+                        _switch_weights(session, character.gpt_weights, character.sovits_weights)
+                    except RuntimeError as exc:
+                        for seg in segs:
+                            seg.status = "error"
+                            errors.append(f"片段 #{seg.id} 加载角色权重失败：{exc}")
+                        continue
 
                 for seg in segs:
                     if not seg.target_text.strip():
@@ -279,50 +286,30 @@ def synthesize_segments_grouped(
                         errors.append(f"片段 #{seg.id} 目标台词为空，跳过合成")
                         continue
 
-                    resolved = _resolve_ref_for_segment(
-                        script, character, seg, tts_dir
-                    )
-                    if resolved is None:
-                        seg.status = "error"
-                        errors.append(
-                            f"片段 #{seg.id} ({speaker}) 缺少有效情绪参考音频且无法从 vocals.wav 兜底"
-                        )
-                        continue
-
-                    ref_obj, ref_path = resolved
                     out_name = f"seg_{seg.id:04d}.wav"
-                    out_wav = tts_dir / out_name
                     try:
-                        seg.status = "synthesizing"
-                        actual_duration = _synthesize_single_line(
-                            session, seg, ref_obj, ref_path, out_wav
-                        )
-                    except TTSServiceUnavailableError:
-                        seg.status = "error"
-                        raise
+                        resolved = _resolve_ref_for_segment(script, character, seg, tts_dir)
+                        if resolved is None:
+                            raise RuntimeError("缺少有效情绪参考且无法从 vocals.wav 截取")
+                        ref_obj, ref_path = resolved
+                        raw_wav = tmp_dir / out_name
+                        _synthesize_single_line(session, seg, ref_obj, ref_path, raw_wav)
+                        finished_wav = apply_gentle_tempo(raw_wav, seg.speed_factor, tmp_dir)
+                        actual_duration = measure_wav_duration(finished_wav)
+                        if actual_duration <= 0:
+                            raise RuntimeError("合成音频没有有效时长")
+                        if require_shorter and seg.actual_duration is not None and actual_duration >= seg.actual_duration:
+                            raise RuntimeError("改写后的配音未缩短，保留上一版")
+                        finished_wav.replace(tts_dir / out_name)
                     except Exception as exc:
                         seg.status = "error"
-                        errors.append(str(exc))
+                        errors.append(f"片段 #{seg.id} 合成失败：{exc}")
                         continue
 
                     seg.tts_wav = f"/workspace/{script.project_id}/tts/{out_name}"
                     seg.actual_duration = actual_duration
+                    seg.applied_speed_factor = seg.speed_factor
                     seg.status = "ready"
                     synthesized_ids.append(seg.id)
 
-                    slot_duration = max(0.01, round(seg.end - seg.start, 3))
-                    overflow_ratio = round(actual_duration / slot_duration, 3)
-                    overflow_seconds = round(actual_duration - slot_duration, 3)
-                    if actual_duration > slot_duration * config.DURATION_OVERFLOW_RATIO:
-                        overflow_segments.append(
-                            SegmentDurationCheck(
-                                segment_id=seg.id,
-                                slot_duration=slot_duration,
-                                actual_duration=actual_duration,
-                                overflow_ratio=overflow_ratio,
-                                overflow_seconds=overflow_seconds,
-                                needs_reflection=True,
-                            )
-                        )
-
-    return synthesized_ids, overflow_segments, errors
+    return synthesized_ids, errors

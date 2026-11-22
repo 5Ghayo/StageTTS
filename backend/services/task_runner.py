@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import atexit
+import ipaddress
 import json
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import threading
 import time
@@ -22,6 +25,10 @@ from backend import config
 
 class GpuBusyError(RuntimeError):
     """当已有 GPU 重任务在运行时，拒绝并发请求以防止 8GB 显存 OOM。"""
+
+
+class ParseWorkerError(RuntimeError):
+    """解析子进程无法完成任务。"""
 
 
 class GpuTaskLock:
@@ -80,7 +87,7 @@ def _probe_tts_ready(timeout: float = 1.0) -> bool:
 
 
 def ensure_tts_stopped() -> bool:
-    """若当前有受控 GPT-SoVITS 进程在运行，则优雅终止以释放 100% GPU 显存。"""
+    """停止后端持有的 GPT-SoVITS 进程，等它退出后才释放句柄。"""
     global _tts_proc, _tts_log_fp
     stopped = False
     with _tts_proc_lock:
@@ -92,8 +99,6 @@ def ensure_tts_stopped() -> bool:
                 except subprocess.TimeoutExpired:
                     _tts_proc.kill()
                     _tts_proc.wait(timeout=3)
-                except Exception:
-                    pass
                 stopped = True
             _tts_proc = None
         if _tts_log_fp is not None:
@@ -114,6 +119,37 @@ def ensure_tts_stopped() -> bool:
         # 给 Windows WDDM 驱动 1 秒时间回收显存
         time.sleep(1.0)
     return stopped
+
+
+def _prepare_gpu_for_parse() -> None:
+    try:
+        stopped = config.TTS_AUTO_MANAGE and ensure_tts_stopped()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GpuBusyError("无法确认受管 GPT-SoVITS 已退出，请停止该服务后重试解析。") from exc
+
+    endpoint = urlparse(config.TTS_API_URL)
+    host = endpoint.hostname or "localhost"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address and address.is_unspecified:
+        host = "127.0.0.1" if address.version == 4 else "::1"
+        address = ipaddress.ip_address(host)
+    if host == "localhost" or (address and address.is_loopback):
+        port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                pass
+        except OSError:
+            pass
+        else:
+            raise GpuBusyError(
+                f"本机 GPT-SoVITS 端口 {port} 仍在监听，可能占用同一张显卡。"
+                "请停止手动启动的服务后重试，或将 TTS_API_URL 指向另一台机器。"
+            )
+    if stopped:
+        _record_parse_line("[parse_worker][Init] 已确认受管 GPT-SoVITS 退出")
 
 
 def ensure_tts_running() -> None:
@@ -191,6 +227,7 @@ _parse_progress: Dict[str, Any] = {
     "project_id": None,
     "stage": "idle",
     "logs": [],
+    "log_count": 0,
     "error": None,
     "updated_at": 0.0,
 }
@@ -205,6 +242,7 @@ def _reset_parse_progress(project_id: str) -> None:
                 "project_id": project_id,
                 "stage": "Init",
                 "logs": [],
+                "log_count": 0,
                 "error": None,
                 "updated_at": time.time(),
             }
@@ -220,12 +258,15 @@ def _record_parse_line(line: str) -> None:
         if match:
             _parse_progress["stage"] = match.group(1)
             entry = f"[{match.group(1)}] {match.group(2)}"
-            _parse_progress["logs"] = (_parse_progress["logs"] + [entry])[-60:]
         elif any(
             kw in cleaned
             for kw in ("Detected language", "Loading diarization", "Downloading:", "ERROR", "Traceback")
         ):
-            _parse_progress["logs"] = (_parse_progress["logs"] + [cleaned[:220]])[-60:]
+            entry = cleaned[:220]
+        else:
+            return
+        _parse_progress["logs"] = (_parse_progress["logs"] + [entry])[-60:]
+        _parse_progress["log_count"] += 1
         _parse_progress["updated_at"] = time.time()
 
 
@@ -249,6 +290,7 @@ def get_parse_progress(project_id: Optional[str] = None) -> Dict[str, Any]:
                 "project_id": project_id,
                 "stage": "idle",
                 "logs": [],
+                "log_count": 0,
                 "error": None,
                 "updated_at": time.time(),
             }
@@ -257,6 +299,7 @@ def get_parse_progress(project_id: Optional[str] = None) -> Dict[str, Any]:
             "project_id": _parse_progress["project_id"],
             "stage": _parse_progress["stage"],
             "logs": list(_parse_progress["logs"]),
+            "log_count": _parse_progress["log_count"],
             "error": _parse_progress["error"],
             "updated_at": _parse_progress["updated_at"],
         }
@@ -314,6 +357,7 @@ def run_parse_worker(
     target_lang: str = "zh",
     compute_type: Optional[str] = None,
     mode: str = "video_dubbing",
+    allow_demucs_cpu: bool = False,
 ) -> Path:
     """以独立子进程启动 workers/parse_worker.py（运行在 env_parse）。
 
@@ -328,7 +372,7 @@ def run_parse_worker(
 
     python_bin = config.ENV_PARSE_PYTHON
     if not Path(python_bin).is_file() and shutil.which(python_bin) is None:
-        raise RuntimeError(
+        raise ParseWorkerError(
             f"未找到 env_parse Python 可执行文件: {python_bin}。请检查 backend/.env 中的 ENV_PARSE_PYTHON 配置。"
         )
 
@@ -354,6 +398,8 @@ def run_parse_worker(
         "--mode",
         mode,
     ]
+    if allow_demucs_cpu:
+        cmd.append("--allow-demucs-cpu")
 
     sub_env = os.environ.copy()
     sub_env["PYTHONUTF8"] = "1"
@@ -374,8 +420,11 @@ def run_parse_worker(
 
     with gpu_task_guard():
         _reset_parse_progress(project_id)
-        if config.TTS_AUTO_MANAGE and ensure_tts_stopped():
-            _record_parse_line("[parse_worker][Init] 已自动停止 GPT-SoVITS 并释放 GPU 显存，准备独占显卡解析")
+        try:
+            _prepare_gpu_for_parse()
+        except GpuBusyError as exc:
+            _finish_parse_progress(error=str(exc))
+            raise
         collected_lines: List[str] = []
         proc: Optional[subprocess.Popen[str]] = None
         try:
@@ -389,6 +438,7 @@ def run_parse_worker(
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                start_new_session=os.name != "nt",
             )
 
             def _drain_stdout() -> None:
@@ -402,31 +452,45 @@ def run_parse_worker(
             try:
                 returncode = proc.wait(timeout=config.PARSE_TIMEOUT_SEC)
             except subprocess.TimeoutExpired as exc:
-                proc.kill()
+                if os.name == "nt":
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                            capture_output=True, timeout=5,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                    if proc.poll() is None:
+                        proc.kill()
+                else:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                proc.wait()
                 reader.join(timeout=3)
                 err_msg = f"parse_worker 执行超时（>{config.PARSE_TIMEOUT_SEC}s）"
                 _finish_parse_progress(error=err_msg)
-                raise RuntimeError(err_msg) from exc
+                raise ParseWorkerError(err_msg) from exc
 
             reader.join(timeout=5)
-        except RuntimeError:
+        except ParseWorkerError:
             raise
         except Exception as exc:
             err_msg = f"启动 parse_worker 失败: {exc}"
             _finish_parse_progress(error=err_msg)
-            raise RuntimeError(err_msg) from exc
+            raise ParseWorkerError(err_msg) from exc
 
         if returncode != 0:
             tail = "".join(collected_lines).strip()[-800:]
             err_msg = f"parse_worker 子进程异常退出 (code={returncode}): {tail or '无日志输出'}"
             _finish_parse_progress(error=err_msg)
-            raise RuntimeError(err_msg)
+            raise ParseWorkerError(err_msg)
 
-        _finish_parse_progress(error=None)
-
-    script_path = output_dir / "script.json"
-    if not script_path.is_file():
-        raise RuntimeError(
-            f"parse_worker 退出码为 0，但未在预期位置生成 script.json: {script_path}"
-        )
+        script_path = output_dir / "script.json"
+        if not script_path.is_file():
+            err_msg = "parse_worker 已退出，但没有生成 script.json"
+            _finish_parse_progress(error=err_msg)
+            raise ParseWorkerError(err_msg)
+        _finish_parse_progress()
     return script_path

@@ -89,7 +89,9 @@ export const Inspector: React.FC = () => {
   const recommendedChars = Math.max(2, Math.floor(slotDuration * 5));
   const actualDuration = segment.actual_duration;
   const fillRatio = actualDuration ? actualDuration / slotDuration : 0;
-  const isOverflow = actualDuration !== null && fillRatio > 1.15;
+  const isOverflow = actualDuration !== null && (
+    segment.applied_speed_factor == null ? fillRatio > 1.15 : actualDuration - slotDuration > 0.020
+  );
 
   const effectiveDuration =
     auditionDuration > 0 ? auditionDuration : fallbackDuration;

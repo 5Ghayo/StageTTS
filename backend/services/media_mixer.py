@@ -20,10 +20,10 @@ def check_ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _apply_gentle_tempo(wav_path: Path, speed_factor: float, tmp_dir: Path) -> Path:
+def apply_gentle_tempo(wav_path: Path, speed_factor: float, tmp_dir: Path) -> Path:
     """调用 FFmpeg atempo 滤镜对单句做不变调温和变速（限 0.5 ~ 2.0）。"""
     factor = max(0.5, min(2.0, float(speed_factor)))
-    if abs(factor - 1.0) < 0.01:
+    if round(factor, 3) == 1.0:
         return wav_path
 
     out_path = tmp_dir / f"{wav_path.stem}_spd.wav"
@@ -79,7 +79,8 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
         try:
             vocals_path = config.resolve_media_path(script.media.vocals_wav)
             if vocals_path.is_file():
-                vocals_audio = AudioSegment.from_file(str(vocals_path))
+                with vocals_path.open("rb") as source:
+                    vocals_audio = AudioSegment.from_file(source)
         except ValueError:
             vocals_audio = None
 
@@ -97,7 +98,7 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
                 vocal_track = vocal_track.overlay(clip, position=pos_ms)
                 continue
 
-            if not seg.tts_wav:
+            if not seg.tts_wav or (seg.applied_speed_factor is not None and seg.status != "ready"):
                 continue
             try:
                 tts_path = config.resolve_media_path(seg.tts_wav)
@@ -106,25 +107,26 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
             if not tts_path.is_file():
                 continue
 
-            effective_speed = float(seg.speed_factor)
-            raw_clip = AudioSegment.from_file(str(tts_path))
-            raw_sec = len(raw_clip) / 1000.0
-            slot_sec = max(0.05, seg.end - seg.start)
-
-            # 对未经用户手动调速但存在微小溢出 (1.02 ~ 1.15x) 的片段施加温和不变调变速防撞句
-            if abs(effective_speed - 1.0) < 0.01 and slot_sec * 1.02 < raw_sec <= slot_sec * config.MAX_GENTLE_SPEED:
-                effective_speed = min(config.MAX_GENTLE_SPEED, round(raw_sec / slot_sec, 3))
-
-            if abs(effective_speed - 1.0) >= 0.02:
-                adjusted_path = _apply_gentle_tempo(tts_path, effective_speed, tmp_dir)
-                clip = AudioSegment.from_file(str(adjusted_path))
-            else:
-                clip = raw_clip
+            with tts_path.open("rb") as source:
+                raw_clip = AudioSegment.from_wav(source)
+            clip = raw_clip
+            if seg.applied_speed_factor is None:
+                # 旧项目的 WAV 仍沿用导出时变速。
+                speed = seg.speed_factor
+                raw_sec = len(raw_clip) / 1000.0
+                slot_sec = max(0.05, seg.end - seg.start)
+                if abs(speed - 1.0) < 0.01 and slot_sec * 1.02 < raw_sec <= slot_sec * config.MAX_GENTLE_SPEED:
+                    speed = min(config.MAX_GENTLE_SPEED, round(raw_sec / slot_sec, 3))
+                if abs(speed - 1.0) >= 0.02:
+                    adjusted_path = apply_gentle_tempo(tts_path, speed, tmp_dir)
+                    with adjusted_path.open("rb") as source:
+                        clip = AudioSegment.from_wav(source)
 
             vocal_track = vocal_track.overlay(clip, position=pos_ms)
 
     dubbed_path = project_dir / "dubbed_vocals.wav"
-    vocal_track.export(str(dubbed_path), format="wav")
+    with dubbed_path.open("wb") as output:
+        vocal_track.export(output, format="wav")
     return dubbed_path
 
 

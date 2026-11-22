@@ -70,6 +70,7 @@ export interface ParseStatusResponse {
   project_id: string | null;
   stage: string;
   logs: string[];
+  log_count?: number;
   error: string | null;
   updated_at: number;
 }
@@ -119,7 +120,7 @@ export function saveProjectScript(script: ProjectScript): Promise<ProjectScript>
 
 export function parseProjectMedia(
   projectId: string,
-  options: { target_lang: string; compute_type: "float16" | "int8" }
+  options: { target_lang: string; compute_type: "float16" | "int8"; allow_demucs_cpu?: boolean }
 ): Promise<ProjectScript> {
   return requestJson<ProjectScript>(
     `/api/projects/${encodeURIComponent(projectId)}/parse`,

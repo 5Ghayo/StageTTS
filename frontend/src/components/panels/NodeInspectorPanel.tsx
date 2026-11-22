@@ -53,6 +53,17 @@ export const NodeInspectorPanel: React.FC = () => {
         </div>
       </div>
 
+      {selectedNode.id === "demucs" && (
+        <label className="flex items-center gap-2 border-b border-dashed border-white/[0.08] pb-3 text-secondary">
+          <input
+            type="checkbox"
+            checked={pipelineConfig.allowDemucsCpu}
+            onChange={(e) => updatePipelineConfig({ allowDemucsCpu: e.target.checked })}
+          />
+          允许 CUDA 不可用或失败时用 CPU 分离（较慢）
+        </label>
+      )}
+
       {/* 识别精度控制 */}
       {selectedNode.id === "whisperx" && (
         <div className="space-y-2 border-b border-dashed border-white/[0.08] pb-3">
@@ -108,59 +119,6 @@ export const NodeInspectorPanel: React.FC = () => {
             <option value="en">英文配音</option>
             <option value="ja">日语配音</option>
           </select>
-        </div>
-      )}
-
-      {/* 时长反思参数 */}
-      {selectedNode.id === "agent_tts" && (
-        <div className="space-y-3 border-b border-dashed border-white/[0.08] pb-3">
-          <div className="space-y-1">
-            <div className="flex justify-between text-[11px]">
-              <span className="whitespace-nowrap text-secondary">
-                超时反思触发阈值
-              </span>
-              <span className="font-mono tabular-nums text-primary">
-                +{Math.round((pipelineConfig.overflowRatio - 1) * 100)}%
-              </span>
-            </div>
-            <input
-              type="range"
-              min={1.05}
-              max={1.3}
-              step={0.05}
-              value={pipelineConfig.overflowRatio}
-              onChange={(e) =>
-                updatePipelineConfig({
-                  overflowRatio: Number(e.target.value),
-                })
-              }
-              className="w-full"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <div className="flex justify-between text-[11px]">
-              <span className="whitespace-nowrap text-secondary">
-                最大自动改写轮数
-              </span>
-              <span className="font-mono tabular-nums text-primary">
-                {pipelineConfig.maxReflectionRounds} 轮
-              </span>
-            </div>
-            <input
-              type="range"
-              min={1}
-              max={3}
-              step={1}
-              value={pipelineConfig.maxReflectionRounds}
-              onChange={(e) =>
-                updatePipelineConfig({
-                  maxReflectionRounds: Number(e.target.value),
-                })
-              }
-              className="w-full"
-            />
-          </div>
         </div>
       )}
 

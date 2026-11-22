@@ -55,6 +55,8 @@ from backend.schemas import (  # noqa: E402
     Segment,
 )
 
+from workers.demucs_stage import separate_stems  # noqa: E402
+
 VALID_EMOTIONS = {"neutral", "angry", "happy", "sad", "whisper"}
 SPEAKER_PALETTE = [
     "#3b82f6",
@@ -223,68 +225,23 @@ def _stage_demucs(
     output_dir: Path,
     device: str,
     skip_demucs: bool,
+    allow_cpu: bool,
 ) -> Tuple[Path, Optional[Path]]:
-    """阶段 1：以独立子进程运行 Demucs 分离纯人声与伴奏，退出即由 OS 100% 释放显存。"""
-    vocals_out = output_dir / "vocals.wav"
-    bgm_out = output_dir / "bgm.wav"
-
     if skip_demucs:
-        shutil.copyfile(extracted_wav, vocals_out)
-        _log("Stage1", "已跳过 Demucs，直接使用原始人声轨")
-        return vocals_out, None
+        _log("Stage1", "已跳过 Demucs，使用未分离音频")
+    else:
+        separated = separate_stems(
+            extracted_wav, output_dir, device, allow_cpu, lambda message: _log("Stage1", message),
+        )
+        if separated is not None:
+            _log("Stage1", "Demucs 分离完成，已输出人声和伴奏")
+            return separated
+        if not allow_cpu:
+            _log("Stage1", "CUDA 分离未完成，使用未分离音频。可在「人声分离」节点启用 CPU 后重新解析。")
+        else:
+            _log("Stage1", "Demucs 未能分离音轨，使用未分离音频继续解析")
 
-    attempts = [device, "cpu"] if device == "cuda" else ["cpu"]
-    last_error = ""
-
-    with tempfile.TemporaryDirectory(prefix="stagetts_demucs_") as tmp_name:
-        tmp_dir = Path(tmp_name)
-        for target_dev in attempts:
-            _log("Stage1", f"启动 Demucs (htdemucs, device={target_dev}) 分离人声与伴奏...")
-            cmd = [
-                sys.executable,
-                "-m",
-                "demucs",
-                "-n",
-                "htdemucs",
-                "--two-stems=vocals",
-                "--segment",
-                "7",
-                "-d",
-                target_dev,
-                "-o",
-                str(tmp_dir),
-                str(extracted_wav),
-            ]
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=900,
-            )
-            if proc.returncode == 0:
-                stem_dir = tmp_dir / "htdemucs" / extracted_wav.stem
-                vocals_src = stem_dir / "vocals.wav"
-                bgm_src = stem_dir / "no_vocals.wav"
-                if vocals_src.is_file():
-                    shutil.copyfile(vocals_src, vocals_out)
-                    if bgm_src.is_file():
-                        shutil.copyfile(bgm_src, bgm_out)
-                        _log("Stage1", f"Demucs 分离成功 ({target_dev}) -> vocals.wav + bgm.wav")
-                        return vocals_out, bgm_out
-                    _log("Stage1", f"Demucs 分离成功 ({target_dev}) -> vocals.wav")
-                    return vocals_out, None
-            raw_err = (proc.stderr or proc.stdout or "").replace("\r", "\n")
-            err_lines = [
-                ln.strip()
-                for ln in raw_err.splitlines()
-                if ln.strip() and "seconds/s]" not in ln and "%|" not in ln
-            ]
-            last_error = " | ".join(err_lines[-3:]) if err_lines else raw_err.strip()[-300:]
-            _log("Stage1", f"Demucs ({target_dev}) 失败 (code={proc.returncode})，尝试回退：{last_error[-260:]}")
-
-    _log("Stage1", f"Demucs 全部尝试失败，降级使用未分离音频继续解析。详情: {last_error[-260:]}")
+    vocals_out = output_dir / "vocals.wav"
     shutil.copyfile(extracted_wav, vocals_out)
     return vocals_out, None
 
@@ -650,7 +607,10 @@ def _build_and_save_script(
     )
 
     script_out = args.output_dir / "script.json"
-    script_out.write_text(script.model_dump_json(indent=2), encoding="utf-8")
+    with tempfile.TemporaryDirectory(dir=args.output_dir) as temp:
+        draft = Path(temp) / script_out.name
+        draft.write_text(script.model_dump_json(indent=2), encoding="utf-8")
+        draft.replace(script_out)
     _log(
         "Done",
         f"script.json 生成并校验通过：{len(segments)} 条片段，{len(characters)} 个角色 -> {script_out}",
@@ -687,6 +647,7 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cuda", "cpu"],
         help="计算设备（默认 auto 自动探测 CUDA 并支持 OOM 降级）",
     )
+    parser.add_argument("--allow-demucs-cpu", action="store_true", help="允许 Demucs 在 CPU 上分离")
     parser.add_argument("--skip-demucs", action="store_true", help="跳过 Demucs 人声分离（纯播客快速模式）")
     parser.add_argument("--skip-diarization", action="store_true", help="跳过 pyannote 说话人聚类")
     parser.add_argument("--skip-llm", action="store_true", help="跳过 LLM 翻译与情绪标注")
@@ -713,6 +674,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             output_dir=args.output_dir,
             device=device,
             skip_demucs=args.skip_demucs,
+            allow_cpu=args.allow_demucs_cpu or args.device == "cpu",
         )
 
     audio, aligned_result, _detected_lang = _stage_whisperx_asr_align(

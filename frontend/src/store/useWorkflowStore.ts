@@ -11,8 +11,10 @@ import {
   fetchParseStatus,
   parseProjectMedia,
   renderVideo,
+  saveProjectScript,
   synthesizeSegments,
 } from "../services/api";
+import { synthesisIssues } from "../utils/synthesisIssues";
 import { useProjectStore } from "./useProjectStore";
 import type {
   CenterViewTab,
@@ -132,11 +134,8 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         status: "idle",
         inputs: [{ id: "in-script", label: "标准剧本", type: "SCRIPT" }],
         outputs: [{ id: "out-wavs", label: "分句配音", type: "AUDIO[]" }],
-        summary: `超 ${Math.round((config.overflowRatio - 1) * 100)}% 改写 · ${config.maxReflectionRounds} 轮`,
-        params: {
-          overflow_ratio: config.overflowRatio,
-          max_rounds: config.maxReflectionRounds,
-        },
+        summary: "超 15% 时最多改写两轮",
+        params: { overflow_ratio: 1.15, max_rounds: 2 },
       },
     },
     {
@@ -284,8 +283,7 @@ function makeLog(
 const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
   computeType: "int8",
   targetLang: "zh",
-  overflowRatio: 1.15,
-  maxReflectionRounds: 2,
+  allowDemucsCpu: false,
   burnWatermark: false,
 };
 
@@ -427,20 +425,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
               params: {
                 ...node.data.params,
                 target_lang: nextConfig.targetLang,
-              },
-            },
-          };
-        }
-        if (node.id === "agent_tts") {
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              summary: `超 ${Math.round((nextConfig.overflowRatio - 1) * 100)}% 改写 · ${nextConfig.maxReflectionRounds} 轮`,
-              params: {
-                ...node.data.params,
-                overflow_ratio: nextConfig.overflowRatio,
-                max_rounds: nextConfig.maxReflectionRounds,
               },
             },
           };
@@ -596,32 +580,40 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           }
         };
 
-        const pollTimer = window.setInterval(() => {
-          void fetchParseStatus(activeScript.project_id)
-            .then((status) => {
-              if (status.stage && status.stage !== "idle") {
-                applyStageFromWorker(status.stage);
-              }
-              if (status.logs.length > seenLogCount) {
-                const newLogs = status.logs.slice(seenLogCount);
-                seenLogCount = status.logs.length;
-                for (const line of newLogs) {
-                  get().appendLog("env_parse", line, "info");
-                }
-              }
-            })
-            .catch(() => {
-              // 忽略偶发轮询抖动
-            });
-        }, 1200);
+        const refreshParseStatus = async (final = false) => {
+          try {
+            const status = await fetchParseStatus(currentScript.project_id);
+            if (!final && !status.active) {
+              return;
+            }
+            const count = status.log_count ?? status.logs.length;
+            if (count < seenLogCount) {
+              return;
+            }
+            if (status.stage && status.stage !== "idle") {
+              applyStageFromWorker(status.stage);
+            }
+            const firstNew = Math.max(0, status.logs.length - (count - seenLogCount));
+            for (const line of status.logs.slice(firstNew)) {
+              const level = /使用未分离音频|失败|显存不足/.test(line) ? "warn" : "info";
+              get().appendLog("env_parse", line, level);
+            }
+            seenLogCount = count;
+          } catch {
+            // 解析仍由 POST 请求跟踪。
+          }
+        };
+        const pollTimer = window.setInterval(() => void refreshParseStatus(), 1200);
 
         try {
           activeScript = await parseProjectMedia(activeScript.project_id, {
             target_lang: cfg.targetLang,
             compute_type: cfg.computeType,
+            allow_demucs_cpu: cfg.allowDemucsCpu,
           });
         } finally {
           window.clearInterval(pollTimer);
+          await refreshParseStatus(true);
         }
 
         // 将解析出的真实剧本写回全局项目状态（立即刷新时间轴与检查器）
@@ -662,6 +654,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       // -------------------------------------------------------------------
       // 阶段 B：调用真实后端 POST /api/projects/{id}/synthesize（GPT-SoVITS）
       // -------------------------------------------------------------------
+      if (!needsParse && projectState.isDirty) {
+        activeScript = await saveProjectScript(activeScript);
+      }
       const pendingIds = activeScript.segments
         .filter((s) => !s.keep_original && s.status !== "ready")
         .map((s) => s.id);
@@ -682,19 +677,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         useProjectStore.getState().setScript(activeScript);
         useProjectStore.getState().bumpAudioVersion(synthRes.synthesized_ids);
 
-        if (synthRes.errors.length > 0) {
-          get().appendLog(
-            "env_tts",
-            `部分片段合成失败 (${synthRes.errors.length} 条)：${synthRes.errors[0]}`,
-            "warn"
-          );
-        }
-        if (synthRes.overflow_segments.length > 0) {
-          get().appendLog(
-            "env_tts",
-            `检测到 ${synthRes.overflow_segments.length} 条片段超长（>1.15x），可在「剪辑 -> 智能体」触发自动精简`,
-            "warn"
-          );
+        for (const issue of synthesisIssues(synthRes)) {
+          get().appendLog("env_tts", issue, "warn");
         }
         get().appendLog(
           "env_tts",

@@ -20,6 +20,7 @@ export const AgentChat: React.FC = () => {
   const script = useProjectStore((s) => s.script);
   const backendStatus = useProjectStore((s) => s.backendStatus);
   const setScript = useProjectStore((s) => s.setScript);
+  const bumpAudioVersion = useProjectStore((s) => s.bumpAudioVersion);
   const batchUpdateSegmentsLocal = useProjectStore(
     (s) => s.batchUpdateSegmentsLocal
   );
@@ -181,6 +182,7 @@ export const AgentChat: React.FC = () => {
     try {
       const res = await sendAgentChat(script.project_id, trimmed, true);
       setScript(res.script);
+      bumpAudioVersion(res.synthesized_ids ?? []);
       setMessages((prev) => [
         ...prev,
         {
@@ -193,8 +195,7 @@ export const AgentChat: React.FC = () => {
     } catch (err) {
       const isUnavailableOrOffline =
         err instanceof ApiError &&
-        (err.status === 503 ||
-          err.status === 502 ||
+        (err.status === 502 ||
           err.status === 504 ||
           err.isNotImplemented ||
           err.isNetworkError);
