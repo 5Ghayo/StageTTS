@@ -11,10 +11,18 @@ export type SegmentStatus = "pending" | "synthesizing" | "ready" | "error";
 
 export type AvatarType = "live2d" | "vrm";
 
+export interface CinematicStems {
+  dialogue: string;
+  singing: string;
+  music: string;
+  effects: string;
+}
+
 export interface MediaInfo {
   source_video: string | null;
   vocals_wav: string | null;
   bgm_wav: string | null;
+  cinematic_stems?: CinematicStems | null;
   output_video: string | null;
   duration: number;
   bgm_volume: number;

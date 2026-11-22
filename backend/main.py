@@ -260,13 +260,18 @@ def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
     input_path = _find_input_media(safe_id, existing_script)
     mode = existing_script.mode if existing_script else "video_dubbing"
 
-    run_parse_worker(
-        project_id=safe_id,
-        input_path=input_path,
-        target_lang=req.target_lang,
-        compute_type=req.compute_type,
-        mode=mode,
-    )
+    try:
+        run_parse_worker(
+            project_id=safe_id,
+            input_path=input_path,
+            target_lang=req.target_lang,
+            compute_type=req.compute_type,
+            mode=mode,
+        )
+    except GpuBusyError:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return load_project_script(safe_id)
 
 

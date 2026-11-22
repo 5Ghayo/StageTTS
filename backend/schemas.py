@@ -14,12 +14,20 @@ SegmentStatus = Literal["pending", "synthesizing", "ready", "error"]
 AvatarType = Literal["live2d", "vrm"]
 
 
+class CinematicStems(BaseModel):
+    dialogue: str
+    singing: str
+    music: str
+    effects: str
+
+
 class MediaInfo(BaseModel):
     """项目关联音视频资源与全局混音参数。"""
 
     source_video: Optional[str] = Field(default=None, description="源视频或源音频 URL")
-    vocals_wav: Optional[str] = Field(default=None, description="Demucs 分离纯人声 URL")
-    bgm_wav: Optional[str] = Field(default=None, description="Demucs 分离背景伴奏 URL")
+    vocals_wav: Optional[str] = Field(default=None, description="供识别和参考音使用的人声或对白轨 URL")
+    bgm_wav: Optional[str] = Field(default=None, description="供导出使用的合并背景轨 URL")
+    cinematic_stems: Optional[CinematicStems] = Field(default=None, description="影视四轨分离结果")
     output_video: Optional[str] = Field(default=None, description="最终混音成片 URL")
     duration: float = Field(ge=0.0, description="媒体总时长（秒）")
     bgm_volume: float = Field(default=0.75, ge=0.0, le=2.0, description="BGM 混音音量系数")

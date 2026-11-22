@@ -213,7 +213,7 @@ export const TopMenuBar: React.FC = () => {
         >
           <Cpu className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
           <span>
-            5060 · {vramState.usedGb.toFixed(1)}/{vramState.limitGb.toFixed(0)}G
+            5060 · {vramState.usedGb?.toFixed(1) ?? "—"}/{vramState.limitGb.toFixed(0)}G
           </span>
         </div>
 

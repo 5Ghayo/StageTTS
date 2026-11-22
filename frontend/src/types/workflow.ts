@@ -26,7 +26,7 @@ export interface StageNodeData extends Record<string, unknown> {
   title: string;
   category: NodeCategory;
   env: EnvBadge;
-  vramGb: number;
+  vramGb: number | null;
   status: NodeRunStatus;
   inputs: PortSpec[];
   outputs: PortSpec[];
@@ -43,7 +43,7 @@ export interface PipelineConfig {
 }
 
 export interface VramState {
-  usedGb: number;
+  usedGb: number | null;
   limitGb: number;
   activeEnv: EnvBadge | "idle";
 }

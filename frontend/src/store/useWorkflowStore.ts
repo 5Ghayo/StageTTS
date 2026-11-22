@@ -48,22 +48,22 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
       },
     },
     {
-      id: "demucs",
+      id: "banquet",
       type: "stageNode",
       position: { x: 260, y: 28 },
       data: {
-        title: "人声分离",
+        title: "音轨分离",
         category: "parse",
         env: "env_parse",
-        vramGb: 2.1,
+        vramGb: null,
         status: "done",
         inputs: [{ id: "in-media", label: "媒体流", type: "MEDIA" }],
         outputs: [
-          { id: "out-vocals", label: "纯人声", type: "AUDIO" },
-          { id: "out-bgm", label: "伴奏轨", type: "AUDIO" },
+          { id: "out-vocals", label: "识别音轨", type: "AUDIO" },
+          { id: "out-bgm", label: "背景轨", type: "AUDIO" },
         ],
-        summary: "Demucs 分离人声与伴奏",
-        params: { model: "htdemucs" },
+        summary: "Banquet 分离对白、歌声、伴奏与音效",
+        params: {},
       },
     },
     {
@@ -182,16 +182,16 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
 
 const INITIAL_EDGES: Edge[] = [
   {
-    id: "e-input-demucs",
+    id: "e-input-banquet",
     source: "media_input",
     sourceHandle: "out-video",
-    target: "demucs",
+    target: "banquet",
     targetHandle: "in-media",
     style: { stroke: "#A87B70", strokeWidth: 1.5 },
   },
   {
-    id: "e-demucs-whisper",
-    source: "demucs",
+    id: "e-banquet-whisper",
+    source: "banquet",
     sourceHandle: "out-vocals",
     target: "whisperx",
     targetHandle: "in-vocals",
@@ -214,8 +214,8 @@ const INITIAL_EDGES: Edge[] = [
     style: { stroke: "#AD925F", strokeWidth: 1.5 },
   },
   {
-    id: "e-demucs-hub-bgm",
-    source: "demucs",
+    id: "e-banquet-hub-bgm",
+    source: "banquet",
     sourceHandle: "out-bgm",
     target: "script_hub",
     targetHandle: "in-bgm",
@@ -534,7 +534,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       isPipelineRunning: true,
       rightTab: "logs",
       nodes: state.nodes.map((n) => {
-        if (!needsParse && ["media_input", "demucs", "whisperx", "llm_tagger", "script_hub"].includes(n.id)) {
+        if (!needsParse && ["media_input", "banquet", "whisperx", "llm_tagger", "script_hub"].includes(n.id)) {
           return { ...n, data: { ...n.data, status: "done" } };
         }
         return { ...n, data: { ...n.data, status: "queued" } };
@@ -551,11 +551,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       if (needsParse) {
         activeNode = "media_input";
         setNodeStatus("media_input", "running");
-        setActiveEdges(["e-input-demucs"]);
+        setActiveEdges(["e-input-banquet"]);
         set({ vramState: { usedGb: 0.2, limitGb: 8, activeEnv: "env_parse" } });
         get().appendLog(
           "env_parse",
-          `启动真实 4 阶段解析：项目 ${activeScript.project_id}（目标语种=${cfg.targetLang}，精度=${cfg.computeType}）`,
+          `启动解析：项目 ${activeScript.project_id}（Banquet 四轨分离，目标语种=${cfg.targetLang}，精度=${cfg.computeType}）`,
           "info"
         );
 
@@ -564,24 +564,24 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           if (stage === "Stage0" || stage === "Init") {
             activeNode = "media_input";
             setNodeStatus("media_input", "running");
-            setActiveEdges(["e-input-demucs"]);
+            setActiveEdges(["e-input-banquet"]);
           } else if (stage === "Stage1") {
-            activeNode = "demucs";
+            activeNode = "banquet";
             setNodeStatus("media_input", "done");
-            setNodeStatus("demucs", "running");
-            setActiveEdges(["e-demucs-whisper", "e-demucs-hub-bgm"]);
-            set({ vramState: { usedGb: 2.1, limitGb: 8, activeEnv: "env_parse" } });
+            setNodeStatus("banquet", "running");
+            setActiveEdges(["e-banquet-whisper", "e-banquet-hub-bgm"]);
+            set({ vramState: { usedGb: null, limitGb: 8, activeEnv: "env_parse" } });
           } else if (stage === "Stage2" || stage === "Stage3") {
             activeNode = "whisperx";
             setNodeStatus("media_input", "done");
-            setNodeStatus("demucs", "done");
+            setNodeStatus("banquet", "done");
             setNodeStatus("whisperx", "running");
             setActiveEdges(["e-whisper-llm"]);
             set({ vramState: { usedGb: whisperVram, limitGb: 8, activeEnv: "env_parse" } });
           } else if (stage === "Stage4") {
             activeNode = "llm_tagger";
             setNodeStatus("media_input", "done");
-            setNodeStatus("demucs", "done");
+            setNodeStatus("banquet", "done");
             setNodeStatus("whisperx", "done");
             setNodeStatus("llm_tagger", "running");
             setActiveEdges(["e-llm-hub"]);
@@ -589,7 +589,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           } else if (stage === "Done") {
             activeNode = "script_hub";
             setNodeStatus("media_input", "done");
-            setNodeStatus("demucs", "done");
+            setNodeStatus("banquet", "done");
             setNodeStatus("whisperx", "done");
             setNodeStatus("llm_tagger", "done");
             setNodeStatus("script_hub", "done");
@@ -627,7 +627,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         // 将解析出的真实剧本写回全局项目状态（立即刷新时间轴与检查器）
         useProjectStore.getState().setScript(activeScript);
         setNodeStatus("media_input", "done");
-        setNodeStatus("demucs", "done");
+        setNodeStatus("banquet", "done");
         setNodeStatus("whisperx", "done");
         setNodeStatus("llm_tagger", "done");
         setNodeStatus("script_hub", "done");
@@ -799,17 +799,17 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     get().appendLog("system", "开始执行全链路管线调度", "info");
 
     setNodeStatus("media_input", "running");
-    setActiveEdges(["e-input-demucs"]);
+    setActiveEdges(["e-input-banquet"]);
     set({ vramState: { usedGb: 0.1, limitGb: 8, activeEnv: "env_backend" } });
     await sleep(350);
     setNodeStatus("media_input", "done");
 
-    setNodeStatus("demucs", "running");
-    setActiveEdges(["e-demucs-whisper", "e-demucs-hub-bgm"]);
-    set({ vramState: { usedGb: 2.1, limitGb: 8, activeEnv: "env_parse" } });
-    get().appendLog("env_parse", "分离纯人声与背景伴奏", "info");
+    setNodeStatus("banquet", "running");
+    setActiveEdges(["e-banquet-whisper", "e-banquet-hub-bgm"]);
+    set({ vramState: { usedGb: null, limitGb: 8, activeEnv: "env_parse" } });
+    get().appendLog("env_parse", "Banquet 分离对白、歌声、伴奏与音效", "info");
     await sleep(500);
-    setNodeStatus("demucs", "done");
+    setNodeStatus("banquet", "done");
 
     setNodeStatus("whisperx", "running");
     setActiveEdges(["e-whisper-llm"]);

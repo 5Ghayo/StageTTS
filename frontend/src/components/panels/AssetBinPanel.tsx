@@ -28,10 +28,20 @@ export const AssetBinPanel: React.FC = () => {
     return null;
   }
 
+  const stems = script.media.cinematic_stems;
   const mediaRows = [
     { label: "原视频流", ready: Boolean(script.media.source_video) },
-    { label: "纯人声轨", ready: Boolean(script.media.vocals_wav) },
-    { label: "背景伴奏", ready: Boolean(script.media.bgm_wav) },
+    ...(stems
+      ? [
+          { label: "对白轨", ready: true, url: stems.dialogue },
+          { label: "歌声轨", ready: true, url: stems.singing },
+          { label: "音乐轨", ready: true, url: stems.music },
+          { label: "音效轨", ready: true, url: stems.effects },
+        ]
+      : [
+          { label: "人声轨", ready: Boolean(script.media.vocals_wav) },
+          { label: "背景轨", ready: Boolean(script.media.bgm_wav) },
+        ]),
     { label: "成片输出", ready: Boolean(script.media.output_video) },
   ];
 
@@ -136,7 +146,19 @@ export const AssetBinPanel: React.FC = () => {
                         row.ready ? "bg-status-ready" : "bg-muted"
                       }`}
                     />
-                    <span>{row.ready ? "就绪" : "未生成"}</span>
+                    {"url" in row ? (
+                      <a
+                        href={row.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`试听${row.label}`}
+                        className="underline hover:text-primary"
+                      >
+                        试听
+                      </a>
+                    ) : (
+                      <span>{row.ready ? "就绪" : "未生成"}</span>
+                    )}
                   </span>
                 </div>
               ))}

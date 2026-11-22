@@ -181,6 +181,8 @@ def mix_and_render(
                 bgm_path = candidate_bgm
         except ValueError:
             bgm_path = None
+    if script.media.cinematic_stems is not None and bgm_path is None:
+        raise FileNotFoundError("影视四轨的混合背景轨缺失，请重新分离后导出。")
 
     source_video_path: Optional[Path] = None
     if script.media.source_video:
