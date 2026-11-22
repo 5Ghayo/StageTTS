@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Clapperboard,
   Cpu,
@@ -10,7 +10,7 @@ import {
   Sparkles,
   Workflow,
 } from "lucide-react";
-import { ApiError, renderVideo } from "../../services/api";
+import { ApiError, fetchGpuStatus, renderVideo, type GpuDevice } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 import type { WorkspacePreset } from "../../types/workflow";
@@ -37,6 +37,10 @@ const PRESET_OPTIONS: Array<{
   },
 ];
 
+function formatGpuMemory(gpu: GpuDevice): string {
+  return `${(gpu.used_mib / 1024).toFixed(1)}/${(gpu.total_mib / 1024).toFixed(1)} GiB`;
+}
+
 /**
  * 紧凑 36px 顶部主控栏（#222222 哑光灰底、无外框暗槽分段器、极淡无框信息标签）。
  */
@@ -51,13 +55,37 @@ export const TopMenuBar: React.FC = () => {
 
   const workspacePreset = useWorkflowStore((s) => s.workspacePreset);
   const setWorkspacePreset = useWorkflowStore((s) => s.setWorkspacePreset);
-  const vramState = useWorkflowStore((s) => s.vramState);
   const pipelineConfig = useWorkflowStore((s) => s.pipelineConfig);
   const isPipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
   const runPipeline = useWorkflowStore((s) => s.runPipeline);
   const appendLog = useWorkflowStore((s) => s.appendLog);
 
   const [actionToast, setActionToast] = useState<string | null>(null);
+  const [gpus, setGpus] = useState<GpuDevice[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let nextPoll: number | undefined;
+    const poll = async () => {
+      try {
+        const { devices } = await fetchGpuStatus(controller.signal);
+        if (!controller.signal.aborted) setGpus(devices);
+      } catch {
+        if (!controller.signal.aborted) setGpus([]);
+      }
+      if (!controller.signal.aborted) nextPoll = window.setTimeout(poll, 3000);
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      window.clearTimeout(nextPoll);
+    };
+  }, []);
+
+  const primaryGpu = gpus[0];
+  const gpuTitle = gpus.length
+    ? gpus.map((gpu) => `${gpu.name} · ${formatGpuMemory(gpu)}`).join("\n")
+    : "无法读取后端机器的 NVIDIA 显存数据";
 
   const statusColor =
     backendStatus === "online"
@@ -215,12 +243,14 @@ export const TopMenuBar: React.FC = () => {
         )}
 
         <div
-          title={`当前显存占用（环境: ${vramState.activeEnv}）`}
+          title={gpuTitle}
           className="hidden h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-white/[0.04] px-2 font-mono tabular-nums text-[11px] text-secondary sm:flex"
         >
           <Cpu className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
-          <span>
-            5060 · {vramState.usedGb.toFixed(1)}/{vramState.limitGb.toFixed(0)}G
+          <span className="max-w-64 truncate">
+            {primaryGpu
+              ? `${primaryGpu.name.replace(/^NVIDIA GeForce /, "")} · ${formatGpuMemory(primaryGpu)}${gpus.length > 1 ? ` +${gpus.length - 1}` : ""}`
+              : "显存不可用"}
           </span>
         </div>
 

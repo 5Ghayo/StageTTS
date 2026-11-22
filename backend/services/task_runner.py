@@ -310,6 +310,31 @@ def is_gpu_busy() -> bool:
     return _gpu_task_lock.is_locked()
 
 
+def read_gpu_memory() -> List[Dict[str, Any]]:
+    """读取本机 NVIDIA GPU 的整卡显存占用，单位为 MiB。"""
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        return []
+    try:
+        result = subprocess.run(
+            [nvidia_smi, "--query-gpu=name,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            check=True, capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    devices = []
+    for line in result.stdout.splitlines():
+        try:
+            name, used, total = line.rsplit(",", 2)
+            used_mib, total_mib = int(used), int(total)
+        except ValueError:
+            continue
+        if name.strip() and total_mib > 0 and used_mib >= 0:
+            devices.append({"name": name.strip(), "used_mib": used_mib, "total_mib": total_mib})
+    return devices
+
+
 @contextmanager
 def gpu_task_guard() -> Iterator[None]:
     """保护 GPU 重算力任务的上下文管理器（并发冲突时抛出 GpuBusyError）。"""

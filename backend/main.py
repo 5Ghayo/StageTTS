@@ -42,6 +42,7 @@ from backend.services.task_runner import (
     get_parse_progress,
     is_gpu_busy,
     probe_media_duration,
+    read_gpu_memory,
     run_parse_worker,
 )
 from backend.services.tts_client import (
@@ -169,6 +170,11 @@ def health_check() -> Dict[str, object]:
             "env_parse_python": config.ENV_PARSE_PYTHON,
         },
     }
+
+
+@app.get("/api/gpu")
+def gpu_status() -> Dict[str, object]:
+    return {"devices": read_gpu_memory()}
 
 
 @app.get("/api/projects")

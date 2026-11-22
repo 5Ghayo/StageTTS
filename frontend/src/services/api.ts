@@ -79,6 +79,16 @@ export function checkHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/api/health");
 }
 
+export interface GpuDevice {
+  name: string;
+  used_mib: number;
+  total_mib: number;
+}
+
+export function fetchGpuStatus(signal: AbortSignal): Promise<{ devices: GpuDevice[] }> {
+  return requestJson<{ devices: GpuDevice[] }>("/api/gpu", { signal, cache: "no-store" });
+}
+
 export async function fetchProjects(): Promise<string[]> {
   const data = await requestJson<{ projects: string[] }>("/api/projects");
   return data.projects;
