@@ -98,7 +98,7 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
                 vocal_track = vocal_track.overlay(clip, position=pos_ms)
                 continue
 
-            if not seg.tts_wav or (seg.applied_speed_factor is not None and seg.status != "ready"):
+            if not seg.tts_wav or seg.status != "ready":
                 continue
             try:
                 tts_path = config.resolve_media_path(seg.tts_wav)

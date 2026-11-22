@@ -1,5 +1,7 @@
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import wave
@@ -130,6 +132,58 @@ class SynthesisTest(unittest.TestCase):
         tempo.assert_called_once()
         self.assertEqual(tempo.call_args.args[1], 1.15)
 
+    def test_legacy_error_segment_is_not_mixed_into_render(self):
+        self._create_project("legacy_err")
+        script = self.client.get("/api/projects/legacy_err/script").json()
+        project_dir = self.root / "legacy_err"
+        write_wav(project_dir / "stale.wav", 1.0, amplitude=2000)
+        seg = script["segments"][0]
+        seg.pop("applied_speed_factor")
+        seg.update(tts_wav="/workspace/legacy_err/stale.wav", status="error")
+        self.assertEqual(self.client.put("/api/projects/legacy_err/script", json=script).status_code, 200)
+        response = self.client.post("/api/projects/legacy_err/render", json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        with wave.open(str(project_dir / "dubbed_vocals.wav"), "rb") as out:
+            frames = array("h", out.readframes(out.getnframes()))
+            self.assertEqual(max(abs(sample) for sample in frames), 0)
+
+    def test_tts_unavailable_returns_503_and_agent_does_not_repeat_failed_synthesis(self):
+        self._create_project("down")
+        with patch.object(
+            tts_client, "_synthesize_single_line", side_effect=tts_client.TTSServiceUnavailableError("tts down"),
+        ) as synth_call:
+            resp = self.client.post("/api/projects/down/synthesize", json={"segment_ids": [1, 2]})
+            self.assertEqual(resp.status_code, 503)
+            self.assertEqual(synth_call.call_count, 1)
+
+        with patch.object(
+            tts_client, "_switch_weights", side_effect=tts_client.TTSServiceUnavailableError("weights down"),
+        ):
+            resp = self.client.post("/api/projects/down/synthesize", json={"segment_ids": [1, 2]})
+            self.assertEqual(resp.status_code, 503)
+
+        self._create_project("agent_fail")
+        update_call = SimpleNamespace(id="t1", function=SimpleNamespace(
+            name="batch_update_segments",
+            arguments=json.dumps({"updates": [{"id": 1, "target_text": ""}]}),
+        ))
+        synth_call = SimpleNamespace(id="t2", function=SimpleNamespace(
+            name="synthesize_segments",
+            arguments=json.dumps({"segment_ids": [1]}),
+        ))
+        with (
+            patch.object(orchestrator, "create_openai_client") as agent_llm,
+            patch.object(orchestrator, "synthesize_segments", wraps=orchestrator.synthesize_segments) as wrapped_synth,
+        ):
+            agent_llm.return_value.chat.completions.create.side_effect = [
+                completion(tool_calls=[update_call]),
+                completion(tool_calls=[synth_call]),
+                completion("合成失败，台词为空"),
+            ]
+            resp = self.client.post("/api/projects/agent_fail/agent/chat", json={"message": "清空第1句并合成"})
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertEqual(wrapped_synth.call_count, 1)
+
 
 class ParseTest(unittest.TestCase):
     def test_probe_duration_parses_ffprobe_json(self):
@@ -212,3 +266,17 @@ class ParseTest(unittest.TestCase):
                 run.reset_mock()
                 parse_worker._stage_demucs(source, root, "cuda", False, True)
                 self.assertEqual([call.args[2] for call in run.call_args_list], ["cuda", "cuda", "cpu"])
+
+    def test_config_imports_without_pydantic_settings(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.modules['pydantic_settings'] = None; "
+                "from backend import config; assert config.DURATION_OVERFLOW_RATIO == 1.15",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0)

@@ -47,8 +47,8 @@
 1. **四环境物理隔离，严禁混装依赖**
    - `env_parse`（Conda Python 3.10）：PyTorch (`cu128`)、`demucs`、`whisperx`、`pyannote.audio 3.1`。
    - `env_tts`（Conda Python 3.10）：GPT-SoVITS CUDA 12.8 适配版整合环境（`is_half: true`，监听 `127.0.0.1:9880`）。
-   - `env_backend`（Conda / venv Python 3.10，**纯 CPU 0 显存**）：`fastapi`、`uvicorn`、`pydantic>=2.7`、`openai`、`pydub`、`requests`。
-   - `frontend`（Node.js 20 LTS）：Vite + React 18 + TypeScript + TailwindCSS + Zustand + `wavesurfer.js v7` + `pixi-live2d-display`。
+   - `env_backend`（Conda / venv Python 3.10+，**纯 CPU 0 显存**）：`fastapi>=0.136.0`、`uvicorn`、`pydantic>=2.7`、`pydantic-settings`、`openai`、`httpx`、`pydub`、`PyYAML`。
+   - `frontend`（Node.js 20 LTS + `pnpm`）：Vite + React 18 + TypeScript + TailwindCSS v4 + Zustand + `@tanstack/react-query` + `openapi-fetch` + `wavesurfer.js v7` + `pixi-live2d-display` + Biome。
    - 严禁在 `env_backend` 中直接 `import torch` / `whisperx` / `demucs`。
 
 2. **RTX 5060 8GB（Blackwell `sm_120`）串行显存接力与单任务防 OOM**
@@ -244,9 +244,9 @@
 
 | 层级 | 锁定技术栈与版本范围 |
 | :--- | :--- |
-| **前端核心** | Node.js 20 LTS, Vite `^5.4.0`, React `^18.3.1`, TypeScript `^5.5.0`, TailwindCSS `^3.4.0`, Zustand `^4.5.0`, `@xyflow/react` `^12.3.6`, `lucide-react` `^0.469.0` |
+| **前端核心** | Node.js 20 LTS, `pnpm`, Vite `^5.4.0`, React `^18.3.1`, TypeScript `^5.5.0`, TailwindCSS `^4.0.0`, Zustand `^4.5.0`, `@tanstack/react-query` `^5.62.0`, `openapi-fetch` `^0.13.4`, `@xyflow/react` `^12.3.6`, `lucide-react` `^0.469.0`, `@biomejs/biome` `^1.9.4` |
 | **波形与舞台** | `wavesurfer.js` `^7.8.0` (含 `@wavesurfer/react` 或 `regions` 插件), `pixi.js` `^7.4.0`, `pixi-live2d-display-lipsyncpatch` `^0.5.0-ls-8`（可选进阶 `three` + `@pixiv/three-vrm` v3） |
-| **主后端** | Python 3.10, `fastapi>=0.115.0`, `uvicorn[standard]>=0.30.0`, `pydantic>=2.7.0`, `openai>=1.40.0`, `pydub>=0.25.1` |
+| **主后端** | Python 3.10+, `fastapi>=0.136.0`, `starlette>=1.3.1`, `uvicorn[standard]>=0.30.0`, `pydantic>=2.7.0`, `pydantic-settings>=2.4.0`, `openai>=3.57.0`, `httpx>=0.27.0`, `pydub>=0.25.1`, `PyYAML>=6.0.1` |
 | **感知解析** | Python 3.10, PyTorch (`cu128`), `demucs`, `whisperx` (`large-v3`), `pyannote.audio 3.1` |
 | **语音合成** | GPT-SoVITS (`api_v2.py`, CUDA 12.8 适配版, `is_half: true`) |
 | **音视频工具** | FFmpeg `6.x+` (含 `nvenc` / `libx264` 与 `amix` 滤镜) |

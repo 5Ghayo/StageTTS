@@ -133,6 +133,8 @@ def _weight_scope(client: httpx.Client, errors: list[str]) -> Iterator[dict[str,
         for kind in ("sovits", "gpt"):
             try:
                 _set_weight(client, kind, "", defaults[kind])
+            except TTSServiceUnavailableError:
+                break
             except RuntimeError as exc:
                 errors.append(f"恢复默认权重失败：{exc}")
 
@@ -242,6 +244,10 @@ def synthesize_segments_grouped(
                         character.gpt_weights if character else None,
                         character.sovits_weights if character else None,
                     )
+                except TTSServiceUnavailableError:
+                    for seg in segs:
+                        seg.status = "error"
+                    raise
                 except RuntimeError as exc:
                     for seg in segs:
                         seg.status = "error"
@@ -272,6 +278,9 @@ def synthesize_segments_grouped(
                         if require_shorter and seg.actual_duration is not None and actual_duration >= seg.actual_duration:
                             raise RuntimeError("改写后的配音未缩短，保留上一版")
                         finished_wav.replace(tts_dir / out_name)
+                    except TTSServiceUnavailableError:
+                        seg.status = "error"
+                        raise
                     except Exception as exc:
                         seg.status = "error"
                         errors.append(f"片段 #{seg.id} 合成失败：{exc}")

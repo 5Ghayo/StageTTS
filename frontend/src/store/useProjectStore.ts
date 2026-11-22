@@ -352,12 +352,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   setScript: (script) =>
-    set({
-      script,
-      mode: script.mode,
-      selectedSegmentId: script.segments[0]?.id ?? null,
-      error: null,
-      isDirty: false,
+    set((state) => {
+      const keepSelection =
+        state.script?.project_id === script.project_id &&
+        state.selectedSegmentId != null &&
+        script.segments.some((seg) => seg.id === state.selectedSegmentId);
+      return {
+        script,
+        mode: script.mode,
+        selectedSegmentId: keepSelection
+          ? state.selectedSegmentId
+          : (script.segments[0]?.id ?? null),
+        error: null,
+        isDirty: false,
+      };
     }),
 
   setMode: (mode) =>
@@ -551,7 +559,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (isDirty) await apiSaveProjectScript(script);
       const result = await translateProject(script.project_id);
       if (get().script !== script) return "重译已在后端完成，当前编辑保留在本地";
-      const message = `已翻译 ${result.translated_ids.length} 条，保留 ${result.skipped_count} 条`;
+      const errNote = result.errors?.length ? `（部分批次失败：${result.errors[0]}）` : "";
+      const message = `已翻译 ${result.translated_ids.length} 条，保留 ${result.skipped_count} 条${errNote}`;
       set({ script: result.script, isDirty: false, lastSyncMessage: message });
       return message;
     } catch (err) {
@@ -690,18 +699,35 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ isSynthesizing: true, error: null });
     try {
       if (state.isDirty) {
-        await apiSaveProjectScript(script);
+        const saved = await apiSaveProjectScript(script);
+        if (get().script?.project_id !== script.project_id) {
+          set({ isSynthesizing: false });
+          return { simulated: false, message: "项目已切换，已取消合成" };
+        }
+        set((curr) => (curr.script === script ? { script: saved, isDirty: false } : {}));
       }
       const res = await apiSynthesizeSegments(script.project_id, targetIds);
+      if (get().script?.project_id !== script.project_id) {
+        set({ isSynthesizing: false });
+        return { simulated: false, message: "项目已切换，合成结果已保存到原项目" };
+      }
       const issues = synthesisIssues(res);
       const message = `已合成 ${res.synthesized_ids.length} 条${issues.length ? ` · ${issues[0]}` : ""}`;
       get().bumpAudioVersion(res.synthesized_ids);
-      set({
-        script: res.script,
-        isSynthesizing: false,
-        isDirty: false,
-        backendStatus: "online",
-        lastSyncMessage: message,
+      set((curr) => {
+        const keepSelection =
+          curr.selectedSegmentId != null &&
+          res.script.segments.some((seg) => seg.id === curr.selectedSegmentId);
+        return {
+          script: res.script,
+          selectedSegmentId: keepSelection
+            ? curr.selectedSegmentId
+            : (res.script.segments[0]?.id ?? null),
+          isSynthesizing: false,
+          isDirty: false,
+          backendStatus: "online",
+          lastSyncMessage: message,
+        };
       });
       return {
         simulated: false,

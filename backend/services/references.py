@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 import subprocess
 import tempfile
 import uuid
@@ -16,6 +15,16 @@ from backend.schemas import ProjectScript, ReferencePreview, Segment
 
 MIN_REFERENCE_SECONDS = 3
 MAX_REFERENCE_SECONDS = 10
+MAX_REFERENCE_BYTES = 32 * 1024 * 1024
+
+
+def _copy_bounded(source: BinaryIO, target: BinaryIO, max_bytes: int) -> None:
+    total = 0
+    while chunk := source.read(65536):
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError("参考音文件不能超过 32 MB")
+        target.write(chunk)
 
 
 def store_reference_audio(project_id: str, source: BinaryIO) -> str:
@@ -25,7 +34,7 @@ def store_reference_audio(project_id: str, source: BinaryIO) -> str:
     with tempfile.TemporaryDirectory(dir=dest) as temp:
         original, converted = Path(temp) / "input", Path(temp) / name
         with original.open("wb") as target:
-            shutil.copyfileobj(source, target)
+            _copy_bounded(source, target, MAX_REFERENCE_BYTES)
         try:
             subprocess.run(
                 [

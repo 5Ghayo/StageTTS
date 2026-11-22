@@ -1,3 +1,4 @@
+import io
 import json
 import shutil
 import tempfile
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 from backend import config
 from backend.main import app
 from backend.schemas import CharacterConfig, EmotionRef, MediaInfo, ProjectScript, Segment
-from backend.services import synthesis, translation, tts_client
+from backend.services import references, synthesis, translation, tts_client
 from workers.aligned_segments import normalize_segments
 from workers.parse_worker import _build_and_save_script
 
@@ -180,3 +181,43 @@ class DialogueWorkflowTest(unittest.TestCase):
                 ("Script C", "C.wav", defaults),
             ])
             self.assertEqual(active, defaults)
+
+    def test_retranslate_surfaces_llm_errors_and_handles_fenced_json(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            script = ProjectScript(
+                project_id="retrans",
+                media=MediaInfo(duration=80),
+                segments=[
+                    Segment(id=i, start=i * 2, end=i * 2 + 1.5, speaker="A", orig_text=f"Line {i}.")
+                    for i in range(26)
+                ],
+            )
+            (Path(temp) / "retrans").mkdir()
+            (Path(temp) / "retrans" / "script.json").write_text(script.model_dump_json(), encoding="utf-8")
+
+            with TestClient(app) as client, patch("backend.main.create_openai_client") as factory:
+                factory.return_value.chat.completions.create.side_effect = ValueError("gateway down")
+                failed = client.post("/api/projects/retrans/translate")
+                self.assertEqual(failed.status_code, 502)
+                self.assertIn("gateway down", failed.json()["detail"])
+
+                factory.return_value.chat.completions.create.side_effect = [
+                    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                        content="说明 [hint]\n```json\n" + json.dumps([
+                            {"id": i, "target_text": f"台词 {i}"} for i in range(25)
+                        ]) + "\n```"
+                    ))]),
+                    ValueError("second batch failed"),
+                ]
+                partial = client.post("/api/projects/retrans/translate")
+                self.assertEqual(partial.status_code, 200, partial.text)
+                payload = partial.json()
+                self.assertEqual(payload["translated_ids"], list(range(25)))
+                self.assertEqual(payload["skipped_count"], 1)
+                self.assertEqual(len(payload["errors"]), 1)
+
+    def test_reference_store_enforces_size_limit_when_stream_size_unknown(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            with patch.object(references, "MAX_REFERENCE_BYTES", 16):
+                with self.assertRaisesRegex(ValueError, "32 MB"):
+                    references.store_reference_audio("oversized", io.BytesIO(b"0" * 32))

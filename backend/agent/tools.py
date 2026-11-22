@@ -17,6 +17,7 @@ from backend.schemas import ProjectScript, SegmentPatch, SynthesizeResponse
 from backend.services.media_mixer import mix_and_render
 from backend.services.synthesis import synthesize_with_duration_check
 from backend.services.task_runner import GpuBusyError, gpu_task_guard
+from backend.services.tts_client import TTSServiceUnavailableError
 
 _project_locks = WeakValueDictionary()
 _project_locks_guard = threading.Lock()
@@ -140,9 +141,13 @@ def synthesize_project(
     """合成并保存最终剧本，期间避免其他 GPU 任务切换服务。"""
     with project_task_guard(project_id), gpu_task_guard():
         script = load_project_script(project_id)
-        synthesized_ids, overflow_segments, errors = synthesize_with_duration_check(
-            script, segment_ids, auto_reflect=auto_reflect,
-        )
+        try:
+            synthesized_ids, overflow_segments, errors = synthesize_with_duration_check(
+                script, segment_ids, auto_reflect=auto_reflect,
+            )
+        except TTSServiceUnavailableError:
+            save_project_script(script)
+            raise
         save_project_script(script)
     return SynthesizeResponse(
         project_id=project_id,

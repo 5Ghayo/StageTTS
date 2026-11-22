@@ -223,6 +223,7 @@ class TranslationResponse(BaseModel):
     script: ProjectScript
     translated_ids: list[int]
     skipped_count: int
+    errors: List[str] = Field(default_factory=list, json_schema_extra={"default": []})
 
 
 class ReferencePreview(EmotionRef):

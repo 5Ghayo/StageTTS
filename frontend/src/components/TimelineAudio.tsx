@@ -47,6 +47,25 @@ export function useSyncedMedia<T extends HTMLMediaElement>(
   };
 }
 
+let sharedAudioContext: AudioContext | null = null;
+const mediaGainNodes = new WeakMap<HTMLAudioElement, GainNode>();
+
+function getOrCreateGainNode(el: HTMLAudioElement): { ctx: AudioContext; gain: GainNode } | null {
+  if (typeof AudioContext === "undefined") return null;
+  if (!sharedAudioContext || sharedAudioContext.state === "closed") {
+    sharedAudioContext = new AudioContext();
+  }
+  let gain = mediaGainNodes.get(el);
+  if (!gain) {
+    const source = sharedAudioContext.createMediaElementSource(el);
+    gain = sharedAudioContext.createGain();
+    source.connect(gain);
+    gain.connect(sharedAudioContext.destination);
+    mediaGainNodes.set(el, gain);
+  }
+  return { ctx: sharedAudioContext, gain };
+}
+
 function PreviewAudio({
   src,
   time,
@@ -63,9 +82,30 @@ function PreviewAudio({
   rate?: number;
 }) {
   const media = useSyncedMedia<HTMLAudioElement>(src, time, playing, rate);
+
   useEffect(() => {
-    if (media.ref.current) media.ref.current.volume = Math.min(1, Math.max(0, volume));
-  }, [media.ref, volume]);
+    const el = media.ref.current;
+    if (!el) return;
+    const clamped = Math.max(0, volume);
+    let audioGraph: { ctx: AudioContext; gain: GainNode } | null = null;
+    if (clamped > 1 || mediaGainNodes.has(el)) {
+      try {
+        audioGraph = getOrCreateGainNode(el);
+      } catch {
+        // Fallback to HTMLMediaElement.volume when Web Audio is unavailable
+      }
+    }
+    if (audioGraph) {
+      el.volume = 1;
+      audioGraph.gain.gain.value = clamped;
+      if (playing && audioGraph.ctx.state === "suspended") {
+        void audioGraph.ctx.resume().catch(() => {});
+      }
+    } else {
+      el.volume = Math.min(1, clamped);
+    }
+  }, [media.ref, playing, volume]);
+
   return <audio {...media} src={src} preload="auto" muted={muted} />;
 }
 

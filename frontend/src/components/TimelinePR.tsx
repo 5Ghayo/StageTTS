@@ -5,6 +5,7 @@ import WaveSurfer from "wavesurfer.js";
 import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
+import { isSegmentOverflow } from "../utils/synthesisIssues";
 
 function formatShortTime(sec: number): string {
   const mins = Math.floor(sec / 60);
@@ -235,20 +236,35 @@ export const TimelinePR: React.FC = () => {
 
           {/* 波形 / BGM A2 (56px) */}
           <div className="flex h-14 items-center justify-between px-2.5">
-            <span className="whitespace-nowrap text-[11px] font-medium text-secondary">
-              波形 / BGM
+            <span className="truncate whitespace-nowrap text-[11px] font-medium text-secondary">
+              原声/BGM
             </span>
-            <button
-              type="button"
-              onClick={() => toggleTrackState("vocalsMuted")}
-              className={`rounded-[3px] px-1 font-mono text-[10px] font-medium transition-colors ${
-                trackStates.vocalsMuted
-                  ? "bg-[#2C2C2C] text-status-error"
-                  : "text-muted hover:text-primary"
-              }`}
-            >
-              M
-            </button>
+            <div className="flex shrink-0 gap-1">
+              <button
+                type="button"
+                title="静音原声"
+                onClick={() => toggleTrackState("vocalsMuted")}
+                className={`rounded-[3px] px-1 font-mono text-[10px] font-medium transition-colors ${
+                  trackStates.vocalsMuted
+                    ? "bg-[#2C2C2C] text-status-error"
+                    : "text-muted hover:text-primary"
+                }`}
+              >
+                M
+              </button>
+              <button
+                type="button"
+                title="静音伴奏 (BGM)"
+                onClick={() => toggleTrackState("bgmMuted")}
+                className={`rounded-[3px] px-1 font-mono text-[10px] font-medium transition-colors ${
+                  trackStates.bgmMuted
+                    ? "bg-[#2C2C2C] text-status-error"
+                    : "text-muted hover:text-primary"
+                }`}
+              >
+                B
+              </button>
+            </div>
           </div>
         </div>
 
@@ -312,8 +328,7 @@ export const TimelinePR: React.FC = () => {
                 const left = seg.start * timelineZoom;
                 const width = Math.max(80, slotDuration * timelineZoom);
                 const isSelected = seg.id === selectedSegmentId;
-                const isOverflow =
-                  seg.actual_duration != null && seg.actual_duration > slotDuration * 1.15;
+                const isOverflow = isSegmentOverflow(seg);
 
                 return (
                   <button
@@ -391,7 +406,7 @@ export const TimelinePR: React.FC = () => {
               >
                 {fallbackWaveBars.map((bar, i) => (
                   <div
-                    key={i}
+                    key={`wave-bar-${i}-${bar.height}`}
                     className={`w-[2px] rounded-[1px] ${
                       bar.active ? "bg-[#B0B8C1]/65" : "bg-[#6E7681]/50"
                     }`}

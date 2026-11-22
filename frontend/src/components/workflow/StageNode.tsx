@@ -134,7 +134,10 @@ export const StageNode: React.FC<NodeProps<StageFlowNode>> = memo(({ data, selec
           const inputPort = data.inputs[idx];
           const outputPort = data.outputs[idx];
           return (
-            <div key={idx} className="relative flex min-h-[19px] items-center justify-between px-3">
+            <div
+              key={`${inputPort?.id ?? "in"}-${outputPort?.id ?? "out"}-${idx}`}
+              className="relative flex min-h-[19px] items-center justify-between px-3"
+            >
               {inputPort ? (
                 <div className="flex items-center gap-1.5">
                   <Handle

@@ -19,6 +19,7 @@ from backend.schemas import (
     ToolCallLog,
 )
 from backend.services.translation import create_openai_client
+from backend.services.tts_client import TTSServiceUnavailableError
 
 
 def _summarize_tool_result(tool_name: str, result: Dict[str, Any]) -> str:
@@ -78,9 +79,13 @@ def run_agent_chat(
     overflow: dict[int, SegmentDurationCheck] = {}
     synthesis_errors: list[str] = []
 
-    def record_synthesis(result: Dict[str, Any]) -> None:
+    def record_synthesis(result: Dict[str, Any], attempted_ids: List[int] | None = None) -> None:
         completed = result["synthesized_ids"]
         synthesized_ids.update(completed)
+        if attempted_ids is None:
+            pending_modified.clear()
+        else:
+            pending_modified.difference_update(attempted_ids)
         pending_modified.difference_update(completed)
         for seg_id in completed:
             overflow.pop(seg_id, None)
@@ -135,8 +140,19 @@ def run_agent_chat(
                     raise ValueError(f"禁止调用未授权工具: {tool_name}")
 
                 if tool_name == "synthesize_segments":
-                    result = synthesize_segments(**(args | {"auto_reflect": auto_synthesize}))
-                    record_synthesis(result)
+                    raw_ids = args.get("segment_ids")
+                    attempted = [int(i) for i in raw_ids] if isinstance(raw_ids, list) else None
+                    if attempted is not None:
+                        args["segment_ids"] = attempted
+                    try:
+                        result = synthesize_segments(**(args | {"auto_reflect": auto_synthesize}))
+                    except TTSServiceUnavailableError:
+                        if attempted is None:
+                            pending_modified.clear()
+                        else:
+                            pending_modified.difference_update(attempted)
+                        raise
+                    record_synthesis(result, attempted)
                 else:
                     result = func(**args)
                 summary = _summarize_tool_result(tool_name, result)

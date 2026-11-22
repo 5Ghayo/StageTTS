@@ -1,6 +1,6 @@
 import { Pause, Play } from "lucide-react";
 import type React from "react";
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo, useRef } from "react";
 import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
@@ -13,6 +13,8 @@ const EMOTION_LABELS: Record<EmotionType, string> = {
   sad: "悲伤",
   whisper: "低语",
 };
+
+const STAGE_EQ_BARS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 /**
  * 虚拟演播舞台（模式 B，#222222 面板头尾 + #161616 深灰舞台视口）。
@@ -42,7 +44,10 @@ export const VirtualStage: React.FC = () => {
 
   const activeCharacter = activeSegment ? script?.characters[activeSegment.speaker] : undefined;
 
-  const { upcomingClips } = useDubClips(currentTime);
+  const { replacesSource, upcomingClips } = useDubClips(currentTime);
+  const bgm = script?.media.bgm_wav;
+  const vocals = script?.media.vocals_wav;
+  const muteSource = trackStates.dubSolo || replacesSource;
 
   const rmsEnergy = useMemo(() => {
     if (!isPlaying || !activeSegment) {
@@ -52,10 +57,6 @@ export const VirtualStage: React.FC = () => {
       Math.abs(Math.sin(currentTime * 14)) * 0.55 + Math.abs(Math.cos(currentTime * 23)) * 0.35;
     return Math.min(1, Math.max(0.12, wave));
   }, [activeSegment, currentTime, isPlaying]);
-
-  useEffect(() => {
-    void pixiContainerRef.current;
-  }, [activeCharacter?.avatar?.model_url]);
 
   const emotionTint =
     activeSegment?.emotion === "angry"
@@ -109,6 +110,11 @@ export const VirtualStage: React.FC = () => {
           time={currentTime}
           playing={isPlaying}
           dubMuted={trackStates.dubMuted}
+          vocals={vocals}
+          muteVocals={muteSource || trackStates.vocalsMuted}
+          bgm={bgm}
+          muteBgm={trackStates.dubSolo || trackStates.bgmMuted}
+          bgmVolume={script?.media.bgm_volume}
         />
 
         {/* 虚拟角色口型实时演出 */}
@@ -150,12 +156,12 @@ export const VirtualStage: React.FC = () => {
           </svg>
 
           <div className="mt-3 flex h-5 items-end gap-1">
-            {Array.from({ length: 10 }).map((_, idx) => {
+            {STAGE_EQ_BARS.map((barId) => {
               const barScale =
-                0.25 + rmsEnergy * (0.4 + 0.6 * Math.abs(Math.sin(idx * 0.9 + currentTime * 12)));
+                0.25 + rmsEnergy * (0.4 + 0.6 * Math.abs(Math.sin(barId * 0.9 + currentTime * 12)));
               return (
                 <div
-                  key={idx}
+                  key={`stage-eq-bar-${barId}`}
                   className="w-1 rounded-[1px] transition-all duration-75"
                   style={{
                     height: `${Math.round(barScale * 18)}px`,

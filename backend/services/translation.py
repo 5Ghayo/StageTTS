@@ -23,6 +23,10 @@ class LLMNotConfiguredError(RuntimeError):
     """未配置有效的 LLM API Key。"""
 
 
+class LLMServiceError(RuntimeError):
+    """调用上游大模型网关失败或返回非法结果。"""
+
+
 def create_openai_client() -> OpenAI:
     if not config.is_llm_configured():
         raise LLMNotConfiguredError("请在 backend/.env 中配置 LLM_API_KEY、LLM_BASE_URL 与 LLM_MODEL。")
@@ -38,8 +42,18 @@ def complete_dialogue(client: OpenAI, system: str, payload: dict) -> list[dict]:
         ],
         temperature=0.3,
     )
-    content = response.choices[0].message.content or ""
-    entries = json.loads(content[content.find("["):content.rfind("]") + 1])
+    content = (response.choices[0].message.content or "").strip()
+    fences = re.findall(r"```(json)?\s*([\s\S]*?)```", content, flags=re.IGNORECASE)
+    if fences:
+        content = (
+            next((body.strip() for lang, body in fences if lang and "[" in body and "]" in body), None)
+            or next((body.strip() for _, body in fences if "[" in body and "]" in body), None)
+            or fences[0][1].strip()
+        )
+    left, right = content.find("["), content.rfind("]")
+    if left == -1 or right <= left:
+        raise ValueError("LLM 未返回 JSON 数组")
+    entries = json.loads(content[left:right + 1])
     if not isinstance(entries, list):
         raise ValueError("LLM 未返回 JSON 数组")
     return [entry for entry in entries if isinstance(entry, dict)]
@@ -86,7 +100,10 @@ class DialogueContext:
 
 
 def translate_script(
-    script: ProjectScript, client: OpenAI, log: Callable[[str], None] | None = None,
+    script: ProjectScript,
+    client: OpenAI,
+    log: Callable[[str], None] | None = None,
+    errors: list[str] | None = None,
 ) -> list[int]:
     context = DialogueContext(script)
     segments = [seg for seg in context.ordered if seg.orig_text.strip()]
@@ -101,7 +118,9 @@ def translate_script(
             entries = complete_dialogue(
                 client, DIRECTOR_TRANSLATE_PROMPT, context.payload(context.entry(seg) for seg in batch),
             )
-        except (OpenAIError, ValueError, IndexError):
+        except (OpenAIError, ValueError, IndexError) as exc:
+            if errors is not None:
+                errors.append(f"片段 #{batch[0].id}..#{batch[-1].id}：{exc}")
             if log:
                 log("LLM 标注批次失败，保留当前台词")
             continue

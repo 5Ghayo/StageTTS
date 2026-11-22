@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ApiError, sendAgentChat } from "../services/api";
 import { useProjectStore } from "../store/useProjectStore";
 import type { SegmentPatch, ToolCallLog } from "../types/script";
+import { isSegmentOverflow } from "../utils/synthesisIssues";
 
 interface ChatMessage {
   id: string;
@@ -106,10 +107,7 @@ export const AgentChat: React.FC = () => {
 
     const longSegs = candidates.filter((seg) => {
       const slot = Math.max(0.2, seg.end - seg.start);
-      return (
-        (seg.actual_duration != null && seg.actual_duration > slot * 1.15) ||
-        seg.target_text.length > Math.floor(slot * 5) + 4
-      );
+      return isSegmentOverflow(seg) || seg.target_text.length > Math.floor(slot * 5) + 4;
     });
 
     if (longSegs.length > 0) {
@@ -171,7 +169,33 @@ export const AgentChat: React.FC = () => {
     }
 
     try {
+      if (useProjectStore.getState().isDirty) {
+        await useProjectStore.getState().saveProjectScript();
+        const afterSave = useProjectStore.getState();
+        if (afterSave.script?.project_id !== script.project_id) {
+          return;
+        }
+        if (afterSave.backendStatus === "offline") {
+          const sim = await runSimulatedAgent(trimmed);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `a-${Date.now()}`,
+              role: "assistant",
+              content: sim.reply,
+              toolLogs: sim.toolLogs,
+            },
+          ]);
+          return;
+        }
+        if (afterSave.error) {
+          throw new Error(afterSave.error);
+        }
+      }
       const res = await sendAgentChat(script.project_id, trimmed, true);
+      if (useProjectStore.getState().script?.project_id !== script.project_id) {
+        return;
+      }
       setScript(res.script);
       bumpAudioVersion(res.synthesized_ids ?? []);
       setMessages((prev) => [
@@ -184,6 +208,9 @@ export const AgentChat: React.FC = () => {
         },
       ]);
     } catch (err) {
+      if (useProjectStore.getState().script?.project_id !== script.project_id) {
+        return;
+      }
       const isUnavailableOrOffline =
         err instanceof ApiError &&
         (err.status === 502 || err.status === 504 || err.isNotImplemented || err.isNetworkError);
@@ -269,7 +296,7 @@ export const AgentChat: React.FC = () => {
                       <div className="mt-2 space-y-1.5 border-t border-dashed border-white/[0.08] pt-2">
                         {msg.toolLogs.map((log, idx) => (
                           <div
-                            key={idx}
+                            key={`${msg.id}-${log.tool_name}-${idx}`}
                             className="rounded-[4px] bg-[#161616] px-2 py-1.5 text-[11px]"
                           >
                             <div className="font-mono text-primary">{log.tool_name}</div>

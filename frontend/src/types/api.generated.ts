@@ -873,6 +873,11 @@ export interface components {
             translated_ids: number[];
             /** Skipped Count */
             skipped_count: number;
+            /**
+             * Errors
+             * @default []
+             */
+            errors: string[];
         };
         /**
          * UploadResponse

@@ -41,12 +41,6 @@ export interface PipelineConfig {
   burnWatermark: boolean;
 }
 
-export interface VramState {
-  usedGb: number;
-  limitGb: number;
-  activeEnv: EnvBadge | "idle";
-}
-
 export interface PipelineLogEntry {
   id: string;
   timestamp: string;

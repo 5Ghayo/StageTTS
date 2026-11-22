@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 import type { EmotionType } from "../types/script";
+import { isSegmentOverflow } from "../utils/synthesisIssues";
 
 const EMOTIONS: Array<{ id: EmotionType; label: string; dotColor: string }> = [
   { id: "neutral", label: "平淡", dotColor: "#9C9C9C" },
@@ -62,8 +63,12 @@ export const Inspector: React.FC = () => {
   const fallbackDuration = segment
     ? Math.max(0.1, segment.actual_duration ?? segment.end - segment.start)
     : 0;
+  const activeSegmentId = segment?.id ?? null;
 
   useEffect(() => {
+    if (activeSegmentId === null && auditionUrl === null) {
+      return;
+    }
     const el = audioRef.current;
     if (el) {
       el.pause();
@@ -72,11 +77,13 @@ export const Inspector: React.FC = () => {
     setIsAuditionPlaying(false);
     setAuditionTime(0);
     setAuditionDuration(fallbackDuration);
-  }, [segment?.id, auditionUrl, fallbackDuration]);
+  }, [activeSegmentId, auditionUrl, fallbackDuration]);
 
   useEffect(() => {
-    sourceAudioRef.current?.pause();
-  }, [segment?.id]);
+    if (activeSegmentId !== null) {
+      sourceAudioRef.current?.pause();
+    }
+  }, [activeSegmentId]);
 
   if (!script || !segment) {
     return (
@@ -98,11 +105,8 @@ export const Inspector: React.FC = () => {
   const recommendedUnits = Math.max(1, Math.floor(slotDuration * (isCjk ? 5 : 2.8)));
   const actualDuration = segment.actual_duration;
   const fillRatio = actualDuration ? actualDuration / slotDuration : 0;
-  const isOverflow =
-    actualDuration != null &&
-    (segment.applied_speed_factor == null
-      ? fillRatio > 1.15
-      : actualDuration - slotDuration > 0.02);
+  const isOverflow = isSegmentOverflow(segment);
+  const limitRatio = segment.applied_speed_factor == null ? 1.15 : 1.0;
 
   const effectiveDuration = auditionDuration > 0 ? auditionDuration : fallbackDuration;
   const auditionProgress =
@@ -248,7 +252,7 @@ export const Inspector: React.FC = () => {
               <summary className="cursor-pointer">词级对齐</summary>
               <ul className="mt-1 max-h-28 overflow-y-auto">
                 {segment.words.map((word, index) => (
-                  <li key={index}>
+                  <li key={`${segment.id}-${index}-${word.word}`}>
                     {word.word} ·{" "}
                     {word.start == null || word.end == null
                       ? "未对齐"
@@ -325,6 +329,7 @@ export const Inspector: React.FC = () => {
             </label>
             <input
               type="text"
+              disabled={editsDisabled}
               value={segment.action ?? ""}
               onChange={(e) =>
                 updateSegmentLocal({
@@ -333,7 +338,7 @@ export const Inspector: React.FC = () => {
                 })
               }
               placeholder="如点头 / 摇头"
-              className="h-7 min-w-0 flex-1 rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary placeholder:text-muted transition-colors focus:border-white/25 focus:outline-none"
+              className="h-7 min-w-0 flex-1 rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary placeholder:text-muted transition-colors focus:border-white/25 focus:outline-none disabled:opacity-50"
             />
           </div>
         </div>
@@ -349,8 +354,9 @@ export const Inspector: React.FC = () => {
                   <button
                     key={emo.id}
                     type="button"
+                    disabled={editsDisabled}
                     onClick={() => updateSegmentLocal({ id: segment.id, emotion: emo.id })}
-                    className={`flex items-center justify-center gap-1 whitespace-nowrap rounded-[3px] text-[11px] transition-colors ${
+                    className={`flex items-center justify-center gap-1 whitespace-nowrap rounded-[3px] text-[11px] transition-colors disabled:opacity-50 ${
                       active
                         ? "bg-[#333333] font-medium text-[#FFFFFF]"
                         : "text-secondary hover:text-primary"
@@ -377,6 +383,7 @@ export const Inspector: React.FC = () => {
             <input
               aria-label="语速倍率"
               type="range"
+              disabled={editsDisabled}
               min={0.8}
               max={1.4}
               step={0.05}
@@ -387,7 +394,7 @@ export const Inspector: React.FC = () => {
                   speed_factor: Number(e.target.value),
                 })
               }
-              className="min-w-0 flex-1"
+              className="min-w-0 flex-1 disabled:opacity-50"
             />
             <span
               className={`w-10 shrink-0 whitespace-nowrap text-right font-mono tabular-nums text-[11px] ${
@@ -409,6 +416,7 @@ export const Inspector: React.FC = () => {
             <span className="truncate text-secondary">保留原声（笑声、叹息不替换）</span>
             <input
               type="checkbox"
+              disabled={editsDisabled}
               checked={segment.keep_original}
               onChange={(e) =>
                 updateSegmentLocal({
@@ -416,7 +424,7 @@ export const Inspector: React.FC = () => {
                   keep_original: e.target.checked,
                 })
               }
-              className="h-3.5 w-3.5 shrink-0 rounded-[2px]"
+              className="h-3.5 w-3.5 shrink-0 rounded-[2px] disabled:opacity-50"
             />
           </label>
         </div>
@@ -450,8 +458,8 @@ export const Inspector: React.FC = () => {
                 }}
               />
               <div
-                title="115% 超时预警线"
-                style={{ left: `${Math.round((1.15 / 1.3) * 100)}%` }}
+                title={segment.applied_speed_factor == null ? "115% 超时预警线" : "100% 时间槽上限"}
+                style={{ left: `${Math.round((limitRatio / 1.3) * 100)}%` }}
                 className="absolute bottom-0 top-0 w-px bg-status-warning"
               />
             </div>
@@ -529,8 +537,9 @@ export const Inspector: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            disabled={editsDisabled}
             onClick={() => void saveProjectScript()}
-            className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 py-1 text-[12px] font-medium text-primary transition-colors hover:bg-[#363636]"
+            className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 py-1 text-[12px] font-medium text-primary transition-colors hover:bg-[#363636] disabled:opacity-50"
           >
             <Save className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
             <span>保存</span>

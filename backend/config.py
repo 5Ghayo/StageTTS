@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    from dotenv import dotenv_values
+except ImportError:  # 允许精简环境不依赖 python-dotenv
+    dotenv_values = None  # type: ignore[assignment]
+
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+except ImportError:  # env_parse 仅安装基础依赖时回退至 BaseModel + dotenv/os.environ
+    BaseSettings = None  # type: ignore[assignment,misc]
+    SettingsConfigDict = None  # type: ignore[assignment,misc]
 
 # 仓库根目录：StageTTS/
 ROOT_DIR: Path = Path(__file__).resolve().parent.parent
@@ -30,14 +41,8 @@ def _resolve_optional_dir_path(raw: str) -> Optional[Path]:
     return p if p.is_absolute() else (ROOT_DIR / p).resolve()
 
 
-class StageTTSSettings(BaseSettings):
-    """基于 pydantic-settings 的强类型后端配置。"""
-
-    model_config = SettingsConfigDict(
-        env_file=BACKEND_DIR / ".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+class _StageTTSSettingsFields(BaseModel):
+    """后端共享强类型配置字段定义。"""
 
     workspace_dir_raw: str = Field(default="", alias="WORKSPACE_DIR")
     assets_dir_raw: str = Field(default="", alias="ASSETS_DIR")
@@ -68,7 +73,67 @@ class StageTTSSettings(BaseSettings):
     hf_token: str = Field(default="", alias="HF_TOKEN")
 
 
-settings = StageTTSSettings()
+def _read_dotenv_fallback(env_file: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def _load_dotenv_entries(env_file: Path) -> dict[str, str]:
+    if not env_file.is_file():
+        return {}
+    loaded = dotenv_values(env_file) if dotenv_values is not None else _read_dotenv_fallback(env_file)
+    return {key: value for key, value in loaded.items() if value is not None}
+
+
+def _export_dotenv_to_environ(env_file: Path) -> None:
+    """将 backend/.env 中的扩展环境变量（如 NLTK_DATA、HF_HOME、TORCH_HOME）透传给子进程。"""
+    for key, value in _load_dotenv_entries(env_file).items():
+        os.environ.setdefault(key, value)
+
+
+def _load_fallback_settings(cls: type[_StageTTSSettingsFields]) -> _StageTTSSettingsFields:
+    merged: dict[str, Any] = {}
+    for key, value in _load_dotenv_entries(BACKEND_DIR / ".env").items():
+        merged[key.upper()] = value
+    for key, value in os.environ.items():
+        merged[key.upper()] = value
+    return cls.model_validate(merged)
+
+
+_export_dotenv_to_environ(BACKEND_DIR / ".env")
+
+
+if BaseSettings is not None and SettingsConfigDict is not None:
+
+    class StageTTSSettings(BaseSettings, _StageTTSSettingsFields):
+        """基于 pydantic-settings 的强类型后端配置。"""
+
+        model_config = SettingsConfigDict(
+            env_file=BACKEND_DIR / ".env",
+            env_file_encoding="utf-8",
+            extra="ignore",
+        )
+
+    settings: _StageTTSSettingsFields = StageTTSSettings()
+else:
+
+    class StageTTSSettings(_StageTTSSettingsFields):  # type: ignore[no-redef]
+        """无 pydantic-settings 环境下的回退配置模型（如 env_parse）。"""
+
+        model_config = ConfigDict(extra="ignore")
+
+    settings = _load_fallback_settings(StageTTSSettings)
 
 WORKSPACE_DIR: Path = _resolve_dir_path(settings.workspace_dir_raw, ROOT_DIR / "workspace")
 ASSETS_DIR: Path = _resolve_dir_path(settings.assets_dir_raw, ROOT_DIR / "assets")

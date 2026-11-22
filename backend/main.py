@@ -55,7 +55,12 @@ from backend.services.task_runner import (
     read_gpu_memory,
     run_parse_worker,
 )
-from backend.services.translation import LLMNotConfiguredError, create_openai_client, translate_script
+from backend.services.translation import (
+    LLMNotConfiguredError,
+    LLMServiceError,
+    create_openai_client,
+    translate_script,
+)
 from backend.services.tts_client import (
     TTSServiceUnavailableError,
     check_tts_service,
@@ -115,6 +120,11 @@ def _tts_unavailable_handler(_: Request, exc: TTSServiceUnavailableError) -> JSO
 @app.exception_handler(LLMNotConfiguredError)
 def _llm_unconfigured_handler(_: Request, exc: LLMNotConfiguredError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": _err_detail(exc)})
+
+
+@app.exception_handler(LLMServiceError)
+def _llm_service_error_handler(_: Request, exc: LLMServiceError) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": _err_detail(exc)})
 
 
 @app.exception_handler(FileNotFoundError)
@@ -245,11 +255,17 @@ def retranslate_project(project_id: str) -> TranslationResponse:
     safe_id = _validate_project_id(project_id)
     with project_task_guard(safe_id):
         script = load_project_script(safe_id)
-        translated = translate_script(script, create_openai_client())
+        batch_errors: list[str] = []
+        translated = translate_script(script, create_openai_client(), errors=batch_errors)
+        if not translated and batch_errors:
+            raise LLMServiceError(f"台词重译失败：{batch_errors[0]}")
         if translated:
             save_project_script(script)
         return TranslationResponse(
-            script=script, translated_ids=translated, skipped_count=len(script.segments) - len(translated),
+            script=script,
+            translated_ids=translated,
+            skipped_count=len(script.segments) - len(translated),
+            errors=batch_errors,
         )
 
 
@@ -259,7 +275,7 @@ def retranslate_project(project_id: str) -> TranslationResponse:
 
 
 @app.post("/api/projects/upload", response_model=UploadResponse)
-async def upload_project_media(
+def upload_project_media(
     file: UploadFile = File(...),
     mode: ProjectMode = Form("video_dubbing"),
     project_id: str = Form(""),
@@ -271,31 +287,32 @@ async def upload_project_media(
         else f"proj_{int(time.time())}"
     )
 
-    project_dir = config.WORKSPACE_DIR / safe_id
-    project_dir.mkdir(parents=True, exist_ok=True)
+    with project_task_guard(safe_id):
+        project_dir = config.WORKSPACE_DIR / safe_id
+        project_dir.mkdir(parents=True, exist_ok=True)
 
-    ext = Path(file.filename or "input.mp4").suffix.lower() or ".mp4"
-    input_name = f"input{ext}"
-    input_path = project_dir / input_name
+        ext = Path(file.filename or "input.mp4").suffix.lower() or ".mp4"
+        input_name = f"input{ext}"
+        input_path = project_dir / input_name
 
-    with input_path.open("wb") as out_fp:
-        shutil.copyfileobj(file.file, out_fp)
+        with input_path.open("wb") as out_fp:
+            shutil.copyfileobj(file.file, out_fp)
 
-    duration = probe_media_duration(input_path)
-    media_url = f"/workspace/{safe_id}/{input_name}"
+        duration = probe_media_duration(input_path)
+        media_url = f"/workspace/{safe_id}/{input_name}"
 
-    initial_script = ProjectScript(
-        project_id=safe_id,
-        mode=mode,
-        media=MediaInfo(
-            source_video=media_url,
-            duration=duration,
-            bgm_volume=0.75,
-        ),
-        characters={},
-        segments=[],
-    )
-    save_project_script(initial_script)
+        initial_script = ProjectScript(
+            project_id=safe_id,
+            mode=mode,
+            media=MediaInfo(
+                source_video=media_url,
+                duration=duration,
+                bgm_volume=0.75,
+            ),
+            characters={},
+            segments=[],
+        )
+        save_project_script(initial_script)
 
     return {
         "project_id": safe_id,

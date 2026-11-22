@@ -63,6 +63,7 @@ export const TopMenuBar: React.FC = () => {
   const appendLog = useWorkflowStore((s) => s.appendLog);
 
   const [actionToast, setActionToast] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
   const { data: gpuData } = useQuery({
     queryKey: ["gpu-status"],
     queryFn: ({ signal }) => fetchGpuStatus(signal),
@@ -115,7 +116,7 @@ export const TopMenuBar: React.FC = () => {
   };
 
   const handleExport = async () => {
-    if (!script) {
+    if (!script || isExporting) {
       return;
     }
     if (backendStatus === "offline") {
@@ -125,8 +126,27 @@ export const TopMenuBar: React.FC = () => {
       window.setTimeout(() => setActionToast(null), 3000);
       return;
     }
+    setIsExporting(true);
     setActionToast("导出中...");
     try {
+      if (useProjectStore.getState().isDirty) {
+        await saveProjectScript();
+        const afterSave = useProjectStore.getState();
+        if (afterSave.backendStatus === "offline") {
+          const msg = "离线模式：已记录导出配置";
+          setActionToast(msg);
+          appendLog("env_backend", msg, "warn");
+          window.setTimeout(() => setActionToast(null), 3000);
+          return;
+        }
+        if (afterSave.error || afterSave.isDirty) {
+          const msg = afterSave.error ?? "请先保存当前修改后再导出";
+          setActionToast(msg);
+          appendLog("env_backend", msg, "error");
+          window.setTimeout(() => setActionToast(null), 3000);
+          return;
+        }
+      }
       const res = await renderVideo(script.project_id, pipelineConfig.burnWatermark);
       useProjectStore.setState((state) =>
         state.script?.project_id === res.project_id
@@ -155,6 +175,8 @@ export const TopMenuBar: React.FC = () => {
           : "导出失败";
       setActionToast(msg);
       appendLog("env_backend", msg, isStub ? "warn" : "error");
+    } finally {
+      setIsExporting(false);
     }
     window.setTimeout(() => setActionToast(null), 3000);
   };
@@ -274,11 +296,12 @@ export const TopMenuBar: React.FC = () => {
               )}
               <button
                 type="button"
+                disabled={isExporting || isSynthesizing || isLoading || isPipelineRunning}
                 onClick={() => void handleExport()}
-                className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-[#3A6EA5] px-3 py-1 text-[12px] font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8]"
+                className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-[#3A6EA5] px-3 py-1 text-[12px] font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8] disabled:opacity-50"
               >
                 <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
-                <span>导出成片</span>
+                <span>{isExporting ? "导出中..." : "导出成片"}</span>
               </button>
             </>
           )
