@@ -18,7 +18,7 @@ from backend.schemas import (
     SegmentDurationCheck,
     ToolCallLog,
 )
-from backend.services.synthesis import create_openai_client
+from backend.services.translation import create_openai_client
 
 
 def _summarize_tool_result(tool_name: str, result: Dict[str, Any]) -> str:

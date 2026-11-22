@@ -11,6 +11,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -76,6 +77,7 @@ _gpu_task_lock = GpuTaskLock()
 _tts_proc_lock = threading.Lock()
 _tts_proc: Optional[subprocess.Popen[Any]] = None
 _tts_log_fp: Optional[Any] = None
+_tts_config_dir: tempfile.TemporaryDirectory | None = None
 
 
 def _probe_tts_ready(timeout: float = 1.0) -> bool:
@@ -88,7 +90,7 @@ def _probe_tts_ready(timeout: float = 1.0) -> bool:
 
 def ensure_tts_stopped() -> bool:
     """停止后端持有的 GPT-SoVITS 进程，等它退出后才释放句柄。"""
-    global _tts_proc, _tts_log_fp
+    global _tts_proc, _tts_log_fp, _tts_config_dir
     stopped = False
     with _tts_proc_lock:
         if _tts_proc is not None:
@@ -107,6 +109,9 @@ def ensure_tts_stopped() -> bool:
             except Exception:
                 pass
             _tts_log_fp = None
+        if _tts_config_dir is not None:
+            _tts_config_dir.cleanup()
+            _tts_config_dir = None
 
     if stopped:
         # 清理权重切换缓存，确保下次重启后按需重新加载角色权重
@@ -154,7 +159,7 @@ def _prepare_gpu_for_parse() -> None:
 
 def ensure_tts_running() -> None:
     """按需启动 GPT-SoVITS api_v2.py 并等待就绪；若已在线则直接复用。"""
-    global _tts_proc, _tts_log_fp
+    global _tts_proc, _tts_log_fp, _tts_config_dir
 
     if _probe_tts_ready(timeout=1.2):
         return
@@ -183,15 +188,27 @@ def ensure_tts_running() -> None:
         "-p",
         str(port),
     ]
-    if config.GPT_SOVITS_CONFIG and Path(config.GPT_SOVITS_CONFIG).is_file():
-        cmd.extend(["-c", config.GPT_SOVITS_CONFIG])
-
     with _tts_proc_lock:
         if _probe_tts_ready(timeout=1.0):
             return
         if _tts_proc is not None and _tts_proc.poll() is not None:
             _tts_proc = None
         if _tts_proc is None:
+            from backend.services.tts_client import reset_active_weights_cache
+
+            reset_active_weights_cache()
+            if _tts_config_dir is not None:
+                _tts_config_dir.cleanup()
+                _tts_config_dir = None
+            if _tts_log_fp is not None:
+                _tts_log_fp.close()
+                _tts_log_fp = None
+            if config.GPT_SOVITS_CONFIG and Path(config.GPT_SOVITS_CONFIG).is_file():
+                # GPT-SoVITS writes the active weights back to its config on each switch.
+                _tts_config_dir = tempfile.TemporaryDirectory(prefix="stagetts_tts_")
+                runtime_config = Path(_tts_config_dir.name) / "tts.yaml"
+                shutil.copyfile(config.GPT_SOVITS_CONFIG, runtime_config)
+                cmd.extend(["-c", str(runtime_config)])
             config.WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
             log_path = config.WORKSPACE_DIR / "_tts_server.log"
             _tts_log_fp = log_path.open("w", encoding="utf-8", errors="replace")

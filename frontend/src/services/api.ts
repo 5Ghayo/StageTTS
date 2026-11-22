@@ -2,8 +2,10 @@ import type {
   AgentChatResponse,
   ProjectMode,
   ProjectScript,
+  ReferencePreview,
   RenderResponse,
   SynthesizeResponse,
+  TranslationResponse,
 } from "../types/script";
 
 export class ApiError extends Error {
@@ -126,6 +128,26 @@ export function saveProjectScript(script: ProjectScript): Promise<ProjectScript>
       body: JSON.stringify(script),
     }
   );
+}
+
+export function uploadReference(projectId: string, file: File): Promise<{ wav: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  return requestJson(`/api/projects/${encodeURIComponent(projectId)}/references`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export function previewAutomaticReference(projectId: string, speaker: string): Promise<ReferencePreview> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(speaker)}/reference-preview`,
+    { method: "POST" }
+  );
+}
+
+export function translateProject(projectId: string): Promise<TranslationResponse> {
+  return requestJson(`/api/projects/${encodeURIComponent(projectId)}/translate`, { method: "POST" });
 }
 
 export function parseProjectMedia(

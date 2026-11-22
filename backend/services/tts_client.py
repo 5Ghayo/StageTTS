@@ -5,10 +5,13 @@ from __future__ import annotations
 import tempfile
 import wave
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
+import yaml
 from pydub import AudioSegment
 
 from backend import config
@@ -19,6 +22,7 @@ from backend.schemas import (
     Segment,
 )
 from backend.services.media_mixer import apply_gentle_tempo
+from backend.services.references import automatic_reference
 from backend.services.task_runner import ensure_tts_running, gpu_task_guard
 
 
@@ -26,16 +30,15 @@ class TTSServiceUnavailableError(RuntimeError):
     """GPT-SoVITS 推理服务不可达或响应超时。"""
 
 
-# 模块级权重缓存，避免连续单句精修同一角色时重复重载模型
-_active_gpt_weights: Optional[str] = None
-_active_sovits_weights: Optional[str] = None
+# Only track components that StageTTS changed. None marks an uncertain switch.
+_active_weights: dict[str, str | None] = {}
+_restore_weights: dict[str, str] = {}
 
 
 def reset_active_weights_cache() -> None:
     """GPT-SoVITS 按需重启后清空模块级权重缓存。"""
-    global _active_gpt_weights, _active_sovits_weights
-    _active_gpt_weights = None
-    _active_sovits_weights = None
+    _active_weights.clear()
+    _restore_weights.clear()
 
 
 def check_tts_service(timeout: float = 1.5) -> bool:
@@ -47,133 +50,91 @@ def check_tts_service(timeout: float = 1.5) -> bool:
         return False
 
 
-def resolve_emotion_reference(
-    character: Optional[CharacterConfig],
-    segment: Segment,
-) -> Optional[EmotionRef]:
-    """根据片段情绪动态路由参考音频；缺失时依次回退 neutral -> 首个可用参考音。"""
-    if character is None or not character.emotion_refs:
-        return None
-    if segment.emotion in character.emotion_refs:
-        return character.emotion_refs[segment.emotion]
-    if "neutral" in character.emotion_refs:
-        return character.emotion_refs["neutral"]
-    return next(iter(character.emotion_refs.values()))
-
-
-def _guess_prompt_lang(text: str, fallback: str = "zh") -> str:
-    if not text:
-        return fallback
-    # 检测日文平假名/片假名，避免日语原声参考被误判为中文
-    if any("\u3040" <= ch <= "\u30ff" for ch in text):
-        return "ja"
-    ascii_letters = sum(1 for ch in text if "a" <= ch.lower() <= "z")
-    return "en" if ascii_letters > len(text) * 0.5 else fallback
-
-
-def _extract_zeroshot_ref(
-    script: ProjectScript,
-    speaker: str,
-    tts_dir: Path,
-) -> Optional[Tuple[EmotionRef, Path]]:
-    """当未配置情绪参考音时，从 vocals.wav 截取 3~8s 原声作为零样本参考兜底。"""
-    if not script.media.vocals_wav:
-        return None
-    try:
-        vocals_path = config.resolve_media_path(script.media.vocals_wav)
-    except ValueError:
-        return None
-    if not vocals_path.is_file():
-        return None
-
-    speaker_segs = [s for s in script.segments if s.speaker == speaker]
-    if not speaker_segs:
-        return None
-
-    ideal = [s for s in speaker_segs if 3.0 <= (s.end - s.start) <= 8.0]
-    chosen = ideal[0] if ideal else max(speaker_segs, key=lambda s: s.end - s.start)
-
-    start_ms = max(0, int(chosen.start * 1000))
-    end_ms = max(start_ms + 3000, min(int(chosen.end * 1000), start_ms + 8000))
-
-    with vocals_path.open("rb") as source:
-        audio = AudioSegment.from_file(source)
-    if start_ms >= len(audio):
-        return None
-    clip = audio[start_ms : min(len(audio), end_ms)]
-    if len(clip) < 1000:
-        return None
-
-    out_path = tts_dir / f"_zeroshot_{speaker}.wav"
-    with out_path.open("wb") as output:
-        clip.export(output, format="wav")
-    prompt_text = chosen.orig_text.strip() or chosen.target_text.strip() or "这是一段参考语音。"
-    prompt_lang = _guess_prompt_lang(prompt_text, chosen.target_lang or "zh")
-    return EmotionRef(wav=str(out_path), text=prompt_text, lang=prompt_lang), out_path
-
-
 def _resolve_ref_for_segment(
-    script: ProjectScript,
-    character: Optional[CharacterConfig],
-    segment: Segment,
-    tts_dir: Path,
-) -> Optional[Tuple[EmotionRef, Path]]:
-    ref = resolve_emotion_reference(character, segment)
-    if ref is not None:
+    script: ProjectScript, character: CharacterConfig | None, segment: Segment,
+) -> tuple[EmotionRef, Path] | None:
+    if character:
+        refs = character.emotion_refs
+        for emotion in dict.fromkeys((segment.emotion, "neutral", *refs)):
+            ref = refs.get(emotion)
+            if ref and ref.text.strip() and ref.lang.strip():
+                try:
+                    path = config.resolve_media_path(ref.wav)
+                except ValueError:
+                    continue
+                if path.is_file():
+                    return ref, path
+    ref = automatic_reference(script, segment.speaker)
+    return (ref, config.resolve_media_path(ref.wav)) if ref else None
+
+
+def _default_weights() -> dict[str, str | None]:
+    weights = {}
+    if config.GPT_SOVITS_CONFIG:
         try:
-            ref_path = config.resolve_media_path(ref.wav)
-            if ref_path.is_file():
-                return ref, ref_path
-        except ValueError:
+            settings = yaml.safe_load(Path(config.GPT_SOVITS_CONFIG).read_text(encoding="utf-8")) or {}
+            custom = settings.get("custom") or {}
+            version = settings.get(custom.get("version", "v2")) or {}
+            weights = {**version, **{key: value for key, value in custom.items() if value}}
+        except (OSError, yaml.YAMLError, AttributeError, TypeError):
             pass
-    return _extract_zeroshot_ref(script, segment.speaker, tts_dir)
+    return {
+        "gpt": config.TTS_DEFAULT_GPT_WEIGHTS or str(weights.get("t2s_weights_path") or "") or None,
+        "sovits": config.TTS_DEFAULT_SOVITS_WEIGHTS or str(weights.get("vits_weights_path") or "") or None,
+    }
+
+
+def _set_weight(session: requests.Session, kind: str, custom: str, default: str | None) -> None:
+    if not custom and kind not in _active_weights:
+        return
+    baseline = _restore_weights.get(kind) or config.resolve_weights_path(default or "")
+    desired = config.resolve_weights_path(custom) if custom else baseline
+    if kind not in _active_weights and desired == baseline:
+        return
+    if not baseline:
+        raise RuntimeError(f"缺少默认 {kind.upper()} 权重")
+    if _active_weights.get(kind) != desired:
+        _restore_weights[kind] = baseline
+        _active_weights[kind] = None
+        try:
+            response = session.get(
+                f"{config.TTS_API_URL}/set_{kind}_weights",
+                params={"weights_path": desired}, timeout=config.TTS_TIMEOUT_SEC,
+            )
+        except requests.RequestException as exc:
+            raise TTSServiceUnavailableError(f"无法连接 GPT-SoVITS {kind.upper()} 权重接口") from exc
+        if response.status_code != 200:
+            raise RuntimeError(f"切换 {kind.upper()} 权重失败 ({response.status_code}): {response.text[:300]}")
+    if desired == baseline:
+        _active_weights.pop(kind, None)
+        _restore_weights.pop(kind, None)
+    else:
+        _active_weights[kind] = desired
 
 
 def _switch_weights(
-    session: requests.Session,
-    gpt_weights: Optional[str],
-    sovits_weights: Optional[str],
+    session: requests.Session, defaults: dict[str, str | None], gpt: str | None, sovits: str | None,
 ) -> None:
-    """按需切换 GPT/SoVITS 权重（缓存命中时跳过，避免重复重载引发显存抖动）。"""
-    global _active_gpt_weights, _active_sovits_weights
+    requested = {"sovits": (sovits or "").strip(), "gpt": (gpt or "").strip()}
+    missing = [kind.upper() for kind, path in requested.items() if path and not defaults[kind]]
+    if missing:
+        raise RuntimeError(f"请先配置 GPT-SoVITS 的默认 {' / '.join(missing)} 权重，以便切换后恢复")
+    # Loading SoVITS can change the active model version.
+    for kind, path in requested.items():
+        _set_weight(session, kind, path, defaults[kind])
 
-    if gpt_weights:
-        resolved_gpt = config.resolve_weights_path(gpt_weights)
-        if resolved_gpt != _active_gpt_weights:
-            try:
-                resp = session.get(
-                    f"{config.TTS_API_URL}/set_gpt_weights",
-                    params={"weights_path": resolved_gpt},
-                    timeout=config.TTS_TIMEOUT_SEC,
-                )
-            except requests.RequestException as exc:
-                raise TTSServiceUnavailableError(
-                    f"无法连接 GPT-SoVITS 权重接口 ({config.TTS_API_URL}): {exc}"
-                ) from exc
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"切换 GPT 权重失败 ({resp.status_code}): {resp.text[:300]}"
-                )
-            _active_gpt_weights = resolved_gpt
 
-    if sovits_weights:
-        resolved_sovits = config.resolve_weights_path(sovits_weights)
-        if resolved_sovits != _active_sovits_weights:
+@contextmanager
+def _weight_scope(session: requests.Session, errors: list[str]) -> Iterator[dict[str, str | None]]:
+    defaults = _default_weights()
+    try:
+        yield defaults
+    finally:
+        for kind in ("sovits", "gpt"):
             try:
-                resp = session.get(
-                    f"{config.TTS_API_URL}/set_sovits_weights",
-                    params={"weights_path": resolved_sovits},
-                    timeout=config.TTS_TIMEOUT_SEC,
-                )
-            except requests.RequestException as exc:
-                raise TTSServiceUnavailableError(
-                    f"无法连接 GPT-SoVITS 权重接口 ({config.TTS_API_URL}): {exc}"
-                ) from exc
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"切换 SoVITS 权重失败 ({resp.status_code}): {resp.text[:300]}"
-                )
-            _active_sovits_weights = resolved_sovits
+                _set_weight(session, kind, "", defaults[kind])
+            except RuntimeError as exc:
+                errors.append(f"恢复默认权重失败：{exc}")
 
 
 def measure_wav_duration(wav_path: Path) -> float:
@@ -267,19 +228,27 @@ def synthesize_segments_grouped(
             ensure_tts_running()
         except RuntimeError as exc:
             raise TTSServiceUnavailableError(str(exc)) from exc
-        with requests.Session() as session, tempfile.TemporaryDirectory(dir=tts_dir) as tmp_name:
+        with (
+            requests.Session() as session,
+            tempfile.TemporaryDirectory(dir=tts_dir) as tmp_name,
+            _weight_scope(session, errors) as default_weights,
+        ):
             tmp_dir = Path(tmp_name)
             for speaker, segs in grouped.items():
                 character = script.characters.get(speaker)
-                if character and (character.gpt_weights or character.sovits_weights):
-                    try:
-                        _switch_weights(session, character.gpt_weights, character.sovits_weights)
-                    except RuntimeError as exc:
-                        for seg in segs:
-                            seg.status = "error"
-                            errors.append(f"片段 #{seg.id} 加载角色权重失败：{exc}")
-                        continue
+                try:
+                    _switch_weights(
+                        session, default_weights,
+                        character.gpt_weights if character else None,
+                        character.sovits_weights if character else None,
+                    )
+                except RuntimeError as exc:
+                    for seg in segs:
+                        seg.status = "error"
+                        errors.append(f"片段 #{seg.id} 加载角色权重失败：{exc}")
+                    continue
 
+                references = {}
                 for seg in segs:
                     if not seg.target_text.strip():
                         seg.status = "error"
@@ -288,9 +257,11 @@ def synthesize_segments_grouped(
 
                     out_name = f"seg_{seg.id:04d}.wav"
                     try:
-                        resolved = _resolve_ref_for_segment(script, character, seg, tts_dir)
+                        if seg.emotion not in references:
+                            references[seg.emotion] = _resolve_ref_for_segment(script, character, seg)
+                        resolved = references[seg.emotion]
                         if resolved is None:
-                            raise RuntimeError("缺少有效情绪参考且无法从 vocals.wav 截取")
+                            raise RuntimeError("请配置角色参考音及逐字稿，或确认同角色的原文、说话人和源语种")
                         ref_obj, ref_path = resolved
                         raw_wav = tmp_dir / out_name
                         _synthesize_single_line(session, seg, ref_obj, ref_path, raw_wav)

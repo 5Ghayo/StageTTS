@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 
@@ -12,17 +11,8 @@ from backend import config
 from backend.agent.prompts import DURATION_REFLECTION_PROMPT
 from backend.schemas import ProjectScript, Segment, SegmentDurationCheck
 from backend.services.media_mixer import apply_gentle_tempo
+from backend.services.translation import DialogueContext, LLMNotConfiguredError, complete_dialogue, create_openai_client
 from backend.services.tts_client import measure_wav_duration, synthesize_segments_grouped
-
-
-class LLMNotConfiguredError(RuntimeError):
-    """未配置有效的 LLM API Key。"""
-
-
-def create_openai_client() -> OpenAI:
-    if not config.is_llm_configured():
-        raise LLMNotConfiguredError("请在 backend/.env 中配置 LLM_API_KEY、LLM_BASE_URL 与 LLM_MODEL。")
-    return OpenAI(api_key=config.LLM_API_KEY, base_url=config.LLM_BASE_URL, timeout=config.LLM_TIMEOUT_SEC)
 
 
 def _check_duration(seg: Segment) -> SegmentDurationCheck | None:
@@ -41,32 +31,19 @@ def _check_duration(seg: Segment) -> SegmentDurationCheck | None:
 
 
 def _rewrite_overflow(
-    client: OpenAI, segments: dict[int, Segment], checks: list[SegmentDurationCheck]
+    client: OpenAI, script: ProjectScript, segments: dict[int, Segment], checks: list[SegmentDurationCheck]
 ) -> dict[int, str]:
+    context = DialogueContext(script.model_copy(update={"segments": list(segments.values())}))
     payload = []
     for check in checks:
         seg = segments[check.segment_id]
         payload.append({
-            "id": seg.id,
-            "emotion": seg.emotion,
-            "target_lang": seg.target_lang,
-            "orig_text": seg.orig_text,
-            "current_target_text": seg.target_text,
-            "slot_duration_sec": check.slot_duration,
+            **context.entry(seg, actual_duration=check.actual_duration),
+            "target_text": seg.target_text,
             "actual_duration_sec": check.actual_duration,
             "overflow_seconds": check.overflow_seconds,
-            "recommended_max_chars": max(2, int(len(seg.target_text) / check.overflow_ratio * 0.95)),
         })
-    completion = client.chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[
-            {"role": "system", "content": DURATION_REFLECTION_PROMPT},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        temperature=0.3,
-    )
-    content = completion.choices[0].message.content or ""
-    entries = json.loads(content[content.find("["):content.rfind("]") + 1])
+    entries = complete_dialogue(client, DURATION_REFLECTION_PROMPT, context.payload(payload))
     requested = {check.segment_id for check in checks}
     rewrites = {}
     for entry in entries:
@@ -115,7 +92,7 @@ def synthesize_with_duration_check(
             try:
                 if client is None:
                     client = create_openai_client()
-                rewrites = _rewrite_overflow(client, segments, pending)
+                rewrites = _rewrite_overflow(client, script, segments, pending)
             except LLMNotConfiguredError:
                 errors.append(f"片段 {ids} 未自动改写：未配置 LLM。")
                 break

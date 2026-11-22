@@ -606,6 +606,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         const pollTimer = window.setInterval(() => void refreshParseStatus(), 1200);
 
         try {
+          if (projectState.isDirty) await saveProjectScript(activeScript);
           activeScript = await parseProjectMedia(activeScript.project_id, {
             target_lang: cfg.targetLang,
             compute_type: cfg.computeType,

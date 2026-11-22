@@ -73,6 +73,8 @@ ENV_PARSE_PYTHON: str = os.getenv("ENV_PARSE_PYTHON", "python").strip() or "pyth
 WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "large-v3").strip() or "large-v3"
 WHISPER_COMPUTE_TYPE: str = os.getenv("WHISPER_COMPUTE_TYPE", "float16").strip() or "float16"
 TTS_API_URL: str = os.getenv("TTS_API_URL", "http://127.0.0.1:9880").rstrip("/")
+TTS_DEFAULT_GPT_WEIGHTS: str = os.getenv("TTS_DEFAULT_GPT_WEIGHTS", "").strip()
+TTS_DEFAULT_SOVITS_WEIGHTS: str = os.getenv("TTS_DEFAULT_SOVITS_WEIGHTS", "").strip()
 
 # 可选模型缓存路径（用于重定向至非 C 盘目录）
 HF_HOME: str = os.getenv("HF_HOME", "").strip()

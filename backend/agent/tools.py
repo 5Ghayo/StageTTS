@@ -109,6 +109,12 @@ def batch_update_segments(
                 raise KeyError(f"片段 ID {patch.id} 不存在于项目 {project_id}")
             seg = seg_map[patch.id]
             patch_data = patch.model_dump(exclude={"id"}, exclude_none=True)
+            if "speaker" in patch_data:
+                if patch_data["speaker"] not in script.characters:
+                    raise ValueError("请先新建要指派的角色")
+                patch_data.setdefault("speaker_needs_review", False)
+            if "orig_text" in patch_data and patch_data["orig_text"] != seg.orig_text:
+                patch_data.setdefault("alignment_needs_review", True)
             needs_resynth = False
             for field_name, value in patch_data.items():
                 if getattr(seg, field_name) != value:
@@ -117,7 +123,8 @@ def batch_update_segments(
                         needs_resynth = True
             updated_ids.append(seg.id)
             if needs_resynth:
-                seg.status = "pending"
+                seg.invalidate_audio()
+            if needs_resynth and not seg.keep_original:
                 marked_pending_ids.append(seg.id)
 
         save_project_script(script)

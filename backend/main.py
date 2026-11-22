@@ -29,13 +29,16 @@ from backend.schemas import (
     ParseRequest,
     ProjectMode,
     ProjectScript,
+    ReferencePreview,
     RenderRequest,
     RenderResponse,
     SynthesizeRequest,
     SynthesizeResponse,
+    TranslationResponse,
 )
 from backend.services.media_mixer import check_ffmpeg_available
-from backend.services.synthesis import LLMNotConfiguredError
+from backend.services.references import automatic_reference, store_reference_audio
+from backend.services.translation import LLMNotConfiguredError, create_openai_client, translate_script
 from backend.services.task_runner import (
     GpuBusyError,
     ParseWorkerError,
@@ -205,6 +208,41 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
         )
     save_project_script(payload)
     return payload
+
+
+@app.post("/api/projects/{project_id}/references")
+def upload_project_reference(project_id: str, file: UploadFile = File(...)) -> dict[str, str]:
+    safe_id = _validate_project_id(project_id)
+    load_project_script(safe_id)
+    if file.size is not None and file.size > 32 * 1024 * 1024:
+        raise ValueError("参考音文件不能超过 32 MB")
+    return {"wav": store_reference_audio(safe_id, file.file)}
+
+
+@app.post("/api/projects/{project_id}/characters/{speaker}/reference-preview", response_model=ReferencePreview)
+def preview_automatic_reference(project_id: str, speaker: str) -> ReferencePreview:
+    safe_id = _validate_project_id(project_id)
+    with project_task_guard(safe_id):
+        script = load_project_script(safe_id)
+        if speaker not in script.characters:
+            raise FileNotFoundError("角色不存在")
+        ref = automatic_reference(script, speaker)
+        if ref is None:
+            raise ValueError("找不到 3–10 秒的同角色参考音。请确认台词原文、时间范围、说话人和源语种，或上传参考音")
+        return ref
+
+
+@app.post("/api/projects/{project_id}/translate", response_model=TranslationResponse)
+def retranslate_project(project_id: str) -> TranslationResponse:
+    safe_id = _validate_project_id(project_id)
+    with project_task_guard(safe_id):
+        script = load_project_script(safe_id)
+        translated = translate_script(script, create_openai_client())
+        if translated:
+            save_project_script(script)
+        return TranslationResponse(
+            script=script, translated_ids=translated, skipped_count=len(script.segments) - len(translated),
+        )
 
 
 # ---------------------------------------------------------------------------

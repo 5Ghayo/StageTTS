@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import argparse
 import gc
-import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -46,7 +44,7 @@ except ImportError:
 # 本 worker 仅在受控子进程中加载官方 Demucs/WhisperX/pyannote 检查点，显式开启兼容模式。
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 
-from backend.agent.prompts import DIRECTOR_TRANSLATE_PROMPT  # noqa: E402
+from backend import config  # noqa: E402
 from backend.schemas import (  # noqa: E402
     AvatarConfig,
     CharacterConfig,
@@ -54,10 +52,11 @@ from backend.schemas import (  # noqa: E402
     ProjectScript,
     Segment,
 )
+from backend.services.translation import create_openai_client, translate_script  # noqa: E402
 
+from workers.aligned_segments import normalize_segments  # noqa: E402
 from workers.demucs_stage import separate_stems  # noqa: E402
 
-VALID_EMOTIONS = {"neutral", "angry", "happy", "sad", "whisper"}
 SPEAKER_PALETTE = [
     "#3b82f6",
     "#10b981",
@@ -299,8 +298,8 @@ def _stage_whisperx_asr_align(
     if result is None:
         raise RuntimeError(f"WhisperX 语音识别全部方案失败: {last_exc}")
 
-    detected_lang = str(result.get("language") or "en")
-    if result.get("segments"):
+    detected_lang = str(result.get("language") or "")
+    if detected_lang and result.get("segments"):
         align_attempts = [used_device, "cpu"] if used_device == "cuda" else ["cpu"]
         for align_dev in align_attempts:
             align_model = None
@@ -330,11 +329,6 @@ def _stage_whisperx_asr_align(
     return audio, result, detected_lang
 
 
-def _is_valid_hf_token(token: str) -> bool:
-    t = (token or "").strip()
-    return bool(t) and t != "hf_your_token_here" and not t.startswith("hf_your_")
-
-
 def _stage_diarize(
     audio: Any,
     aligned_result: Dict[str, Any],
@@ -346,14 +340,17 @@ def _stage_diarize(
     if not segments:
         return []
 
-    hf_token = os.getenv("HF_TOKEN", "").strip()
-    if skip_diarization or not _is_valid_hf_token(hf_token):
+    if skip_diarization or not config.is_hf_token_configured():
         reason = "已通过参数跳过" if skip_diarization else "未配置有效 HF_TOKEN"
         _log("Stage3", f"{reason}，全部片段默认归属 SPEAKER_00")
-        return _normalize_raw_segments(segments)
+        return normalize_segments(segments)
 
     _enable_pyannote_torch_load_compat()
-    from whisperx.diarize import DiarizationPipeline, assign_word_speakers
+    try:
+        from whisperx.diarize import DiarizationPipeline, assign_word_speakers
+    except Exception as exc:
+        _log("Stage3", f"无法加载说话人聚类，待人工校对：{str(exc)[:220]}")
+        return normalize_segments(segments)
 
     attempts = [device, "cpu"] if device == "cuda" else ["cpu"]
     for diar_dev in attempts:
@@ -362,13 +359,13 @@ def _stage_diarize(
             _log("Stage3", f"启动 pyannote/speaker-diarization-3.1 (device={diar_dev})...")
             diarize_model = DiarizationPipeline(
                 model_name="pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token,
+                use_auth_token=config.HF_TOKEN,
                 device=diar_dev,
             )
             diarize_df = diarize_model(audio)
-            assigned = assign_word_speakers(diarize_df, aligned_result, fill_nearest=True)
+            assigned = assign_word_speakers(diarize_df, aligned_result, fill_nearest=False)
             _log("Stage3", f"说话人聚类完成 ({diar_dev})")
-            return _normalize_raw_segments(assigned.get("segments") or segments)
+            return normalize_segments(assigned.get("segments") or segments, diarized=True)
         except Exception as exc:
             _log("Stage3", f"说话人聚类 ({diar_dev}) 失败：{str(exc)[:220]}")
         finally:
@@ -377,146 +374,7 @@ def _stage_diarize(
             _release_cuda_memory()
 
     _log("Stage3", "pyannote 聚类不可用，回退单说话人 SPEAKER_00")
-    return _normalize_raw_segments(segments)
-
-
-def _normalize_raw_segments(raw_segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    cleaned: List[Dict[str, Any]] = []
-    for seg in raw_segments:
-        text = str(seg.get("text") or "").strip()
-        if not text:
-            continue
-        start = max(0.0, round(float(seg.get("start", 0.0)), 3))
-        end = round(float(seg.get("end", start + 0.5)), 3)
-        if end <= start:
-            end = round(start + 0.25, 3)
-        speaker = str(seg.get("speaker") or "SPEAKER_00").strip() or "SPEAKER_00"
-        cleaned.append(
-            {
-                "start": start,
-                "end": end,
-                "speaker": speaker,
-                "orig_text": text,
-            }
-        )
-    cleaned.sort(key=lambda item: (item["start"], item["end"]))
-    for idx, item in enumerate(cleaned):
-        item["id"] = idx
-    return cleaned
-
-
-def _parse_json_array(raw_text: str) -> List[Dict[str, Any]]:
-    cleaned = raw_text.strip()
-    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned)
-    if fence:
-        cleaned = fence.group(1).strip()
-    left = cleaned.find("[")
-    right = cleaned.rfind("]")
-    if left == -1 or right == -1 or right <= left:
-        return []
-    parsed = json.loads(cleaned[left : right + 1])
-    return [x for x in parsed if isinstance(x, dict)] if isinstance(parsed, list) else []
-
-
-def _is_llm_available() -> bool:
-    api_key = os.getenv("LLM_API_KEY", "").strip()
-    base_url = os.getenv("LLM_BASE_URL", "").strip()
-    if not api_key:
-        return False
-    placeholders = {"your_llm_api_key_here", "sk-xxx", "changeme", "local-gateway-no-key"}
-    if api_key in placeholders:
-        return base_url.startswith("http://127.0.0.1:") or base_url.startswith("http://localhost:")
-    return not api_key.startswith("your_")
-
-
-def _stage_director_annotate(
-    raw_segments: List[Dict[str, Any]],
-    target_lang: str,
-    skip_llm: bool,
-) -> List[Dict[str, Any]]:
-    """阶段 4：调用大模型进行口语化翻译、情绪/动作/原声叹词标注。"""
-    if not raw_segments:
-        return []
-
-    defaults: Dict[int, Dict[str, Any]] = {
-        seg["id"]: {
-            "target_text": seg["orig_text"],
-            "emotion": "neutral",
-            "action": "idle",
-            "keep_original": False,
-        }
-        for seg in raw_segments
-    }
-
-    if skip_llm or not _is_llm_available():
-        reason = "已通过参数跳过" if skip_llm else "未配置有效 LLM 网关"
-        _log("Stage4", f"{reason}，保留识别原文并填充默认情绪标签")
-        return [{**seg, **defaults[seg["id"]]} for seg in raw_segments]
-
-    from openai import OpenAI
-
-    client = OpenAI(
-        api_key=os.getenv("LLM_API_KEY", "local-gateway-no-key").strip(),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").strip(),
-        timeout=float(os.getenv("LLM_TIMEOUT_SEC", "60") or "60"),
-    )
-    model_name = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
-
-    batch_size = 25
-    for start_idx in range(0, len(raw_segments), batch_size):
-        chunk = raw_segments[start_idx : start_idx + batch_size]
-        prompt_payload = [
-            {
-                "id": seg["id"],
-                "speaker": seg["speaker"],
-                "slot_sec": round(seg["end"] - seg["start"], 2),
-                "orig_text": seg["orig_text"],
-            }
-            for seg in chunk
-        ]
-        user_prompt = (
-            f"目标配音语言：{target_lang}。\n"
-            "请为以下每条片段输出严格 JSON 数组，每项字段为："
-            '{"id": int, "target_text": str, "emotion": "neutral|angry|happy|sad|whisper", '
-            '"action": str, "keep_original": bool}。\n'
-            "仅输出 JSON 数组，不要附加解释：\n"
-            + json.dumps(prompt_payload, ensure_ascii=False, indent=2)
-        )
-        try:
-            _log(
-                "Stage4",
-                f"调用导演 LLM ({model_name}) 标注片段 #{chunk[0]['id']}..#{chunk[-1]['id']}...",
-            )
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": DIRECTOR_TRANSLATE_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.3,
-            )
-            content = resp.choices[0].message.content or ""
-            entries = _parse_json_array(content)
-            for entry in entries:
-                seg_id = entry.get("id")
-                if not isinstance(seg_id, int) or seg_id not in defaults:
-                    continue
-                target_text = str(entry.get("target_text") or "").strip()
-                emotion = str(entry.get("emotion") or "neutral").strip().lower()
-                if emotion not in VALID_EMOTIONS:
-                    emotion = "neutral"
-                action = str(entry.get("action") or "idle").strip() or "idle"
-                keep_original = bool(entry.get("keep_original", False))
-                defaults[seg_id] = {
-                    "target_text": target_text or defaults[seg_id]["target_text"],
-                    "emotion": emotion,
-                    "action": action,
-                    "keep_original": keep_original,
-                }
-        except Exception as exc:
-            _log("Stage4", f"LLM 标注批次失败，回退原文兜底：{str(exc)[:200]}")
-
-    return [{**seg, **defaults[seg["id"]]} for seg in raw_segments]
+    return normalize_segments(segments)
 
 
 def _build_and_save_script(
@@ -524,10 +382,13 @@ def _build_and_save_script(
     duration: float,
     vocals_wav: Path,
     bgm_wav: Optional[Path],
-    annotated_segments: List[Dict[str, Any]],
+    raw_segments: List[Dict[str, Any]],
+    detected_lang: str,
 ) -> Path:
     """组装并通过 Pydantic v2 强校验后落盘 workspace/{project_id}/script.json。"""
     project_id = args.project_id
+    script_out = args.output_dir / "script.json"
+    existing = ProjectScript.model_validate_json(script_out.read_text(encoding="utf-8")) if script_out.is_file() else None
     input_ext = args.input.suffix.lower()
     is_audio_only = input_ext in AUDIO_ONLY_EXTS
 
@@ -542,15 +403,11 @@ def _build_and_save_script(
                 shutil.copyfile(args.input, copied_input)
             source_video_url = f"/workspace/{project_id}/{copied_input.name}"
 
-    discovered_speakers: List[str] = []
-    for seg in annotated_segments:
-        if seg["speaker"] not in discovered_speakers:
-            discovered_speakers.append(seg["speaker"])
-    if not discovered_speakers:
-        discovered_speakers = ["SPEAKER_00"]
-
-    characters: Dict[str, CharacterConfig] = {}
+    discovered_speakers = list(dict.fromkeys(seg["speaker"] for seg in raw_segments))
+    characters = dict(existing.characters) if existing else {}
     for idx, spk in enumerate(discovered_speakers):
+        if spk in characters:
+            continue
         label = SPEAKER_LABELS[idx] if idx < len(SPEAKER_LABELS) else f"角色 {idx + 1}"
         color = SPEAKER_PALETTE[idx % len(SPEAKER_PALETTE)]
         avatar_slot = "host_a" if idx % 2 == 0 else "host_b"
@@ -566,27 +423,10 @@ def _build_and_save_script(
             ),
         )
 
-    segments: List[Segment] = []
-    for seg in annotated_segments:
-        keep_orig = bool(seg["keep_original"])
-        segments.append(
-            Segment(
-                id=int(seg["id"]),
-                start=float(seg["start"]),
-                end=float(seg["end"]),
-                speaker=str(seg["speaker"]),
-                orig_text=str(seg["orig_text"]),
-                target_text=str(seg["target_text"]),
-                target_lang=args.target_lang,
-                emotion=seg["emotion"],  # type: ignore[arg-type]
-                action=str(seg["action"]),
-                keep_original=keep_orig,
-                speed_factor=1.0,
-                tts_wav=None,
-                actual_duration=round(seg["end"] - seg["start"], 3) if keep_orig else None,
-                status="ready" if keep_orig else "pending",
-            )
-        )
+    segments = [
+        Segment(**seg, target_text=seg["orig_text"], target_lang=args.target_lang, action="idle")
+        for seg in raw_segments
+    ]
 
     max_seg_end = max((s.end for s in segments), default=0.0)
     final_duration = round(max(duration, max_seg_end), 3)
@@ -594,6 +434,8 @@ def _build_and_save_script(
     script = ProjectScript(
         project_id=project_id,
         mode=args.mode,
+        source_lang=(existing.source_lang if existing else None) or detected_lang or None,
+        glossary=existing.glossary if existing else {},
         media=MediaInfo(
             source_video=source_video_url,
             vocals_wav=f"/workspace/{project_id}/{vocals_wav.name}",
@@ -606,7 +448,12 @@ def _build_and_save_script(
         segments=segments,
     )
 
-    script_out = args.output_dir / "script.json"
+    if args.skip_llm or not config.is_llm_configured():
+        _log("Stage4", "跳过翻译或未配置 LLM，保留识别原文")
+    elif segments:
+        translated = translate_script(script, create_openai_client(), lambda message: _log("Stage4", message))
+        _log("Stage4", f"已翻译 {len(translated)}/{len(segments)} 条台词")
+
     with tempfile.TemporaryDirectory(dir=args.output_dir) as temp:
         draft = Path(temp) / script_out.name
         draft.write_text(script.model_dump_json(indent=2), encoding="utf-8")
@@ -677,7 +524,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             allow_cpu=args.allow_demucs_cpu or args.device == "cpu",
         )
 
-    audio, aligned_result, _detected_lang = _stage_whisperx_asr_align(
+    audio, aligned_result, detected_lang = _stage_whisperx_asr_align(
         vocals_wav=vocals_wav,
         compute_type=args.compute_type,
         whisper_model=args.whisper_model,
@@ -689,17 +536,16 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         device=device,
         skip_diarization=args.skip_diarization,
     )
-    annotated_segments = _stage_director_annotate(
-        raw_segments=raw_segments,
-        target_lang=args.target_lang,
-        skip_llm=args.skip_llm,
-    )
+    review_count = sum(seg["alignment_needs_review"] or seg["speaker_needs_review"] for seg in raw_segments)
+    if review_count:
+        _log("Stage3", f"{review_count} 条片段的原文范围或说话人待人工校对")
     return _build_and_save_script(
         args=args,
         duration=duration,
         vocals_wav=vocals_wav,
         bgm_wav=bgm_wav,
-        annotated_segments=annotated_segments,
+        raw_segments=raw_segments,
+        detected_lang=detected_lang,
     )
 
 

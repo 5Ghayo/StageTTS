@@ -61,7 +61,7 @@
 
 4. **动态情绪参考音频路由与零样本兜底**
    - 合成前根据 `segment.emotion` 查询 `characters[speaker].emotion_refs[emotion]`；若目标情绪不存在，自动回退到 `emotion_refs["neutral"]`，再无则取任意可用参考音。
-   - 若角色未绑定微调权重（`gpt_weights` 或 `sovits_weights` 为空），系统从 `vocals.wav` 中截取该角色 5–8 秒干净原声片段作为零样本克隆（Zero-shot）参考输入兜底。
+   - 缺少可用情绪参考时，从本项目 `vocals.wav` 按同角色已对齐或人工确认的台词范围截取 3–10 秒，并使用对应原文。切换角色权重后恢复服务默认权重。
 
 5. **Agent 严禁裸写 FFmpeg 或 Shell 命令**
    - 大模型 Agent 只能通过 OpenAI Function Calling 调度后端封装好的 **5 个确定性原子工具**（`query_script`、`batch_update_segments`、`synthesize_segments`、`update_mix_settings`、`render_final_video`）。禁止让 LLM 生成并执行任意 FFmpeg 命令或 Python 代码。
@@ -154,6 +154,7 @@
 | Root | `project_id` | `string` | 是 | 项目唯一 ID（对应 `workspace/{project_id}/` 目录名） |
 | Root | `mode` | `ProjectMode` | 是 | 当前工作模式 |
 | Root | `media` | `MediaInfo` | 是 | 媒体路径与全局混音参数 |
+| Root | `source_lang`, `glossary` | `string \| null`, `Record<string, string>` | 否 | 检测到或手工设定的源语种、项目术语表 |
 | Root | `characters` | `Record<string, CharacterConfig>` | 是 | 说话人映射字典（Key 如 `SPEAKER_00`） |
 | Root | `segments` | `Segment[]` | 是 | 按时间排序的台词片段列表 |
 | `media` | `source_video` | `string \| null` | 否 | 原视频/源音频 URL（如 `/workspace/{id}/input.mp4`） |
@@ -163,6 +164,7 @@
 | `media` | `duration` | `number` | 是 | 项目总时长（秒） |
 | `media` | `bgm_volume` | `number` | 是 | 伴奏混音系数（`0.0` ~ `2.0`，默认 `0.75`） |
 | `character` | `display_name` | `string` | 是 | 前端显示角色名 |
+| `character` | `speaking_style` | `string` | 否 | 翻译与时长改写使用的角色语气 |
 | `character` | `color` | `string` | 是 | 波形轨道色块 Hex 颜色（如 `#3b82f6`） |
 | `character` | `gpt_weights` | `string \| null` | 否 | GPT-SoVITS GPT 模型权重路径 |
 | `character` | `sovits_weights` | `string \| null` | 否 | GPT-SoVITS SoVITS 模型权重路径 |
@@ -173,6 +175,8 @@
 | `segment` | `end` | `number` | 是 | 结束时间（秒，必须 `> start`） |
 | `segment` | `speaker` | `string` | 是 | 关联 `characters` 的 Key |
 | `segment` | `orig_text` | `string` | 是 | 原语种识别文本 |
+| `segment` | `words` | `AlignedWord[]` | 否 | 词及绝对时间范围、原聚类标签，缺失值为空 |
+| `segment` | `alignment_needs_review`, `speaker_needs_review` | `boolean` | 否 | 原文范围和说话人校对状态，旧剧本默认待校对 |
 | `segment` | `target_text` | `string` | 是 | 目标配音文本 |
 | `segment` | `target_lang` | `string` | 是 | 目标语种代码（如 `zh`, `en`, `ja`） |
 | `segment` | `emotion` | `EmotionType` | 是 | 情绪标签 |
@@ -198,6 +202,9 @@
 | `POST` | `/api/projects/{project_id}/parse` | 触发 `env_parse` 子进程解析并生成 `script.json`（受单任务锁保护） | `ParseRequest`（含可选 `allow_demucs_cpu`，默认关闭） | `ProjectScript` |
 | `GET` | `/api/projects/{project_id}/script` | 读取指定项目的 `script.json` | — | `ProjectScript` |
 | `PUT` | `/api/projects/{project_id}/script` | 保存前端修改后的完整 `ProjectScript`（Pydantic 校验后落盘） | `ProjectScript` | `ProjectScript` |
+| `POST` | `/api/projects/{project_id}/references` | 上传 3–10 秒音频并转换为 WAV | `multipart/form-data` (`file`) | `{ wav }` |
+| `POST` | `/api/projects/{project_id}/characters/{speaker}/reference-preview` | 从同角色已校对原声生成试听 | — | `ReferencePreview` |
+| `POST` | `/api/projects/{project_id}/translate` | 按当前术语与角色设置重译，保留失败的台词 | — | `TranslationResponse` |
 | `POST` | `/api/projects/{project_id}/synthesize` | 按 `speaker` 分组批量合成指定片段并返回时长质检结果 | `SynthesizeRequest` | `SynthesizeResponse` |
 | `POST` | `/api/projects/{project_id}/agent/chat` | 自然语言批量剪辑对话（多轮工具调用 + 超时反思改写） | `AgentChatRequest` | `AgentChatResponse` |
 | `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + FFmpeg 混音导出 `output.mp4` | `RenderRequest` | `RenderResponse` |

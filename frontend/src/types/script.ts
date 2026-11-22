@@ -33,11 +33,19 @@ export interface AvatarConfig {
 
 export interface CharacterConfig {
   display_name: string;
+  speaking_style?: string;
   color: string;
   gpt_weights: string | null;
   sovits_weights: string | null;
   emotion_refs: Partial<Record<EmotionType, EmotionRef>>;
   avatar: AvatarConfig | null;
+}
+
+export interface AlignedWord {
+  word: string;
+  start: number | null;
+  end: number | null;
+  speaker: string | null;
 }
 
 export interface Segment {
@@ -46,6 +54,9 @@ export interface Segment {
   end: number;
   speaker: string;
   orig_text: string;
+  words?: AlignedWord[];
+  alignment_needs_review?: boolean;
+  speaker_needs_review?: boolean;
   target_text: string;
   target_lang: string;
   emotion: EmotionType;
@@ -62,6 +73,8 @@ export interface ProjectScript {
   project_id: string;
   mode: ProjectMode;
   media: MediaInfo;
+  source_lang?: string | null;
+  glossary?: Record<string, string>;
   characters: Record<string, CharacterConfig>;
   segments: Segment[];
 }
@@ -69,12 +82,25 @@ export interface ProjectScript {
 export interface SegmentPatch {
   id: number;
   speaker?: string;
+  orig_text?: string;
+  alignment_needs_review?: boolean;
+  speaker_needs_review?: boolean;
   target_text?: string;
   target_lang?: string;
   emotion?: EmotionType;
   action?: string | null;
   keep_original?: boolean;
   speed_factor?: number;
+}
+
+export interface ReferencePreview extends EmotionRef {
+  segment_ids: number[];
+}
+
+export interface TranslationResponse {
+  script: ProjectScript;
+  translated_ids: number[];
+  skipped_count: number;
 }
 
 export interface SegmentDurationCheck {

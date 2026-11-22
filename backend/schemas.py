@@ -44,6 +44,7 @@ class CharacterConfig(BaseModel):
     """说话人音色权重、情绪参考库与虚拟形象配置。"""
 
     display_name: str = Field(description="前端展示名称")
+    speaking_style: str = ""
     color: str = Field(default="#3b82f6", description="时间轴轨道色块 Hex 颜色")
     gpt_weights: Optional[str] = Field(default=None, description="GPT-SoVITS GPT 模型路径，留空走零样本兜底")
     sovits_weights: Optional[str] = Field(default=None, description="GPT-SoVITS SoVITS 模型路径，留空走零样本兜底")
@@ -54,6 +55,13 @@ class CharacterConfig(BaseModel):
     avatar: Optional[AvatarConfig] = Field(default=None, description="虚拟演播室形象配置")
 
 
+class AlignedWord(BaseModel):
+    word: str
+    start: float | None = None
+    end: float | None = None
+    speaker: str | None = None
+
+
 class Segment(BaseModel):
     """时间轴单句台词片段。"""
 
@@ -62,6 +70,9 @@ class Segment(BaseModel):
     end: float = Field(gt=0.0, description="结束时间（秒）")
     speaker: str = Field(description="关联 characters 的说话人 Key")
     orig_text: str = Field(default="", description="原片识别文本")
+    words: List[AlignedWord] = Field(default_factory=list)
+    alignment_needs_review: bool = True
+    speaker_needs_review: bool = True
     target_text: str = Field(default="", description="目标配音文本")
     target_lang: str = Field(default="zh", description="目标语种代码")
     emotion: EmotionType = Field(default="neutral", description="情绪标签")
@@ -79,6 +90,12 @@ class Segment(BaseModel):
             raise ValueError(f"Segment {self.id}: end ({self.end}) must be greater than start ({self.start})")
         return self
 
+    def invalidate_audio(self) -> None:
+        self.tts_wav = None
+        self.applied_speed_factor = None
+        self.actual_duration = round(self.end - self.start, 3) if self.keep_original else None
+        self.status = "ready" if self.keep_original else "pending"
+
 
 class ProjectScript(BaseModel):
     """全链路唯一真相源：script.json 顶层契约模型。"""
@@ -86,6 +103,8 @@ class ProjectScript(BaseModel):
     project_id: str = Field(min_length=1, description="项目唯一标识")
     mode: ProjectMode = Field(default="video_dubbing", description="工作模式")
     media: MediaInfo
+    source_lang: str | None = None
+    glossary: Dict[str, str] = Field(default_factory=dict)
     characters: Dict[str, CharacterConfig] = Field(default_factory=dict)
     segments: List[Segment] = Field(default_factory=list)
 
@@ -108,6 +127,9 @@ class SegmentPatch(BaseModel):
 
     id: int = Field(ge=0)
     speaker: Optional[str] = None
+    orig_text: Optional[str] = None
+    alignment_needs_review: Optional[bool] = None
+    speaker_needs_review: Optional[bool] = None
     target_text: Optional[str] = None
     target_lang: Optional[str] = None
     emotion: Optional[EmotionType] = None
@@ -123,6 +145,16 @@ class SynthesizeRequest(BaseModel):
         default=None,
         description="待合成片段 ID 列表；为空时合成全部 status != ready 且非 keep_original 的片段",
     )
+
+
+class TranslationResponse(BaseModel):
+    script: ProjectScript
+    translated_ids: list[int]
+    skipped_count: int
+
+
+class ReferencePreview(EmotionRef):
+    segment_ids: list[int]
 
 
 class SegmentDurationCheck(BaseModel):
