@@ -1,4 +1,3 @@
-import React, { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ChevronLeft,
@@ -8,6 +7,8 @@ import {
   Save,
   Sparkles,
 } from "lucide-react";
+import type React from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 import type { EmotionType } from "../types/script";
@@ -52,8 +53,7 @@ export const Inspector: React.FC = () => {
   const [auditionTime, setAuditionTime] = useState(0);
   const [auditionDuration, setAuditionDuration] = useState(0);
 
-  const segment =
-    script?.segments.find((seg) => seg.id === selectedSegmentId) ?? null;
+  const segment = script?.segments.find((seg) => seg.id === selectedSegmentId) ?? null;
 
   const auditionUrl = segment
     ? getCacheBustedUrl(segment.tts_wav, audioVersionMap[segment.id])
@@ -98,12 +98,13 @@ export const Inspector: React.FC = () => {
   const recommendedUnits = Math.max(1, Math.floor(slotDuration * (isCjk ? 5 : 2.8)));
   const actualDuration = segment.actual_duration;
   const fillRatio = actualDuration ? actualDuration / slotDuration : 0;
-  const isOverflow = actualDuration !== null && (
-    segment.applied_speed_factor == null ? fillRatio > 1.15 : actualDuration - slotDuration > 0.020
-  );
+  const isOverflow =
+    actualDuration != null &&
+    (segment.applied_speed_factor == null
+      ? fillRatio > 1.15
+      : actualDuration - slotDuration > 0.02);
 
-  const effectiveDuration =
-    auditionDuration > 0 ? auditionDuration : fallbackDuration;
+  const effectiveDuration = auditionDuration > 0 ? auditionDuration : fallbackDuration;
   const auditionProgress =
     effectiveDuration > 0
       ? Math.min(100, Math.max(0, (auditionTime / effectiveDuration) * 100))
@@ -196,20 +197,26 @@ export const Inspector: React.FC = () => {
                     if (e.currentTarget.currentTime >= segment.end) e.currentTarget.pause();
                   }}
                 />
-                <button type="button" className="hover:text-primary" onClick={async () => {
-                  const audio = sourceAudioRef.current;
-                  if (!audio) return;
-                  if (!audio.paused) {
-                    audio.pause();
-                    return;
-                  }
-                  try {
-                    audio.currentTime = segment.start;
-                    await audio.play();
-                  } catch {
-                    setSynthNote("原声试听失败");
-                  }
-                }}>播放 / 暂停原声</button>
+                <button
+                  type="button"
+                  className="hover:text-primary"
+                  onClick={async () => {
+                    const audio = sourceAudioRef.current;
+                    if (!audio) return;
+                    if (!audio.paused) {
+                      audio.pause();
+                      return;
+                    }
+                    try {
+                      audio.currentTime = segment.start;
+                      await audio.play();
+                    } catch {
+                      setSynthNote("原声试听失败");
+                    }
+                  }}
+                >
+                  播放 / 暂停原声
+                </button>
               </>
             )}
           </div>
@@ -224,9 +231,16 @@ export const Inspector: React.FC = () => {
           {segment.alignment_needs_review !== false && (
             <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
               <span className="text-status-warning">原文与时间范围待校对</span>
-              <button type="button" className="text-secondary hover:text-primary" disabled={editsDisabled || !segment.orig_text.trim()}
-                onClick={() => updateSegmentLocal({ id: segment.id, alignment_needs_review: false })}
-              >确认原文与时间范围</button>
+              <button
+                type="button"
+                className="text-secondary hover:text-primary"
+                disabled={editsDisabled || !segment.orig_text.trim()}
+                onClick={() =>
+                  updateSegmentLocal({ id: segment.id, alignment_needs_review: false })
+                }
+              >
+                确认原文与时间范围
+              </button>
             </div>
           )}
           {!!segment.words?.length && (
@@ -235,7 +249,8 @@ export const Inspector: React.FC = () => {
               <ul className="mt-1 max-h-28 overflow-y-auto">
                 {segment.words.map((word, index) => (
                   <li key={index}>
-                    {word.word} · {word.start == null || word.end == null
+                    {word.word} ·{" "}
+                    {word.start == null || word.end == null
                       ? "未对齐"
                       : `${word.start.toFixed(3)}–${word.end.toFixed(3)}s`}
                   </li>
@@ -251,9 +266,7 @@ export const Inspector: React.FC = () => {
             <span className="whitespace-nowrap text-secondary">配音台词</span>
             <span
               className={`shrink-0 whitespace-nowrap font-mono tabular-nums ${
-                usedUnits > recommendedUnits
-                  ? "text-status-warning"
-                  : "text-muted"
+                usedUnits > recommendedUnits ? "text-status-warning" : "text-muted"
               }`}
             >
               {usedUnits} {unit} · 建议 ≤ {recommendedUnits} {unit}
@@ -282,9 +295,7 @@ export const Inspector: React.FC = () => {
             <select
               value={segment.speaker}
               disabled={editsDisabled}
-              onChange={(e) =>
-                updateSegmentLocal({ id: segment.id, speaker: e.target.value })
-              }
+              onChange={(e) => updateSegmentLocal({ id: segment.id, speaker: e.target.value })}
               className="h-7 min-w-0 flex-1 truncate rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary transition-colors focus:border-white/25 focus:outline-none"
             >
               {speakers.map((spk) => (
@@ -297,9 +308,14 @@ export const Inspector: React.FC = () => {
           {segment.speaker_needs_review !== false && script.characters[segment.speaker] && (
             <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
               <span className="text-status-warning">说话人待校对</span>
-              <button type="button" className="text-secondary hover:text-primary" disabled={editsDisabled}
+              <button
+                type="button"
+                className="text-secondary hover:text-primary"
+                disabled={editsDisabled}
                 onClick={() => updateSegmentLocal({ id: segment.id, speaker: segment.speaker })}
-              >确认当前说话人</button>
+              >
+                确认当前说话人
+              </button>
             </div>
           )}
 
@@ -325,9 +341,7 @@ export const Inspector: React.FC = () => {
         {/* 情绪与语速组（虚线分隔，12px 组间距） */}
         <div className="space-y-2.5 border-t border-dashed border-white/[0.08] pt-3">
           <div className="space-y-1.5">
-            <span className="block whitespace-nowrap text-[11px] text-secondary">
-              配音情绪
-            </span>
+            <span className="block whitespace-nowrap text-[11px] text-secondary">配音情绪</span>
             <div className="grid h-[26px] grid-cols-5 gap-0.5 rounded-[4px] bg-[#181818] p-0.5">
               {EMOTIONS.map((emo) => {
                 const active = segment.emotion === emo.id;
@@ -335,9 +349,7 @@ export const Inspector: React.FC = () => {
                   <button
                     key={emo.id}
                     type="button"
-                    onClick={() =>
-                      updateSegmentLocal({ id: segment.id, emotion: emo.id })
-                    }
+                    onClick={() => updateSegmentLocal({ id: segment.id, emotion: emo.id })}
                     className={`flex items-center justify-center gap-1 whitespace-nowrap rounded-[3px] text-[11px] transition-colors ${
                       active
                         ? "bg-[#333333] font-medium text-[#FFFFFF]"
@@ -379,9 +391,7 @@ export const Inspector: React.FC = () => {
             />
             <span
               className={`w-10 shrink-0 whitespace-nowrap text-right font-mono tabular-nums text-[11px] ${
-                segment.speed_factor > 1.15
-                  ? "text-status-warning"
-                  : "text-primary"
+                segment.speed_factor > 1.15 ? "text-status-warning" : "text-primary"
               }`}
             >
               {segment.speed_factor.toFixed(2)}x
@@ -390,18 +400,13 @@ export const Inspector: React.FC = () => {
 
           {segment.speed_factor > 1.15 && (
             <p className="flex items-center gap-1 text-[11px] text-status-warning">
-              <AlertTriangle
-                className="h-3.5 w-3.5 shrink-0"
-                strokeWidth={1.5}
-              />
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
               <span>加速过高易失真，超长句建议改用 AI 助手精简</span>
             </p>
           )}
 
           <label className="flex cursor-pointer items-center justify-between gap-2 text-[11px]">
-            <span className="truncate text-secondary">
-              保留原声（笑声、叹息不替换）
-            </span>
+            <span className="truncate text-secondary">保留原声（笑声、叹息不替换）</span>
             <input
               type="checkbox"
               checked={segment.keep_original}
@@ -425,12 +430,12 @@ export const Inspector: React.FC = () => {
                 className={`shrink-0 whitespace-nowrap font-mono tabular-nums ${
                   isOverflow
                     ? "text-status-error"
-                    : actualDuration !== null
+                    : actualDuration != null
                       ? "text-primary"
                       : "text-status-warning"
                 }`}
               >
-                {actualDuration !== null
+                {actualDuration != null
                   ? `${actualDuration.toFixed(1)}s / ${slotDuration.toFixed(1)}s`
                   : `待合成 (${slotDuration.toFixed(1)}s)`}
               </span>
@@ -455,9 +460,7 @@ export const Inspector: React.FC = () => {
           {/* 极简自定义 28px 试听条 */}
           {auditionUrl && (
             <div className="space-y-1">
-              <span className="block whitespace-nowrap text-[11px] text-secondary">
-                当前句试听
-              </span>
+              <span className="block whitespace-nowrap text-[11px] text-secondary">当前句试听</span>
               <audio
                 key={auditionUrl}
                 ref={audioRef}
@@ -484,15 +487,9 @@ export const Inspector: React.FC = () => {
                   className="flex h-5 w-5 shrink-0 items-center justify-center rounded-[3px] text-primary transition-colors hover:bg-[#363636]"
                 >
                   {isAuditionPlaying ? (
-                    <Pause
-                      className="h-3.5 w-3.5 fill-current"
-                      strokeWidth={1.5}
-                    />
+                    <Pause className="h-3.5 w-3.5 fill-current" strokeWidth={1.5} />
                   ) : (
-                    <Play
-                      className="ml-0.5 h-3.5 w-3.5 fill-current"
-                      strokeWidth={1.5}
-                    />
+                    <Play className="ml-0.5 h-3.5 w-3.5 fill-current" strokeWidth={1.5} />
                   )}
                 </button>
 
@@ -514,8 +511,7 @@ export const Inspector: React.FC = () => {
                 </div>
 
                 <span className="shrink-0 whitespace-nowrap font-mono tabular-nums text-[11px] text-secondary">
-                  {formatMiniTime(auditionTime)} /{" "}
-                  {formatMiniTime(effectiveDuration)}
+                  {formatMiniTime(auditionTime)} / {formatMiniTime(effectiveDuration)}
                 </span>
               </div>
             </div>

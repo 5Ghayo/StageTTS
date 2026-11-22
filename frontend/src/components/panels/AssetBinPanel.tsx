@@ -1,5 +1,5 @@
-import React from "react";
 import { X } from "lucide-react";
+import type React from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 import { CharacterPanel } from "./CharacterPanel";
@@ -51,10 +51,7 @@ export const AssetBinPanel: React.FC = () => {
             <TranslationSettings key={script.project_id} script={script} />
             <div className="divide-y divide-white/[0.05] border-b border-dashed border-white/[0.08]">
               {mediaRows.map((row) => (
-                <div
-                  key={row.label}
-                  className="flex h-8 items-center justify-between px-3.5"
-                >
+                <div key={row.label} className="flex h-8 items-center justify-between px-3.5">
                   <span className="text-primary">{row.label}</span>
                   <span className="flex items-center gap-1.5 text-[11px] text-secondary">
                     <span
@@ -69,9 +66,7 @@ export const AssetBinPanel: React.FC = () => {
             </div>
 
             <div className="p-3.5">
-              <div className="mb-1.5 text-[11px] font-medium text-secondary">
-                台词跳转
-              </div>
+              <div className="mb-1.5 text-[11px] font-medium text-secondary">台词跳转</div>
               <div className="space-y-0.5">
                 {script.segments.map((seg) => (
                   <button
@@ -84,9 +79,7 @@ export const AssetBinPanel: React.FC = () => {
                     className="flex h-7 w-full items-center justify-between rounded-[4px] px-2 text-left text-[11px] text-secondary transition-colors hover:bg-[#2C2C2C] hover:text-primary"
                   >
                     <span className="truncate">
-                      <span className="font-mono tabular-nums text-muted">
-                        #{seg.id}
-                      </span>{" "}
+                      <span className="font-mono tabular-nums text-muted">#{seg.id}</span>{" "}
                       {seg.target_text}
                     </span>
                     <span className="ml-2 shrink-0 font-mono tabular-nums text-[10px] text-muted">

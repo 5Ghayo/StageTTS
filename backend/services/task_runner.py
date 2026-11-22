@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import urlparse
 
-import requests
+import httpx
 
 from backend import config
 
@@ -82,9 +82,9 @@ _tts_config_dir: tempfile.TemporaryDirectory | None = None
 
 def _probe_tts_ready(timeout: float = 1.0) -> bool:
     try:
-        resp = requests.get(f"{config.TTS_API_URL}/", timeout=timeout)
+        resp = httpx.get(f"{config.TTS_API_URL}/", timeout=timeout)
         return resp.status_code < 500
-    except requests.RequestException:
+    except httpx.HTTPError:
         return False
 
 

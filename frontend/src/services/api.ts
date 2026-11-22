@@ -1,23 +1,29 @@
+import createClient from "openapi-fetch";
+import type { components, paths } from "../types/api.generated";
 import type {
   AgentChatResponse,
+  GpuDevice,
+  GpuStatusResponse,
+  HealthResponse,
+  ParseStatusResponse,
   ProjectMode,
   ProjectScript,
   ReferencePreview,
+  ReferenceUploadResponse,
   RenderResponse,
   SynthesizeResponse,
   TranslationResponse,
+  UploadResponse,
 } from "../types/script";
+
+export type { GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
 
 export class ApiError extends Error {
   status: number;
   isNotImplemented: boolean;
   isNetworkError: boolean;
 
-  constructor(
-    message: string,
-    status: number,
-    options?: { isNetworkError?: boolean }
-  ) {
+  constructor(message: string, status: number, options?: { isNetworkError?: boolean }) {
     super(message);
     this.name = "ApiError";
     this.status = status;
@@ -26,80 +32,49 @@ export class ApiError extends Error {
   }
 }
 
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  let response: Response;
+export const apiClient = createClient<paths>({ baseUrl: "" });
+
+async function unwrap<T>(
+  promise: Promise<{ data?: T; error?: unknown; response: Response }>,
+): Promise<T> {
+  let result: { data?: T; error?: unknown; response: Response };
   try {
-    response = await fetch(url, init);
+    result = await promise;
   } catch (err) {
-    throw new ApiError(
-      err instanceof Error ? err.message : "无法连接到 StageTTS 后端服务",
-      0,
-      { isNetworkError: true }
-    );
+    throw new ApiError(err instanceof Error ? err.message : "无法连接到 StageTTS 后端服务", 0, {
+      isNetworkError: true,
+    });
   }
 
-  if (!response.ok) {
-    let detail = `请求失败 (${response.status})`;
-    try {
-      const data = (await response.json()) as { detail?: string };
-      if (data?.detail) {
-        detail = data.detail;
-      }
-    } catch {
-      // ignore non-json error body
+  if (!result.response.ok || result.error !== undefined || result.data === undefined) {
+    let detail = `请求失败 (${result.response.status})`;
+    const errObj = result.error as { detail?: string } | undefined;
+    if (errObj?.detail) {
+      detail = errObj.detail;
     }
-    throw new ApiError(detail, response.status);
+    throw new ApiError(detail, result.response.status);
   }
 
-  return (await response.json()) as T;
-}
-
-export interface HealthResponse {
-  status: string;
-  busy: boolean;
-  workspace_dir?: string;
-  assets_dir?: string;
-}
-
-export interface UploadResponse {
-  project_id: string;
-  media_url: string;
-  duration: number;
-}
-
-export interface ParseStatusResponse {
-  active: boolean;
-  project_id: string | null;
-  stage: string;
-  logs: string[];
-  log_count?: number;
-  error: string | null;
-  updated_at: number;
+  return result.data;
 }
 
 export function checkHealth(): Promise<HealthResponse> {
-  return requestJson<HealthResponse>("/api/health");
+  return unwrap(apiClient.GET("/api/health"));
 }
 
-export interface GpuDevice {
-  name: string;
-  used_mib: number;
-  total_mib: number;
-}
-
-export function fetchGpuStatus(signal: AbortSignal): Promise<{ devices: GpuDevice[] }> {
-  return requestJson<{ devices: GpuDevice[] }>("/api/gpu", { signal, cache: "no-store" });
+export function fetchGpuStatus(signal?: AbortSignal): Promise<GpuStatusResponse> {
+  return unwrap(apiClient.GET("/api/gpu", { signal, cache: "no-store" }));
 }
 
 export async function fetchProjects(): Promise<string[]> {
-  const data = await requestJson<{ projects: string[] }>("/api/projects");
+  const data = await unwrap(apiClient.GET("/api/projects"));
   return data.projects;
 }
 
 export function uploadProjectMedia(
   file: File,
   mode: ProjectMode = "video_dubbing",
-  projectId = ""
+  projectId = "",
 ): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
@@ -107,108 +82,145 @@ export function uploadProjectMedia(
   if (projectId) {
     form.append("project_id", projectId);
   }
-  return requestJson<UploadResponse>("/api/projects/upload", {
-    method: "POST",
-    body: form,
-  });
+  return unwrap(
+    apiClient.POST("/api/projects/upload", {
+      body: form as unknown as components["schemas"]["Body_upload_project_media_api_projects_upload_post"],
+    }),
+  );
 }
 
 export function fetchProjectScript(projectId: string): Promise<ProjectScript> {
-  return requestJson<ProjectScript>(
-    `/api/projects/${encodeURIComponent(projectId)}/script`
+  return unwrap(
+    apiClient.GET("/api/projects/{project_id}/script", {
+      params: { path: { project_id: projectId } },
+    }),
   );
 }
 
 export function saveProjectScript(script: ProjectScript): Promise<ProjectScript> {
-  return requestJson<ProjectScript>(
-    `/api/projects/${encodeURIComponent(script.project_id)}/script`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(script),
-    }
+  return unwrap(
+    apiClient.PUT("/api/projects/{project_id}/script", {
+      params: { path: { project_id: script.project_id } },
+      body: script,
+    }),
   );
 }
 
-export function uploadReference(projectId: string, file: File): Promise<{ wav: string }> {
+export function uploadReference(projectId: string, file: File): Promise<ReferenceUploadResponse> {
   const form = new FormData();
   form.append("file", file);
-  return requestJson(`/api/projects/${encodeURIComponent(projectId)}/references`, {
-    method: "POST",
-    body: form,
-  });
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/references", {
+      params: { path: { project_id: projectId } },
+      body: form as unknown as components["schemas"]["Body_upload_project_reference_api_projects__project_id__references_post"],
+    }),
+  );
 }
 
-export function previewAutomaticReference(projectId: string, speaker: string): Promise<ReferencePreview> {
-  return requestJson(
-    `/api/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(speaker)}/reference-preview`,
-    { method: "POST" }
+export function previewAutomaticReference(
+  projectId: string,
+  speaker: string,
+): Promise<ReferencePreview> {
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/characters/{speaker}/reference-preview", {
+      params: { path: { project_id: projectId, speaker } },
+    }),
   );
 }
 
 export function translateProject(projectId: string): Promise<TranslationResponse> {
-  return requestJson(`/api/projects/${encodeURIComponent(projectId)}/translate`, { method: "POST" });
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/translate", {
+      params: { path: { project_id: projectId } },
+    }),
+  );
 }
 
 export function parseProjectMedia(
   projectId: string,
-  options: { target_lang: string; compute_type: "float16" | "int8"; allow_demucs_cpu?: boolean }
+  options: { target_lang: string; compute_type: "float16" | "int8"; allow_demucs_cpu?: boolean },
 ): Promise<ProjectScript> {
-  return requestJson<ProjectScript>(
-    `/api/projects/${encodeURIComponent(projectId)}/parse`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(options),
-    }
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/parse", {
+      params: { path: { project_id: projectId } },
+      body: {
+        target_lang: options.target_lang,
+        compute_type: options.compute_type,
+        allow_demucs_cpu: options.allow_demucs_cpu ?? false,
+      },
+    }),
   );
 }
 
 export function fetchParseStatus(projectId: string): Promise<ParseStatusResponse> {
-  return requestJson<ParseStatusResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/parse/status`
+  return unwrap(
+    apiClient.GET("/api/projects/{project_id}/parse/status", {
+      params: { path: { project_id: projectId } },
+    }),
   );
+}
+
+/**
+ * 通过 SSE 实时订阅离线解析进度与日志，返回关闭订阅的清理函数。
+ */
+export function subscribeParseStatus(
+  projectId: string,
+  onUpdate: (status: ParseStatusResponse) => void,
+  onError?: () => void,
+): () => void {
+  if (typeof EventSource === "undefined") {
+    onError?.();
+    return () => {};
+  }
+  const url = `/api/projects/${encodeURIComponent(projectId)}/parse/stream`;
+  const source = new EventSource(url);
+  source.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data) as ParseStatusResponse;
+      onUpdate(data);
+    } catch {
+      // ignore malformed SSE chunk
+    }
+  };
+  source.onerror = () => {
+    source.close();
+    onError?.();
+  };
+  return () => {
+    source.close();
+  };
 }
 
 export function synthesizeSegments(
   projectId: string,
-  segmentIds?: number[]
+  segmentIds?: number[],
 ): Promise<SynthesizeResponse> {
-  return requestJson<SynthesizeResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/synthesize`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ segment_ids: segmentIds ?? null }),
-    }
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/synthesize", {
+      params: { path: { project_id: projectId } },
+      body: { segment_ids: segmentIds ?? null },
+    }),
   );
 }
 
 export function sendAgentChat(
   projectId: string,
   message: string,
-  autoSynthesize = true
+  autoSynthesize = true,
 ): Promise<AgentChatResponse> {
-  return requestJson<AgentChatResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/agent/chat`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, auto_synthesize: autoSynthesize }),
-    }
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/agent/chat", {
+      params: { path: { project_id: projectId } },
+      body: { message, auto_synthesize: autoSynthesize },
+    }),
   );
 }
 
-export function renderVideo(
-  projectId: string,
-  burnWatermark = false
-): Promise<RenderResponse> {
-  return requestJson<RenderResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/render`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ burn_watermark: burnWatermark }),
-    }
+export function renderVideo(projectId: string, burnWatermark = false): Promise<RenderResponse> {
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/render", {
+      params: { path: { project_id: projectId } },
+      body: { burn_watermark: burnWatermark },
+    }),
   );
 }

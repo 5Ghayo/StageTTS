@@ -1,5 +1,6 @@
-import React, { useEffect } from "react";
 import { Bot, Sliders, Terminal, Wrench } from "lucide-react";
+import type React from "react";
+import { useEffect } from "react";
 import { AgentChat } from "./components/AgentChat";
 import { Inspector } from "./components/Inspector";
 import { TimelinePR } from "./components/TimelinePR";
@@ -10,10 +11,7 @@ import { ResizableSplit } from "./components/layout/ResizableSplit";
 import { TopMenuBar } from "./components/layout/TopMenuBar";
 import { WelcomeCanvas } from "./components/layout/WelcomeCanvas";
 import { AssetBinPanel } from "./components/panels/AssetBinPanel";
-import {
-  NodeInspectorPanel,
-  PipelineLogsPanel,
-} from "./components/panels/NodeInspectorPanel";
+import { NodeInspectorPanel, PipelineLogsPanel } from "./components/panels/NodeInspectorPanel";
 import { PipelineGraph } from "./components/workflow/PipelineGraph";
 import { useProjectStore } from "./store/useProjectStore";
 import { useWorkflowStore } from "./store/useWorkflowStore";
@@ -205,13 +203,7 @@ export const App: React.FC = () => {
                 minSize={45}
                 maxSize={78}
                 className="h-full"
-                first={
-                  workspacePreset === "stage" ? (
-                    <VirtualStage />
-                  ) : (
-                    <VideoPreview />
-                  )
-                }
+                first={workspacePreset === "stage" ? <VirtualStage /> : <VideoPreview />}
                 second={renderEditingRightPanel()}
               />
             }
@@ -225,9 +217,7 @@ export const App: React.FC = () => {
   return (
     <div className="flex h-screen flex-col gap-[2px] overflow-hidden bg-[#121212] text-primary">
       <TopMenuBar />
-      <main className="flex min-h-0 flex-1 overflow-hidden">
-        {renderMainBody()}
-      </main>
+      <main className="flex min-h-0 flex-1 overflow-hidden">{renderMainBody()}</main>
     </div>
   );
 };

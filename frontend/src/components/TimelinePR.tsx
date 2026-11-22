@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef } from "react";
-import WaveSurfer from "wavesurfer.js";
 import { AlertCircle, ZoomIn, ZoomOut } from "lucide-react";
+import type React from "react";
+import { useEffect, useMemo, useRef } from "react";
+import WaveSurfer from "wavesurfer.js";
 import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
@@ -85,9 +86,7 @@ export const TimelinePR: React.FC = () => {
     const barCount = 120;
     return Array.from({ length: barCount }).map((_, idx) => {
       const t = (idx / barCount) * duration;
-      const inSeg = script?.segments.some(
-        (seg) => t >= seg.start && t <= seg.end
-      );
+      const inSeg = script?.segments.some((seg) => t >= seg.start && t <= seg.end);
       const amp = inSeg
         ? 0.35 + 0.6 * Math.abs(Math.sin(idx * 1.37) * Math.cos(idx * 0.43))
         : 0.08 + 0.08 * Math.abs(Math.sin(idx * 0.7));
@@ -103,7 +102,7 @@ export const TimelinePR: React.FC = () => {
   }
 
   const pendingCount = script.segments.filter(
-    (seg) => !seg.keep_original && seg.status !== "ready"
+    (seg) => !seg.keep_original && seg.status !== "ready",
   ).length;
 
   const handleRulerSeek = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -117,12 +116,10 @@ export const TimelinePR: React.FC = () => {
       {/* 紧凑工具条（右侧留足 pr-4，避免 + 按钮贴边裁切） */}
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] bg-[#222222] pl-3.5 pr-4">
         <div className="flex min-w-0 items-center gap-2.5">
-          <span className="shrink-0 text-[13px] font-medium text-primary">
-            时间轴
-          </span>
+          <span className="shrink-0 text-[13px] font-medium text-primary">时间轴</span>
           <span className="truncate font-mono tabular-nums text-[11px] text-secondary">
-            <span className="text-primary">{formatShortTime(currentTime)}</span>{" "}
-            / {formatShortTime(duration)}
+            <span className="text-primary">{formatShortTime(currentTime)}</span> /{" "}
+            {formatShortTime(duration)}
           </span>
         </div>
 
@@ -257,10 +254,7 @@ export const TimelinePR: React.FC = () => {
 
         {/* 右侧可滚动轨道画布（#161616 深灰井） */}
         <div className="relative flex-1 overflow-x-auto overflow-y-hidden bg-[#161616] pl-2.5">
-          <div
-            className="relative min-h-full"
-            style={{ width: `${trackWidthPx}px` }}
-          >
+          <div className="relative min-h-full" style={{ width: `${trackWidthPx}px` }}>
             {/* 贯穿所有轨道的极淡垂直虚线时间网格（rgba(255,255,255,0.05)） */}
             <div className="pointer-events-none absolute inset-x-0 bottom-0 top-6 z-0">
               {tickMarks.map((sec) => (
@@ -319,8 +313,7 @@ export const TimelinePR: React.FC = () => {
                 const width = Math.max(80, slotDuration * timelineZoom);
                 const isSelected = seg.id === selectedSegmentId;
                 const isOverflow =
-                  seg.actual_duration !== null &&
-                  seg.actual_duration > slotDuration * 1.15;
+                  seg.actual_duration != null && seg.actual_duration > slotDuration * 1.15;
 
                 return (
                   <button
@@ -337,16 +330,12 @@ export const TimelinePR: React.FC = () => {
                       borderLeftColor: speakerAccent,
                     }}
                     className={`absolute inset-y-1.5 flex flex-col justify-between overflow-hidden rounded-[4px] border border-l-[3px] px-2 py-1 text-left transition-colors ${
-                      isSelected
-                        ? "bg-[#333333]"
-                        : "bg-[#2A2A2A] hover:bg-[#303030]"
+                      isSelected ? "bg-[#333333]" : "bg-[#2A2A2A] hover:bg-[#303030]"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1 text-[10px] leading-tight">
                       <span className="truncate font-medium text-secondary">
-                        <span className="font-mono tabular-nums">
-                          #{seg.id}
-                        </span>{" "}
+                        <span className="font-mono tabular-nums">#{seg.id}</span>{" "}
                         {character?.display_name ?? seg.speaker}
                       </span>
                       <span
@@ -375,10 +364,7 @@ export const TimelinePR: React.FC = () => {
                       )}
                       {isOverflow && (
                         <span className="flex items-center gap-0.5 rounded-[3px] bg-black/25 px-1 py-0.5 text-status-error">
-                          <AlertCircle
-                            className="h-2.5 w-2.5"
-                            strokeWidth={1.5}
-                          />
+                          <AlertCircle className="h-2.5 w-2.5" strokeWidth={1.5} />
                           超时
                         </span>
                       )}

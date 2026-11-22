@@ -340,22 +340,29 @@ ffprobe -version
 
 ---
 
-### 5.2 安装 Node.js
+### 5.2 安装 Node.js 与 pnpm
 
-推荐 Node.js 20 LTS。
+推荐 Node.js 20 LTS（前端使用 `pnpm` 管理依赖与 `pnpm-lock.yaml`）。
 
 验证：
 
 ```powershell
 node -v
-npm -v
+pnpm -v
+```
+
+若尚未安装 `pnpm`，可先启用 Corepack 或全局安装：
+
+```powershell
+corepack enable
+# 或 npm install -g pnpm
 ```
 
 然后进入前端目录安装依赖：
 
 ```powershell
 cd frontend
-npm install
+pnpm install
 ```
 
 ---
@@ -598,7 +605,7 @@ http://127.0.0.1:8000/api/health
 
 ```powershell
 cd frontend
-npm run dev
+pnpm dev
 ```
 
 浏览器打开：

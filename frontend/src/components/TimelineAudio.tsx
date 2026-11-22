@@ -4,33 +4,57 @@ import type { Segment } from "../types/script";
 
 const EMPTY_SEGMENTS: Segment[] = [];
 
+function syncMediaElement(
+  media: HTMLMediaElement | null,
+  src: string | null,
+  time: number,
+  playing: boolean,
+  rate: number,
+) {
+  if (!media || !src) return;
+  if (media.playbackRate !== rate) media.playbackRate = rate;
+  const position = Math.max(0, time);
+  const inRange = time >= 0 && (!Number.isFinite(media.duration) || time < media.duration);
+  if (
+    media.readyState >= HTMLMediaElement.HAVE_METADATA &&
+    !media.seeking &&
+    inRange &&
+    (media.ended || Math.abs(media.currentTime - position) > (playing ? 0.12 : 0.01))
+  ) {
+    media.currentTime = position;
+  }
+  if (playing && inRange && media.paused) {
+    void media.play().catch(() => {});
+  } else if ((!playing || !inRange) && !media.paused) {
+    media.pause();
+  }
+}
+
 export function useSyncedMedia<T extends HTMLMediaElement>(
-  src: string | null, time: number, playing: boolean, rate = 1
+  src: string | null,
+  time: number,
+  playing: boolean,
+  rate = 1,
 ) {
   const ref = useRef<T>(null);
 
-  function sync() {
-    const media = ref.current;
-    if (!media || !src) return;
-    if (media.playbackRate !== rate) media.playbackRate = rate;
-    const position = Math.max(0, time);
-    const inRange = time >= 0 && (!Number.isFinite(media.duration) || time < media.duration);
-    if (media.readyState >= HTMLMediaElement.HAVE_METADATA && !media.seeking && inRange
-      && (media.ended || Math.abs(media.currentTime - position) > (playing ? 0.12 : 0.01))) {
-      media.currentTime = position;
-    }
-    if (playing && inRange && media.paused) {
-      void media.play().catch(() => {});
-    } else if ((!playing || !inRange) && !media.paused) {
-      media.pause();
-    }
-  }
-
-  useEffect(sync, [src, time, playing, rate]);
-  return { ref, onLoadedMetadata: sync };
+  useEffect(() => {
+    syncMediaElement(ref.current, src, time, playing, rate);
+  }, [src, time, playing, rate]);
+  return {
+    ref,
+    onLoadedMetadata: () => syncMediaElement(ref.current, src, time, playing, rate),
+  };
 }
 
-function PreviewAudio({ src, time, playing, muted, volume = 1, rate = 1 }: {
+function PreviewAudio({
+  src,
+  time,
+  playing,
+  muted,
+  volume = 1,
+  rate = 1,
+}: {
   src: string;
   time: number;
   playing: boolean;
@@ -48,22 +72,38 @@ function PreviewAudio({ src, time, playing, muted, volume = 1, rate = 1 }: {
 export function useDubClips(time: number) {
   const segments = useProjectStore((s) => s.script?.segments ?? EMPTY_SEGMENTS);
   const versions = useProjectStore((s) => s.audioVersionMap);
-  const clips = useMemo(() => segments.flatMap((segment) => {
-    if (segment.keep_original || segment.status !== "ready" || !segment.tts_wav) return [];
-    const src = getCacheBustedUrl(segment.tts_wav, versions[segment.id]) ?? segment.tts_wav;
-    const slot = segment.end - segment.start;
-    const rate = segment.applied_speed_factor == null ? segment.speed_factor : 1;
-    return [{ segment, src, rate, end: segment.start + (segment.actual_duration ?? slot) / rate }];
-  }), [segments, versions]);
+  const clips = useMemo(
+    () =>
+      segments.flatMap((segment) => {
+        if (segment.keep_original || segment.status !== "ready" || !segment.tts_wav) return [];
+        const src = getCacheBustedUrl(segment.tts_wav, versions[segment.id]) ?? segment.tts_wav;
+        const slot = segment.end - segment.start;
+        const rate = segment.applied_speed_factor == null ? segment.speed_factor : 1;
+        return [
+          { segment, src, rate, end: segment.start + (segment.actual_duration ?? slot) / rate },
+        ];
+      }),
+    [segments, versions],
+  );
   return {
-    replacesSource: clips.some(({ segment, end }) =>
-      time >= segment.start && time < Math.max(end, segment.end)
+    replacesSource: clips.some(
+      ({ segment, end }) => time >= segment.start && time < Math.max(end, segment.end),
     ),
     upcomingClips: clips.filter(({ segment, end }) => time >= segment.start - 0.5 && time < end),
   };
 }
 
-export function TimelineAudio({ clips, time, playing, dubMuted, vocals, bgm, muteVocals, muteBgm, bgmVolume }: {
+export function TimelineAudio({
+  clips,
+  time,
+  playing,
+  dubMuted,
+  vocals,
+  bgm,
+  muteVocals,
+  muteBgm,
+  bgmVolume,
+}: {
   clips: ReturnType<typeof useDubClips>["upcomingClips"];
   time: number;
   playing: boolean;
@@ -76,8 +116,18 @@ export function TimelineAudio({ clips, time, playing, dubMuted, vocals, bgm, mut
 }) {
   return (
     <>
-      {vocals && <PreviewAudio src={vocals} time={time} playing={playing} muted={Boolean(muteVocals)} />}
-      {bgm && <PreviewAudio src={bgm} time={time} playing={playing} muted={Boolean(muteBgm)} volume={bgmVolume} />}
+      {vocals && (
+        <PreviewAudio src={vocals} time={time} playing={playing} muted={Boolean(muteVocals)} />
+      )}
+      {bgm && (
+        <PreviewAudio
+          src={bgm}
+          time={time}
+          playing={playing}
+          muted={Boolean(muteBgm)}
+          volume={bgmVolume}
+        />
+      )}
       {clips.map(({ segment, src, rate }) => (
         <PreviewAudio
           key={`${segment.id}:${src}`}

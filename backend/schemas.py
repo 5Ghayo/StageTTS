@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field, model_validator
 
 ProjectMode = Literal["video_dubbing", "virtual_stage"]
@@ -50,6 +51,7 @@ class CharacterConfig(BaseModel):
     sovits_weights: Optional[str] = Field(default=None, description="GPT-SoVITS SoVITS 模型路径，留空走零样本兜底")
     emotion_refs: Dict[EmotionType, EmotionRef] = Field(
         default_factory=dict,
+        json_schema_extra={"default": {}},
         description="按情绪标签映射的参考音频字典",
     )
     avatar: Optional[AvatarConfig] = Field(default=None, description="虚拟演播室形象配置")
@@ -70,7 +72,7 @@ class Segment(BaseModel):
     end: float = Field(gt=0.0, description="结束时间（秒）")
     speaker: str = Field(description="关联 characters 的说话人 Key")
     orig_text: str = Field(default="", description="原片识别文本")
-    words: List[AlignedWord] = Field(default_factory=list)
+    words: List[AlignedWord] = Field(default_factory=list, json_schema_extra={"default": []})
     alignment_needs_review: bool = True
     speaker_needs_review: bool = True
     target_text: str = Field(default="", description="目标配音文本")
@@ -104,14 +106,84 @@ class ProjectScript(BaseModel):
     mode: ProjectMode = Field(default="video_dubbing", description="工作模式")
     media: MediaInfo
     source_lang: str | None = None
-    glossary: Dict[str, str] = Field(default_factory=dict)
-    characters: Dict[str, CharacterConfig] = Field(default_factory=dict)
-    segments: List[Segment] = Field(default_factory=list)
+    glossary: Dict[str, str] = Field(default_factory=dict, json_schema_extra={"default": {}})
+    characters: Dict[str, CharacterConfig] = Field(
+        default_factory=dict, json_schema_extra={"default": {}},
+    )
+    segments: List[Segment] = Field(default_factory=list, json_schema_extra={"default": []})
 
 
 # ---------------------------------------------------------------------------
 # REST API 与 Agent 工具请求/响应模型
 # ---------------------------------------------------------------------------
+
+
+class ReadinessInfo(BaseModel):
+    """后端外部依赖与环境就绪状态。"""
+
+    ffmpeg: bool
+    tts_service: bool
+    tts_auto_manage: bool
+    tts_url: str
+    llm_configured: bool
+    hf_token_configured: bool
+    env_parse_python: str
+
+
+class HealthResponse(BaseModel):
+    """健康检查响应。"""
+
+    status: str
+    busy: bool
+    workspace_dir: str
+    assets_dir: str
+    readiness: ReadinessInfo
+
+
+class GpuDevice(BaseModel):
+    """单张 NVIDIA GPU 显存状态（MiB）。"""
+
+    name: str
+    used_mib: int
+    total_mib: int
+
+
+class GpuStatusResponse(BaseModel):
+    """GPU 显存状态列表响应。"""
+
+    devices: List[GpuDevice] = Field(default_factory=list, json_schema_extra={"default": []})
+
+
+class ProjectListResponse(BaseModel):
+    """项目列表响应。"""
+
+    projects: List[str] = Field(default_factory=list, json_schema_extra={"default": []})
+
+
+class ReferenceUploadResponse(BaseModel):
+    """参考音上传响应。"""
+
+    wav: str
+
+
+class UploadResponse(BaseModel):
+    """项目媒体上传响应。"""
+
+    project_id: str
+    media_url: str
+    duration: float
+
+
+class ParseStatusResponse(BaseModel):
+    """离线解析进度与日志响应。"""
+
+    active: bool
+    project_id: Optional[str] = None
+    stage: str
+    logs: List[str] = Field(default_factory=list, json_schema_extra={"default": []})
+    log_count: int = 0
+    error: Optional[str] = None
+    updated_at: float
 
 
 class ParseRequest(BaseModel):
@@ -172,9 +244,11 @@ class SynthesizeResponse(BaseModel):
     """语音合成接口返回结果。"""
 
     project_id: str
-    synthesized_ids: List[int] = Field(default_factory=list)
-    overflow_segments: List[SegmentDurationCheck] = Field(default_factory=list)
-    errors: List[str] = Field(default_factory=list)
+    synthesized_ids: List[int] = Field(default_factory=list, json_schema_extra={"default": []})
+    overflow_segments: List[SegmentDurationCheck] = Field(
+        default_factory=list, json_schema_extra={"default": []},
+    )
+    errors: List[str] = Field(default_factory=list, json_schema_extra={"default": []})
     script: ProjectScript
 
 
@@ -189,7 +263,7 @@ class ToolCallLog(BaseModel):
     """供前端 AgentChat 展示的工具调用审计日志。"""
 
     tool_name: str
-    arguments: Dict[str, Any] = Field(default_factory=dict)
+    arguments: Dict[str, Any] = Field(default_factory=dict, json_schema_extra={"default": {}})
     result_summary: str = ""
 
 
@@ -198,8 +272,8 @@ class AgentChatResponse(BaseModel):
 
     project_id: str
     reply: str
-    tool_logs: List[ToolCallLog] = Field(default_factory=list)
-    synthesized_ids: List[int] = Field(default_factory=list)
+    tool_logs: List[ToolCallLog] = Field(default_factory=list, json_schema_extra={"default": []})
+    synthesized_ids: List[int] = Field(default_factory=list, json_schema_extra={"default": []})
     script: ProjectScript
 
 

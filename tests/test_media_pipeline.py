@@ -132,6 +132,17 @@ class SynthesisTest(unittest.TestCase):
 
 
 class ParseTest(unittest.TestCase):
+    def test_probe_duration_parses_ffprobe_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory) / "sample.wav"
+            write_wav(media, 1.0, rate=800)
+            proc = SimpleNamespace(stdout='{"format": {"duration": "12.3456"}}')
+            with (
+                patch.object(parse_worker.shutil, "which", return_value="/usr/bin/ffprobe"),
+                patch.object(parse_worker.subprocess, "run", return_value=proc),
+            ):
+                self.assertEqual(parse_worker._probe_duration(media), 12.346)
+
     def test_managed_process_exits_and_external_service_blocks_parse(self):
         managed = MagicMock()
         managed.poll.return_value = None

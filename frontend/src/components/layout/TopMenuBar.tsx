@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Clapperboard,
   Cpu,
@@ -10,7 +10,9 @@ import {
   Sparkles,
   Workflow,
 } from "lucide-react";
-import { ApiError, fetchGpuStatus, renderVideo, type GpuDevice } from "../../services/api";
+import type React from "react";
+import { useState } from "react";
+import { ApiError, type GpuDevice, fetchGpuStatus, renderVideo } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 import type { WorkspacePreset } from "../../types/workflow";
@@ -61,26 +63,14 @@ export const TopMenuBar: React.FC = () => {
   const appendLog = useWorkflowStore((s) => s.appendLog);
 
   const [actionToast, setActionToast] = useState<string | null>(null);
-  const [gpus, setGpus] = useState<GpuDevice[]>([]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let nextPoll: number | undefined;
-    const poll = async () => {
-      try {
-        const { devices } = await fetchGpuStatus(controller.signal);
-        if (!controller.signal.aborted) setGpus(devices);
-      } catch {
-        if (!controller.signal.aborted) setGpus([]);
-      }
-      if (!controller.signal.aborted) nextPoll = window.setTimeout(poll, 3000);
-    };
-    void poll();
-    return () => {
-      controller.abort();
-      window.clearTimeout(nextPoll);
-    };
-  }, []);
+  const { data: gpuData } = useQuery({
+    queryKey: ["gpu-status"],
+    queryFn: ({ signal }) => fetchGpuStatus(signal),
+    enabled: backendStatus === "online",
+    refetchInterval: 3000,
+    retry: false,
+  });
+  const gpus = gpuData?.devices ?? [];
 
   const primaryGpu = gpus[0];
   const gpuTitle = gpus.length
@@ -110,9 +100,10 @@ export const TopMenuBar: React.FC = () => {
       return;
     }
     setActionToast("正在按需启动 GPT-SoVITS 并配音...");
-    const ids = pendingCount === 0
-      ? script.segments.filter((seg) => !seg.keep_original).map((seg) => seg.id)
-      : undefined;
+    const ids =
+      pendingCount === 0
+        ? script.segments.filter((seg) => !seg.keep_original).map((seg) => seg.id)
+        : undefined;
     const res = await synthesizeSegment(ids);
     setActionToast(res.message);
     if (res.issues?.length) {
@@ -136,13 +127,17 @@ export const TopMenuBar: React.FC = () => {
     }
     setActionToast("导出中...");
     try {
-      const res = await renderVideo(
-        script.project_id,
-        pipelineConfig.burnWatermark
+      const res = await renderVideo(script.project_id, pipelineConfig.burnWatermark);
+      useProjectStore.setState((state) =>
+        state.script?.project_id === res.project_id
+          ? {
+              script: {
+                ...state.script,
+                media: { ...state.script.media, output_video: res.output_video },
+              },
+            }
+          : state,
       );
-      useProjectStore.setState((state) => state.script?.project_id === res.project_id
-        ? { script: { ...state.script, media: { ...state.script.media, output_video: res.output_video } } }
-        : state);
       setActionToast("已导出成片");
       appendLog("env_backend", `导出成功: ${res.output_video}`, "success");
     } catch (err) {
@@ -169,17 +164,11 @@ export const TopMenuBar: React.FC = () => {
       {/* 左侧：Logo · 状态点 · 无边框项目标签 · 柔和次操作保存按钮 */}
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1.5 text-[13px] font-medium text-primary">
-          <Clapperboard
-            className="h-4 w-4 text-secondary"
-            strokeWidth={1.5}
-          />
+          <Clapperboard className="h-4 w-4 text-secondary" strokeWidth={1.5} />
           <span>StageTTS</span>
         </div>
 
-        <span
-          title={statusTitle}
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`}
-        />
+        <span title={statusTitle} className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`} />
 
         <span className="flex h-6 items-center rounded-[4px] bg-white/[0.04] px-2 font-mono tabular-nums text-[11px] text-secondary">
           {script ? script.project_id : "未打开项目"}
@@ -196,10 +185,7 @@ export const TopMenuBar: React.FC = () => {
             {isDirty ? (
               <span className="h-1.5 w-1.5 rounded-full bg-status-warning" />
             ) : (
-              <Save
-                className="h-3.5 w-3.5 text-secondary"
-                strokeWidth={1.5}
-              />
+              <Save className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
             )}
             <span>{isDirty ? "保存*" : "保存"}</span>
           </button>
@@ -219,9 +205,7 @@ export const TopMenuBar: React.FC = () => {
               type="button"
               onClick={() => setWorkspacePreset(preset.id)}
               className={`flex h-6 items-center gap-1.5 rounded-[3px] px-3 text-[12px] font-medium transition-colors ${
-                active
-                  ? "bg-[#333333] text-[#FFFFFF]"
-                  : "text-secondary hover:text-primary"
+                active ? "bg-[#333333] text-[#FFFFFF]" : "text-secondary hover:text-primary"
               }`}
             >
               {preset.icon}

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import requests
+import httpx
 import yaml
 from pydub import AudioSegment
 
@@ -44,9 +44,9 @@ def reset_active_weights_cache() -> None:
 def check_tts_service(timeout: float = 1.5) -> bool:
     """快速探测 GPT-SoVITS api_v2.py 是否在线。"""
     try:
-        resp = requests.get(f"{config.TTS_API_URL}/", timeout=timeout)
+        resp = httpx.get(f"{config.TTS_API_URL}/", timeout=timeout)
         return resp.status_code < 500
-    except requests.RequestException:
+    except httpx.HTTPError:
         return False
 
 
@@ -84,7 +84,7 @@ def _default_weights() -> dict[str, str | None]:
     }
 
 
-def _set_weight(session: requests.Session, kind: str, custom: str, default: str | None) -> None:
+def _set_weight(client: httpx.Client, kind: str, custom: str, default: str | None) -> None:
     if not custom and kind not in _active_weights:
         return
     baseline = _restore_weights.get(kind) or config.resolve_weights_path(default or "")
@@ -97,11 +97,11 @@ def _set_weight(session: requests.Session, kind: str, custom: str, default: str 
         _restore_weights[kind] = baseline
         _active_weights[kind] = None
         try:
-            response = session.get(
+            response = client.get(
                 f"{config.TTS_API_URL}/set_{kind}_weights",
                 params={"weights_path": desired}, timeout=config.TTS_TIMEOUT_SEC,
             )
-        except requests.RequestException as exc:
+        except httpx.HTTPError as exc:
             raise TTSServiceUnavailableError(f"无法连接 GPT-SoVITS {kind.upper()} 权重接口") from exc
         if response.status_code != 200:
             raise RuntimeError(f"切换 {kind.upper()} 权重失败 ({response.status_code}): {response.text[:300]}")
@@ -113,7 +113,7 @@ def _set_weight(session: requests.Session, kind: str, custom: str, default: str 
 
 
 def _switch_weights(
-    session: requests.Session, defaults: dict[str, str | None], gpt: str | None, sovits: str | None,
+    client: httpx.Client, defaults: dict[str, str | None], gpt: str | None, sovits: str | None,
 ) -> None:
     requested = {"sovits": (sovits or "").strip(), "gpt": (gpt or "").strip()}
     missing = [kind.upper() for kind, path in requested.items() if path and not defaults[kind]]
@@ -121,18 +121,18 @@ def _switch_weights(
         raise RuntimeError(f"请先配置 GPT-SoVITS 的默认 {' / '.join(missing)} 权重，以便切换后恢复")
     # Loading SoVITS can change the active model version.
     for kind, path in requested.items():
-        _set_weight(session, kind, path, defaults[kind])
+        _set_weight(client, kind, path, defaults[kind])
 
 
 @contextmanager
-def _weight_scope(session: requests.Session, errors: list[str]) -> Iterator[dict[str, str | None]]:
+def _weight_scope(client: httpx.Client, errors: list[str]) -> Iterator[dict[str, str | None]]:
     defaults = _default_weights()
     try:
         yield defaults
     finally:
         for kind in ("sovits", "gpt"):
             try:
-                _set_weight(session, kind, "", defaults[kind])
+                _set_weight(client, kind, "", defaults[kind])
             except RuntimeError as exc:
                 errors.append(f"恢复默认权重失败：{exc}")
 
@@ -152,7 +152,7 @@ def measure_wav_duration(wav_path: Path) -> float:
 
 
 def _synthesize_single_line(
-    session: requests.Session,
+    client: httpx.Client,
     seg: Segment,
     ref: EmotionRef,
     ref_path: Path,
@@ -168,12 +168,12 @@ def _synthesize_single_line(
         "media_type": "wav",
     }
     try:
-        resp = session.post(
+        resp = client.post(
             f"{config.TTS_API_URL}/tts",
             json=payload,
             timeout=config.TTS_TIMEOUT_SEC,
         )
-    except requests.RequestException as exc:
+    except httpx.HTTPError as exc:
         raise TTSServiceUnavailableError(
             f"无法连接 GPT-SoVITS 服务 ({config.TTS_API_URL})，请确认已启动 api_v2.py: {exc}"
         ) from exc
@@ -229,7 +229,7 @@ def synthesize_segments_grouped(
         except RuntimeError as exc:
             raise TTSServiceUnavailableError(str(exc)) from exc
         with (
-            requests.Session() as session,
+            httpx.Client() as session,
             tempfile.TemporaryDirectory(dir=tts_dir) as tmp_name,
             _weight_scope(session, errors) as default_weights,
         ):

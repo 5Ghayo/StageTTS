@@ -1,5 +1,5 @@
-import React from "react";
 import { Film, Home, Users } from "lucide-react";
+import type React from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 

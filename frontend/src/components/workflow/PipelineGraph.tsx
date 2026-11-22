@@ -1,20 +1,18 @@
-import React, { useMemo } from "react";
 import {
   Background,
   BackgroundVariant,
   Controls,
   MiniMap,
+  type NodeTypes,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
-  type NodeTypes,
 } from "@xyflow/react";
+import type React from "react";
+import { useMemo } from "react";
 import "@xyflow/react/dist/style.css";
 import { Maximize2, Play, RotateCcw } from "lucide-react";
-import {
-  useWorkflowStore,
-  type StageFlowNode,
-} from "../../store/useWorkflowStore";
+import { type StageFlowNode, useWorkflowStore } from "../../store/useWorkflowStore";
 import { StageNode } from "./StageNode";
 
 const PipelineGraphInner: React.FC = () => {
@@ -33,7 +31,7 @@ const PipelineGraphInner: React.FC = () => {
     () => ({
       stageNode: StageNode,
     }),
-    []
+    [],
   );
 
   const handleReset = () => {

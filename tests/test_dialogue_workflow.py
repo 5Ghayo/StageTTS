@@ -169,7 +169,7 @@ class DialogueWorkflowTest(unittest.TestCase):
             with (
                 patch.object(tts_client, "ensure_tts_running"),
                 patch.object(tts_client, "_default_weights", return_value=defaults),
-                patch.object(tts_client.requests, "Session") as factory,
+                patch.object(tts_client.httpx, "Client") as factory,
             ):
                 factory.return_value.__enter__.return_value = session
                 self.assertEqual(tts_client.synthesize_segments_grouped(script), ([0, 1, 2], []))

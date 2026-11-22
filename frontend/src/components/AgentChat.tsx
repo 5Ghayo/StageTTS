@@ -1,5 +1,6 @@
-import React, { useState } from "react";
 import { ChevronDown, ChevronRight, Send, Wrench } from "lucide-react";
+import type React from "react";
+import { useState } from "react";
 import { ApiError, sendAgentChat } from "../services/api";
 import { useProjectStore } from "../store/useProjectStore";
 import type { SegmentPatch, ToolCallLog } from "../types/script";
@@ -21,17 +22,13 @@ export const AgentChat: React.FC = () => {
   const backendStatus = useProjectStore((s) => s.backendStatus);
   const setScript = useProjectStore((s) => s.setScript);
   const bumpAudioVersion = useProjectStore((s) => s.bumpAudioVersion);
-  const batchUpdateSegmentsLocal = useProjectStore(
-    (s) => s.batchUpdateSegmentsLocal
-  );
+  const batchUpdateSegmentsLocal = useProjectStore((s) => s.batchUpdateSegmentsLocal);
   const updateBgmVolume = useProjectStore((s) => s.updateBgmVolume);
   const synthesizeSegment = useProjectStore((s) => s.synthesizeSegment);
 
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [expandedMessages, setExpandedMessages] = useState<
-    Record<string, boolean>
-  >({});
+  const [expandedMessages, setExpandedMessages] = useState<Record<string, boolean>>({});
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
@@ -44,7 +41,7 @@ export const AgentChat: React.FC = () => {
     setExpandedMessages((prev) => ({ ...prev, [msgId]: !prev[msgId] }));
 
   const runSimulatedAgent = async (
-    instruction: string
+    instruction: string,
   ): Promise<{ reply: string; toolLogs: ToolCallLog[] }> => {
     if (!script) {
       return { reply: "请先打开一个项目。", toolLogs: [] };
@@ -70,9 +67,7 @@ export const AgentChat: React.FC = () => {
     }
 
     if (instruction.includes("愤怒") || instruction.includes("0-5")) {
-      const matched = script.segments.filter(
-        (seg) => seg.start <= 5.0 && !seg.keep_original
-      );
+      const matched = script.segments.filter((seg) => seg.start <= 5.0 && !seg.keep_original);
       logs.push({
         tool_name: "query_script",
         arguments: { project_id: script.project_id, start_sec: 0, end_sec: 5 },
@@ -112,7 +107,7 @@ export const AgentChat: React.FC = () => {
     const longSegs = candidates.filter((seg) => {
       const slot = Math.max(0.2, seg.end - seg.start);
       return (
-        (seg.actual_duration !== null && seg.actual_duration > slot * 1.15) ||
+        (seg.actual_duration != null && seg.actual_duration > slot * 1.15) ||
         seg.target_text.length > Math.floor(slot * 5) + 4
       );
     });
@@ -121,9 +116,7 @@ export const AgentChat: React.FC = () => {
       const patches: SegmentPatch[] = longSegs.map((seg) => ({
         id: seg.id,
         target_text:
-          seg.target_text.length > 16
-            ? `${seg.target_text.slice(0, 14)}！`
-            : seg.target_text,
+          seg.target_text.length > 16 ? `${seg.target_text.slice(0, 14)}！` : seg.target_text,
       }));
       batchUpdateSegmentsLocal(patches);
       logs.push({
@@ -133,9 +126,7 @@ export const AgentChat: React.FC = () => {
       });
     }
 
-    const pendingIds = (
-      longSegs.length > 0 ? longSegs : candidates.slice(-1)
-    ).map((s) => s.id);
+    const pendingIds = (longSegs.length > 0 ? longSegs : candidates.slice(-1)).map((s) => s.id);
     await synthesizeSegment(pendingIds);
     logs.push({
       tool_name: "synthesize_segments",
@@ -195,10 +186,7 @@ export const AgentChat: React.FC = () => {
     } catch (err) {
       const isUnavailableOrOffline =
         err instanceof ApiError &&
-        (err.status === 502 ||
-          err.status === 504 ||
-          err.isNotImplemented ||
-          err.isNetworkError);
+        (err.status === 502 || err.status === 504 || err.isNotImplemented || err.isNetworkError);
       if (isUnavailableOrOffline) {
         const sim = await runSimulatedAgent(trimmed);
         setMessages((prev) => [
@@ -249,15 +237,11 @@ export const AgentChat: React.FC = () => {
           return (
             <div
               key={msg.id}
-              className={`flex flex-col ${
-                msg.role === "user" ? "items-end" : "items-start"
-              }`}
+              className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
             >
               <div
                 className={`max-w-[92%] rounded-[4px] px-2.5 py-2 leading-relaxed ${
-                  msg.role === "user"
-                    ? "bg-[#333333] text-[#FFFFFF]"
-                    : "bg-[#2A2A2A] text-primary"
+                  msg.role === "user" ? "bg-[#333333] text-[#FFFFFF]" : "bg-[#2A2A2A] text-primary"
                 }`}
               >
                 <p>{msg.content}</p>
@@ -288,12 +272,8 @@ export const AgentChat: React.FC = () => {
                             key={idx}
                             className="rounded-[4px] bg-[#161616] px-2 py-1.5 text-[11px]"
                           >
-                            <div className="font-mono text-primary">
-                              {log.tool_name}
-                            </div>
-                            <div className="mt-0.5 text-secondary">
-                              {log.result_summary}
-                            </div>
+                            <div className="font-mono text-primary">{log.tool_name}</div>
+                            <div className="mt-0.5 text-secondary">{log.result_summary}</div>
                           </div>
                         ))}
                       </div>

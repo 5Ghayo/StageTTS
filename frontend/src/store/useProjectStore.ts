@@ -2,11 +2,11 @@ import { create } from "zustand";
 import { createDemoScriptCopy } from "../data/demoScript";
 import {
   ApiError,
+  saveProjectScript as apiSaveProjectScript,
+  synthesizeSegments as apiSynthesizeSegments,
   checkHealth,
   fetchProjectScript,
   fetchProjects,
-  saveProjectScript as apiSaveProjectScript,
-  synthesizeSegments as apiSynthesizeSegments,
   translateProject,
   uploadProjectMedia,
 } from "../services/api";
@@ -25,7 +25,7 @@ import { synthesisIssues } from "../utils/synthesisIssues";
  */
 export function getCacheBustedUrl(
   rawUrl: string | null | undefined,
-  versionToken?: number
+  versionToken?: number,
 ): string | null {
   if (!rawUrl) {
     return null;
@@ -82,10 +82,7 @@ interface ProjectState {
   updateSegmentLocal: (patch: SegmentPatch) => void;
   batchUpdateSegmentsLocal: (patches: SegmentPatch[]) => number[];
   updateBgmVolume: (volume: number) => void;
-  updateCharacter: (
-    speakerKey: string,
-    patch: Partial<CharacterConfig>
-  ) => void;
+  updateCharacter: (speakerKey: string, patch: Partial<CharacterConfig>) => void;
   addCharacter: (name: string) => string | null;
   mergeCharacters: (source: string, destination: string) => void;
   updateTranslationSettings: (sourceLang: string | null, glossary: Record<string, string>) => void;
@@ -119,7 +116,7 @@ function invalidateAudio(seg: Segment): Segment {
 
 function applyPatchToSegments(
   script: ProjectScript,
-  patches: SegmentPatch[]
+  patches: SegmentPatch[],
 ): { nextScript: ProjectScript; markedPendingIds: number[] } {
   const resynthFields: Array<keyof SegmentPatch & keyof Segment> = [
     "speaker",
@@ -142,7 +139,7 @@ function applyPatchToSegments(
     }
     const { id: _ignoreId, ...fields } = patch;
     const cleanFields = Object.fromEntries(
-      Object.entries(fields).filter(([, value]) => value !== undefined)
+      Object.entries(fields).filter(([, value]) => value !== undefined),
     ) as Partial<Segment>;
     if (cleanFields.speaker !== undefined) {
       if (!Object.prototype.hasOwnProperty.call(script.characters, cleanFields.speaker)) return seg;
@@ -294,8 +291,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const objectUrl = URL.createObjectURL(file);
       const duration = await probeBrowserMediaDuration(objectUrl, isAudio);
       const cleanName =
-        file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") ||
-        `local_${Date.now()}`;
+        file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") || `local_${Date.now()}`;
       const localScript: ProjectScript = {
         project_id: cleanName,
         mode: targetMode,
@@ -307,9 +303,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           duration,
           bgm_volume: 0.75,
         },
+        glossary: {},
         characters: {
           SPEAKER_00: {
             display_name: "主讲人",
+            speaking_style: "",
             color: "#5B8DEF",
             gpt_weights: null,
             sovits_weights: null,
@@ -324,6 +322,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             end: Math.min(duration, 4.0),
             speaker: "SPEAKER_00",
             orig_text: "",
+            words: [],
+            alignment_needs_review: true,
+            speaker_needs_review: true,
             target_text: "请点击“精修”编辑本句台词，或连接后端自动识别分轨。",
             target_lang: "zh",
             emotion: "neutral",
@@ -374,13 +375,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (segments.length === 0) {
         return state;
       }
-      const currentIdx = segments.findIndex(
-        (seg) => seg.id === state.selectedSegmentId
-      );
+      const currentIdx = segments.findIndex((seg) => seg.id === state.selectedSegmentId);
       const nextIdx =
-        currentIdx === -1
-          ? 0
-          : Math.max(0, Math.min(segments.length - 1, currentIdx + delta));
+        currentIdx === -1 ? 0 : Math.max(0, Math.min(segments.length - 1, currentIdx + delta));
       const target = segments[nextIdx];
       return {
         selectedSegmentId: target.id,
@@ -397,8 +394,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setIsPlaying: (playing) => set({ isPlaying: playing }),
 
-  setTimelineZoom: (zoom) =>
-    set({ timelineZoom: Math.max(30, Math.min(180, Math.round(zoom))) }),
+  setTimelineZoom: (zoom) => set({ timelineZoom: Math.max(30, Math.min(180, Math.round(zoom))) }),
 
   toggleTrackState: (key) =>
     set((state) => ({
@@ -435,10 +431,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!state.script || patches.length === 0) {
       return [];
     }
-    const { nextScript, markedPendingIds } = applyPatchToSegments(
-      state.script,
-      patches
-    );
+    const { nextScript, markedPendingIds } = applyPatchToSegments(state.script, patches);
     set({
       script: nextScript,
       isDirty: true,
@@ -472,9 +465,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         return state;
       }
       const character = { ...previous, ...patch };
-      const voiceChanged = character.gpt_weights !== previous.gpt_weights
-        || character.sovits_weights !== previous.sovits_weights
-        || character.emotion_refs !== previous.emotion_refs;
+      const voiceChanged =
+        character.gpt_weights !== previous.gpt_weights ||
+        character.sovits_weights !== previous.sovits_weights ||
+        character.emotion_refs !== previous.emotion_refs;
       return {
         isDirty: true,
         script: {
@@ -484,7 +478,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             [speakerKey]: character,
           },
           segments: voiceChanged
-            ? script.segments.map((seg) => seg.speaker === speakerKey && !seg.keep_original ? invalidateAudio(seg) : seg)
+            ? script.segments.map((seg) =>
+                seg.speaker === speakerKey && !seg.keep_original ? invalidateAudio(seg) : seg,
+              )
             : script.segments,
         },
       };
@@ -518,22 +514,33 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     return speaker;
   },
 
-  mergeCharacters: (source, destination) => set((state) => {
-    const script = state.script;
-    if (!script?.characters[source] || !script.characters[destination] || source === destination) return state;
-    const patches = script.segments
-      .filter((seg) => seg.speaker === source)
-      .map((seg) => ({ id: seg.id, speaker: destination, speaker_needs_review: seg.speaker_needs_review ?? true }));
-    const { nextScript } = applyPatchToSegments(script, patches);
-    const characters = { ...nextScript.characters };
-    delete characters[source];
-    return { isDirty: true, script: { ...nextScript, characters } };
-  }),
+  mergeCharacters: (source, destination) =>
+    set((state) => {
+      const script = state.script;
+      if (!script?.characters[source] || !script.characters[destination] || source === destination)
+        return state;
+      const patches = script.segments
+        .filter((seg) => seg.speaker === source)
+        .map((seg) => ({
+          id: seg.id,
+          speaker: destination,
+          speaker_needs_review: seg.speaker_needs_review ?? true,
+        }));
+      const { nextScript } = applyPatchToSegments(script, patches);
+      const characters = { ...nextScript.characters };
+      delete characters[source];
+      return { isDirty: true, script: { ...nextScript, characters } };
+    }),
 
-  updateTranslationSettings: (sourceLang, glossary) => set((state) => state.script ? {
-    script: { ...state.script, source_lang: sourceLang, glossary },
-    isDirty: true,
-  } : state),
+  updateTranslationSettings: (sourceLang, glossary) =>
+    set((state) =>
+      state.script
+        ? {
+            script: { ...state.script, source_lang: sourceLang, glossary },
+            isDirty: true,
+          }
+        : state,
+    ),
 
   retranslate: async () => {
     const { script, isDirty, backendStatus, isLoading, isSynthesizing } = get();
@@ -653,14 +660,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const slot = Math.max(0.4, seg.end - seg.start);
         const estimated = Math.min(
           slot * 1.12,
-          Math.max(0.8, seg.target_text.length / 4.8 / Math.max(0.5, seg.speed_factor))
+          Math.max(0.8, seg.target_text.length / 4.8 / Math.max(0.5, seg.speed_factor)),
         );
         const paddedId = String(seg.id).padStart(4, "0");
         return {
           ...seg,
-          tts_wav:
-            seg.tts_wav ??
-            `/workspace/${latestScript.project_id}/tts/seg_${paddedId}.wav`,
+          tts_wav: seg.tts_wav ?? `/workspace/${latestScript.project_id}/tts/seg_${paddedId}.wav`,
           actual_duration: Number(estimated.toFixed(2)),
           status: "ready" as const,
         };

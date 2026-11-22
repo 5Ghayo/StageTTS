@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import shutil
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import AsyncIterator, Dict, List
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
@@ -25,20 +27,25 @@ from backend.agent.tools import (
 from backend.schemas import (
     AgentChatRequest,
     AgentChatResponse,
+    GpuStatusResponse,
+    HealthResponse,
     MediaInfo,
     ParseRequest,
+    ParseStatusResponse,
+    ProjectListResponse,
     ProjectMode,
     ProjectScript,
     ReferencePreview,
+    ReferenceUploadResponse,
     RenderRequest,
     RenderResponse,
     SynthesizeRequest,
     SynthesizeResponse,
     TranslationResponse,
+    UploadResponse,
 )
 from backend.services.media_mixer import check_ffmpeg_available
 from backend.services.references import automatic_reference, store_reference_audio
-from backend.services.translation import LLMNotConfiguredError, create_openai_client, translate_script
 from backend.services.task_runner import (
     GpuBusyError,
     ParseWorkerError,
@@ -48,6 +55,7 @@ from backend.services.task_runner import (
     read_gpu_memory,
     run_parse_worker,
 )
+from backend.services.translation import LLMNotConfiguredError, create_openai_client, translate_script
 from backend.services.tts_client import (
     TTSServiceUnavailableError,
     check_tts_service,
@@ -155,7 +163,7 @@ def _find_input_media(project_id: str, script: ProjectScript | None) -> Path:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/health")
+@app.get("/api/health", response_model=HealthResponse)
 def health_check() -> Dict[str, object]:
     """服务健康检查、GPU 单任务锁状态与外部环境就绪度探测。"""
     return {
@@ -175,12 +183,12 @@ def health_check() -> Dict[str, object]:
     }
 
 
-@app.get("/api/gpu")
+@app.get("/api/gpu", response_model=GpuStatusResponse)
 def gpu_status() -> Dict[str, object]:
     return {"devices": read_gpu_memory()}
 
 
-@app.get("/api/projects")
+@app.get("/api/projects", response_model=ProjectListResponse)
 def list_projects() -> Dict[str, List[str]]:
     """列出 workspace/ 下所有包含 script.json 的有效项目 ID。"""
     projects: List[str] = []
@@ -210,7 +218,7 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
     return payload
 
 
-@app.post("/api/projects/{project_id}/references")
+@app.post("/api/projects/{project_id}/references", response_model=ReferenceUploadResponse)
 def upload_project_reference(project_id: str, file: UploadFile = File(...)) -> dict[str, str]:
     safe_id = _validate_project_id(project_id)
     load_project_script(safe_id)
@@ -250,7 +258,7 @@ def retranslate_project(project_id: str) -> TranslationResponse:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/projects/upload")
+@app.post("/api/projects/upload", response_model=UploadResponse)
 async def upload_project_media(
     file: UploadFile = File(...),
     mode: ProjectMode = Form("video_dubbing"),
@@ -296,11 +304,41 @@ async def upload_project_media(
     }
 
 
-@app.get("/api/projects/{project_id}/parse/status")
+@app.get("/api/projects/{project_id}/parse/status", response_model=ParseStatusResponse)
 def get_project_parse_status(project_id: str) -> Dict[str, object]:
     """查询指定项目的离线解析实时阶段与日志（供前端节点流轮询）。"""
     safe_id = _validate_project_id(project_id)
     return get_parse_progress(safe_id)
+
+
+@app.get("/api/projects/{project_id}/parse/stream")
+async def stream_project_parse_status(project_id: str, request: Request) -> StreamingResponse:
+    """SSE 实时推送指定项目的离线解析阶段与日志。"""
+    safe_id = _validate_project_id(project_id)
+
+    async def event_generator() -> AsyncIterator[str]:
+        last_key: tuple[object, ...] | None = None
+        saw_active = False
+        idle_ticks = 0
+        while not await request.is_disconnected():
+            status = get_parse_progress(safe_id)
+            active = bool(status.get("active"))
+            if active:
+                saw_active = True
+            key = (active, status.get("stage"), status.get("log_count"), status.get("error"))
+            if key != last_key:
+                last_key = key
+                yield f"data: {json.dumps(status, ensure_ascii=False)}\n\n"
+            if not active and (saw_active or idle_ticks >= 15):
+                break
+            idle_ticks += 1
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/projects/{project_id}/parse", response_model=ProjectScript)

@@ -1,0 +1,42 @@
+[project]
+name = "stagetts"
+version = "0.2.0"
+description = "基于剧本中间表示 script.json 与 Agent 协同的多角色配音及虚拟演播平台"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.136.0",
+    "starlette>=1.3.1",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.4.0",
+    "openai>=3.57.0",
+    "httpx>=0.27.0",
+    "pydub>=0.25.1",
+    "python-multipart>=0.0.30",
+    "python-dotenv>=1.0.1",
+    "PyYAML>=6.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+    "pytest>=9.0.3",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+    "workspace/**",
+    "frontend/**",
+    ".git/**",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

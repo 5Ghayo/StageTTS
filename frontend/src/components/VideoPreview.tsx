@@ -1,12 +1,6 @@
-import React, { useMemo, useState } from "react";
-import {
-  Pause,
-  Play,
-  SkipBack,
-  SkipForward,
-  Volume2,
-  VolumeX,
-} from "lucide-react";
+import { Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from "lucide-react";
+import type React from "react";
+import { useMemo, useState } from "react";
 import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
@@ -43,7 +37,10 @@ export const VideoPreview: React.FC = () => {
   const toggleTrackState = useProjectStore((s) => s.toggleTrackState);
   const updateBgmVolume = useProjectStore((s) => s.updateBgmVolume);
 
-  const [failedVideoSources, setFailedVideoSources] = useState<Set<string>>(new Set());
+  const [failedState, setFailedState] = useState<{ key: string; urls: string[] }>({
+    key: "",
+    urls: [],
+  });
 
   const duration = script?.media.duration ?? 18.5;
   const activeSegment = useMemo(() => {
@@ -51,29 +48,27 @@ export const VideoPreview: React.FC = () => {
       return null;
     }
     return (
-      script.segments.find(
-        (seg) => currentTime >= seg.start && currentTime <= seg.end
-      ) ??
+      script.segments.find((seg) => currentTime >= seg.start && currentTime <= seg.end) ??
       script.segments.find((seg) => seg.id === selectedSegmentId) ??
       null
     );
   }, [currentTime, script, selectedSegmentId]);
 
-  const activeSpeaker = activeSegment
-    ? script?.characters[activeSegment.speaker]
-    : undefined;
+  const activeSpeaker = activeSegment ? script?.characters[activeSegment.speaker] : undefined;
   const speakerColor = normalizeSpeakerColor(activeSpeaker?.color);
 
   const source = script?.media.source_video ?? null;
   const output = script?.media.output_video ?? null;
-  const videoSrc = [source, output].find((url) => url && !failedVideoSources.has(url)) ?? null;
+  const mediaKey = `${script?.project_id ?? ""}\0${source ?? ""}\0${output ?? ""}`;
+  const failedUrls = failedState.key === mediaKey ? failedState.urls : [];
+  const videoSrc = [source, output].find((url) => url && !failedUrls.includes(url)) ?? null;
   const video = useSyncedMedia<HTMLVideoElement>(videoSrc, currentTime, isPlaying);
   const { replacesSource, upcomingClips } = useDubClips(currentTime);
   const bgm = script?.media.bgm_wav;
   const vocals = bgm || !videoSrc || videoSrc !== source ? script?.media.vocals_wav : null;
   const muteSource = trackStates.dubSolo || replacesSource;
-  const muteVideo = trackStates.videoMuted || muteSource || Boolean(vocals || bgm)
-    || trackStates.vocalsMuted;
+  const muteVideo =
+    trackStates.videoMuted || muteSource || Boolean(vocals || bgm) || trackStates.vocalsMuted;
 
   return (
     <div className="flex h-full flex-col bg-[#222222] text-[12px]">
@@ -82,7 +77,12 @@ export const VideoPreview: React.FC = () => {
         <div className="flex min-w-0 items-center gap-2">
           <span className="text-[13px] font-medium text-primary">视频预览</span>
           {output && (
-            <a href={output} target="_blank" rel="noreferrer" className="text-secondary hover:text-primary">
+            <a
+              href={output}
+              target="_blank"
+              rel="noreferrer"
+              className="text-secondary hover:text-primary"
+            >
               查看上次导出
             </a>
           )}
@@ -109,7 +109,12 @@ export const VideoPreview: React.FC = () => {
               {...video}
               src={videoSrc}
               muted={muteVideo}
-              onError={() => setFailedVideoSources((failed) => new Set([...failed, videoSrc]))}
+              onError={() =>
+                setFailedState((prev) => ({
+                  key: mediaKey,
+                  urls: prev.key === mediaKey ? [...prev.urls, videoSrc] : [videoSrc],
+                }))
+              }
               className="h-full w-full object-contain"
             />
           )}
@@ -169,8 +174,7 @@ export const VideoPreview: React.FC = () => {
       {/* 紧凑单色播控条 */}
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-t border-white/[0.06] bg-[#222222] pl-3.5 pr-4">
         <div className="shrink-0 whitespace-nowrap font-mono tabular-nums text-[11px] text-secondary">
-          <span className="text-primary">{formatSmpte(currentTime)}</span> /{" "}
-          {formatSmpte(duration)}
+          <span className="text-primary">{formatSmpte(currentTime)}</span> / {formatSmpte(duration)}
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -199,10 +203,7 @@ export const VideoPreview: React.FC = () => {
             {isPlaying ? (
               <Pause className="h-3.5 w-3.5 fill-current" strokeWidth={1.5} />
             ) : (
-              <Play
-                className="ml-0.5 h-3.5 w-3.5 fill-current"
-                strokeWidth={1.5}
-              />
+              <Play className="ml-0.5 h-3.5 w-3.5 fill-current" strokeWidth={1.5} />
             )}
           </button>
           <button
@@ -231,17 +232,12 @@ export const VideoPreview: React.FC = () => {
             className="flex h-7 w-7 items-center justify-center rounded-[4px] text-secondary transition-colors hover:bg-[#363636] hover:text-primary"
           >
             {trackStates.dubMuted ? (
-              <VolumeX
-                className="h-3.5 w-3.5 text-status-error"
-                strokeWidth={1.5}
-              />
+              <VolumeX className="h-3.5 w-3.5 text-status-error" strokeWidth={1.5} />
             ) : (
               <Volume2 className="h-3.5 w-3.5" strokeWidth={1.5} />
             )}
           </button>
-          <span className="whitespace-nowrap text-[11px] text-secondary">
-            伴奏
-          </span>
+          <span className="whitespace-nowrap text-[11px] text-secondary">伴奏</span>
           <input
             aria-label="伴奏音量"
             type="range"

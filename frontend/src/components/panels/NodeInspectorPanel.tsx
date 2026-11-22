@@ -1,5 +1,5 @@
-import React from "react";
 import { AlertTriangle, Cpu, Sliders, Sparkles, Terminal } from "lucide-react";
+import type React from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 
@@ -17,8 +17,7 @@ export const NodeInspectorPanel: React.FC = () => {
   const updatePipelineConfig = useWorkflowStore((s) => s.updatePipelineConfig);
   const setWorkspacePreset = useWorkflowStore((s) => s.setWorkspacePreset);
 
-  const selectedNode =
-    nodes.find((n) => n.id === selectedNodeId) ?? nodes[0] ?? null;
+  const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? nodes[0] ?? null;
 
   if (!selectedNode) {
     return (
@@ -34,16 +33,11 @@ export const NodeInspectorPanel: React.FC = () => {
       <div className="border-b border-dashed border-white/[0.08] pb-3">
         <div className="flex items-center justify-between gap-2">
           <span className="flex items-center gap-1.5 text-[13px] font-medium text-primary">
-            <Sliders
-              className="h-3.5 w-3.5 shrink-0 text-secondary"
-              strokeWidth={1.5}
-            />
+            <Sliders className="h-3.5 w-3.5 shrink-0 text-secondary" strokeWidth={1.5} />
             <span>{selectedNode.data.title}</span>
           </span>
           <span className="shrink-0 whitespace-nowrap rounded-[4px] bg-white/[0.04] px-2 py-0.5 font-mono tabular-nums text-[11px] text-secondary">
-            {selectedNode.data.vramGb > 0
-              ? `${selectedNode.data.vramGb.toFixed(1)} GB`
-              : "纯 CPU"}
+            {selectedNode.data.vramGb > 0 ? `${selectedNode.data.vramGb.toFixed(1)} GB` : "纯 CPU"}
           </span>
         </div>
         <p className="mt-1.5 text-secondary">{selectedNode.data.summary}</p>
@@ -67,9 +61,7 @@ export const NodeInspectorPanel: React.FC = () => {
       {/* 识别精度控制 */}
       {selectedNode.id === "whisperx" && (
         <div className="space-y-2 border-b border-dashed border-white/[0.08] pb-3">
-          <div className="whitespace-nowrap text-[11px] text-secondary">
-            识别精度
-          </div>
+          <div className="whitespace-nowrap text-[11px] text-secondary">识别精度</div>
           <div className="grid grid-cols-2 gap-1.5">
             {(
               [
@@ -147,18 +139,13 @@ export const NodeInspectorPanel: React.FC = () => {
             <input
               type="checkbox"
               checked={pipelineConfig.burnWatermark}
-              onChange={(e) =>
-                updatePipelineConfig({ burnWatermark: e.target.checked })
-              }
+              onChange={(e) => updatePipelineConfig({ burnWatermark: e.target.checked })}
               className="mt-0.5 h-3.5 w-3.5"
             />
             <div>
               <div className="font-medium">导出时烧录“AI 合成语音”水印</div>
               <p className="mt-1 flex items-center gap-1 text-[11px] text-status-warning">
-                <AlertTriangle
-                  className="h-3.5 w-3.5 shrink-0"
-                  strokeWidth={1.5}
-                />
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
                 <span>开启后将重编码画面，关闭则秒级无损导出</span>
               </p>
             </div>
@@ -169,9 +156,7 @@ export const NodeInspectorPanel: React.FC = () => {
       {/* 虚拟舞台快捷进入 */}
       {selectedNode.id === "virtual_stage_out" && (
         <div className="space-y-2.5">
-          <p className="text-secondary">
-            读取剧本与合成音频，实时驱动虚拟形象口型与表情演出。
-          </p>
+          <p className="text-secondary">读取剧本与合成音频，实时驱动虚拟形象口型与表情演出。</p>
           <button
             type="button"
             onClick={() => {

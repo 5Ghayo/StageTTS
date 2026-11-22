@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface ResizableSplitProps {
   direction: "horizontal" | "vertical";
@@ -43,7 +44,7 @@ export const ResizableSplit: React.FC<ResizableSplitProps> = ({
       const clamped = Math.max(minSize, Math.min(maxSize, rawPercent));
       setSize(clamped);
     },
-    [direction, maxSize, minSize]
+    [direction, maxSize, minSize],
   );
 
   useEffect(() => {

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
 import shutil
 import subprocess
@@ -53,7 +54,6 @@ from backend.schemas import (  # noqa: E402
     Segment,
 )
 from backend.services.translation import create_openai_client, translate_script  # noqa: E402
-
 from workers.aligned_segments import normalize_segments  # noqa: E402
 from workers.demucs_stage import separate_stems  # noqa: E402
 

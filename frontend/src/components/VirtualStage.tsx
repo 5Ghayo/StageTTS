@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef } from "react";
 import { Pause, Play } from "lucide-react";
+import type React from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
@@ -32,18 +33,14 @@ export const VirtualStage: React.FC = () => {
       return null;
     }
     return (
-      script.segments.find(
-        (seg) => currentTime >= seg.start && currentTime <= seg.end
-      ) ??
+      script.segments.find((seg) => currentTime >= seg.start && currentTime <= seg.end) ??
       script.segments.find((seg) => seg.id === selectedSegmentId) ??
       script.segments[0] ??
       null
     );
   }, [currentTime, script, selectedSegmentId]);
 
-  const activeCharacter = activeSegment
-    ? script?.characters[activeSegment.speaker]
-    : undefined;
+  const activeCharacter = activeSegment ? script?.characters[activeSegment.speaker] : undefined;
 
   const { upcomingClips } = useDubClips(currentTime);
 
@@ -52,8 +49,7 @@ export const VirtualStage: React.FC = () => {
       return 0.08;
     }
     const wave =
-      Math.abs(Math.sin(currentTime * 14)) * 0.55 +
-      Math.abs(Math.cos(currentTime * 23)) * 0.35;
+      Math.abs(Math.sin(currentTime * 14)) * 0.55 + Math.abs(Math.cos(currentTime * 23)) * 0.35;
     return Math.min(1, Math.max(0.12, wave));
   }, [activeSegment, currentTime, isPlaying]);
 
@@ -84,15 +80,10 @@ export const VirtualStage: React.FC = () => {
     <div className="flex h-full flex-col bg-[#222222] text-[12px]">
       {/* 轻量顶条 */}
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#222222] px-3.5">
-        <span className="text-[13px] font-medium text-primary">
-          虚拟演播舞台
-        </span>
+        <span className="text-[13px] font-medium text-primary">虚拟演播舞台</span>
         {activeSegment && (
           <span className="flex items-center gap-1.5 rounded-[4px] bg-white/[0.04] px-2 py-0.5 text-[11px] text-secondary">
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ backgroundColor: emotionTint }}
-            />
+            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: emotionTint }} />
             <span className="text-primary">
               {activeCharacter?.display_name ?? activeSegment.speaker}
             </span>
@@ -101,9 +92,7 @@ export const VirtualStage: React.FC = () => {
             {activeSegment.action && (
               <>
                 <span>·</span>
-                <span className="font-mono text-secondary">
-                  {activeSegment.action}
-                </span>
+                <span className="font-mono text-secondary">{activeSegment.action}</span>
               </>
             )}
           </span>
@@ -115,7 +104,12 @@ export const VirtualStage: React.FC = () => {
         ref={pixiContainerRef}
         className="relative flex min-h-0 flex-1 flex-col items-center justify-center overflow-hidden bg-[#161616] p-6"
       >
-        <TimelineAudio clips={upcomingClips} time={currentTime} playing={isPlaying} dubMuted={trackStates.dubMuted} />
+        <TimelineAudio
+          clips={upcomingClips}
+          time={currentTime}
+          playing={isPlaying}
+          dubMuted={trackStates.dubMuted}
+        />
 
         {/* 虚拟角色口型实时演出 */}
         <div
@@ -123,14 +117,7 @@ export const VirtualStage: React.FC = () => {
           style={{ transform: `rotate(${headTiltDeg}deg)` }}
         >
           <svg width="152" height="152" viewBox="0 0 160 160">
-            <circle
-              cx="80"
-              cy="80"
-              r="66"
-              fill="#222222"
-              stroke={emotionTint}
-              strokeWidth="2.5"
-            />
+            <circle cx="80" cy="80" r="66" fill="#222222" stroke={emotionTint} strokeWidth="2.5" />
             <line
               x1="46"
               y1={activeSegment?.emotion === "angry" ? "58" : "54"}
@@ -165,9 +152,7 @@ export const VirtualStage: React.FC = () => {
           <div className="mt-3 flex h-5 items-end gap-1">
             {Array.from({ length: 10 }).map((_, idx) => {
               const barScale =
-                0.25 +
-                rmsEnergy *
-                  (0.4 + 0.6 * Math.abs(Math.sin(idx * 0.9 + currentTime * 12)));
+                0.25 + rmsEnergy * (0.4 + 0.6 * Math.abs(Math.sin(idx * 0.9 + currentTime * 12)));
               return (
                 <div
                   key={idx}

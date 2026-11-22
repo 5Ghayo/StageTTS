@@ -2,97 +2,114 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional
 
-try:
-    from dotenv import load_dotenv
-except ImportError:  # 允许未安装 python-dotenv 时仅使用系统环境变量
-    load_dotenv = None
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 仓库根目录：StageTTS/
 ROOT_DIR: Path = Path(__file__).resolve().parent.parent
 BACKEND_DIR: Path = ROOT_DIR / "backend"
 WORKERS_DIR: Path = ROOT_DIR / "workers"
 
-if load_dotenv is not None:
-    env_file = BACKEND_DIR / ".env"
-    if env_file.exists():
-        load_dotenv(env_file)
 
-
-def _resolve_dir(env_key: str, default_path: Path) -> Path:
-    raw = os.getenv(env_key, "").strip()
-    if not raw:
+def _resolve_dir_path(raw: str, default_path: Path) -> Path:
+    cleaned = raw.strip()
+    if not cleaned:
         return default_path
-    p = Path(raw)
+    p = Path(cleaned)
     return p if p.is_absolute() else (ROOT_DIR / p).resolve()
 
 
-def _resolve_optional_dir(env_key: str) -> Optional[Path]:
-    raw = os.getenv(env_key, "").strip()
-    if not raw:
+def _resolve_optional_dir_path(raw: str) -> Optional[Path]:
+    cleaned = raw.strip()
+    if not cleaned:
         return None
-    p = Path(raw)
+    p = Path(cleaned)
     return p if p.is_absolute() else (ROOT_DIR / p).resolve()
 
 
-def _safe_float_env(env_key: str, default: float) -> float:
-    raw = os.getenv(env_key, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+class StageTTSSettings(BaseSettings):
+    """基于 pydantic-settings 的强类型后端配置。"""
+
+    model_config = SettingsConfigDict(
+        env_file=BACKEND_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    workspace_dir_raw: str = Field(default="", alias="WORKSPACE_DIR")
+    assets_dir_raw: str = Field(default="", alias="ASSETS_DIR")
+    gpt_sovits_root_raw: str = Field(default="", alias="GPT_SOVITS_ROOT")
+    gpt_sovits_python_raw: str = Field(default="", alias="GPT_SOVITS_PYTHON")
+    gpt_sovits_config_raw: str = Field(default="", alias="GPT_SOVITS_CONFIG")
+    tts_auto_manage: bool = Field(default=True, alias="TTS_AUTO_MANAGE")
+    tts_startup_timeout_sec: float = Field(default=90.0, alias="TTS_STARTUP_TIMEOUT_SEC")
+
+    env_parse_python: str = Field(default="python", alias="ENV_PARSE_PYTHON")
+    whisper_model: str = Field(default="large-v3", alias="WHISPER_MODEL")
+    whisper_compute_type: str = Field(default="float16", alias="WHISPER_COMPUTE_TYPE")
+    tts_api_url: str = Field(default="http://127.0.0.1:9880", alias="TTS_API_URL")
+    tts_default_gpt_weights: str = Field(default="", alias="TTS_DEFAULT_GPT_WEIGHTS")
+    tts_default_sovits_weights: str = Field(default="", alias="TTS_DEFAULT_SOVITS_WEIGHTS")
+
+    hf_home: str = Field(default="", alias="HF_HOME")
+    huggingface_hub_cache: str = Field(default="", alias="HUGGINGFACE_HUB_CACHE")
+    torch_home: str = Field(default="", alias="TORCH_HOME")
+
+    tts_timeout_sec: float = Field(default=120.0, alias="TTS_TIMEOUT_SEC")
+    parse_timeout_sec: float = Field(default=1800.0, alias="PARSE_TIMEOUT_SEC")
+    llm_timeout_sec: float = Field(default=60.0, alias="LLM_TIMEOUT_SEC")
+
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+    llm_base_url: str = Field(default="https://api.openai.com/v1", alias="LLM_BASE_URL")
+    llm_model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
+    hf_token: str = Field(default="", alias="HF_TOKEN")
 
 
-WORKSPACE_DIR: Path = _resolve_dir("WORKSPACE_DIR", ROOT_DIR / "workspace")
-ASSETS_DIR: Path = _resolve_dir("ASSETS_DIR", ROOT_DIR / "assets")
+settings = StageTTSSettings()
+
+WORKSPACE_DIR: Path = _resolve_dir_path(settings.workspace_dir_raw, ROOT_DIR / "workspace")
+ASSETS_DIR: Path = _resolve_dir_path(settings.assets_dir_raw, ROOT_DIR / "assets")
 PARSE_WORKER_SCRIPT: Path = WORKERS_DIR / "parse_worker.py"
-GPT_SOVITS_ROOT: Optional[Path] = _resolve_optional_dir("GPT_SOVITS_ROOT")
+GPT_SOVITS_ROOT: Optional[Path] = _resolve_optional_dir_path(settings.gpt_sovits_root_raw)
 GPT_SOVITS_PYTHON: str = (
-    os.getenv("GPT_SOVITS_PYTHON", "").strip()
+    settings.gpt_sovits_python_raw.strip()
     or (str(GPT_SOVITS_ROOT / "runtime" / "python.exe") if GPT_SOVITS_ROOT else "")
 )
 GPT_SOVITS_CONFIG: str = (
-    os.getenv("GPT_SOVITS_CONFIG", "").strip()
+    settings.gpt_sovits_config_raw.strip()
     or (str(BACKEND_DIR / "tts_v2.yaml") if (BACKEND_DIR / "tts_v2.yaml").is_file() else "")
 )
-TTS_AUTO_MANAGE: bool = os.getenv("TTS_AUTO_MANAGE", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
-TTS_STARTUP_TIMEOUT_SEC: float = _safe_float_env("TTS_STARTUP_TIMEOUT_SEC", 90.0)
+TTS_AUTO_MANAGE: bool = settings.tts_auto_manage
+TTS_STARTUP_TIMEOUT_SEC: float = settings.tts_startup_timeout_sec
 
 # 外部算力服务与子进程 Python 路径
-ENV_PARSE_PYTHON: str = os.getenv("ENV_PARSE_PYTHON", "python").strip() or "python"
-WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "large-v3").strip() or "large-v3"
-WHISPER_COMPUTE_TYPE: str = os.getenv("WHISPER_COMPUTE_TYPE", "float16").strip() or "float16"
-TTS_API_URL: str = os.getenv("TTS_API_URL", "http://127.0.0.1:9880").rstrip("/")
-TTS_DEFAULT_GPT_WEIGHTS: str = os.getenv("TTS_DEFAULT_GPT_WEIGHTS", "").strip()
-TTS_DEFAULT_SOVITS_WEIGHTS: str = os.getenv("TTS_DEFAULT_SOVITS_WEIGHTS", "").strip()
+ENV_PARSE_PYTHON: str = settings.env_parse_python.strip() or "python"
+WHISPER_MODEL: str = settings.whisper_model.strip() or "large-v3"
+WHISPER_COMPUTE_TYPE: str = settings.whisper_compute_type.strip() or "float16"
+TTS_API_URL: str = settings.tts_api_url.rstrip("/")
+TTS_DEFAULT_GPT_WEIGHTS: str = settings.tts_default_gpt_weights.strip()
+TTS_DEFAULT_SOVITS_WEIGHTS: str = settings.tts_default_sovits_weights.strip()
 
 # 可选模型缓存路径（用于重定向至非 C 盘目录）
-HF_HOME: str = os.getenv("HF_HOME", "").strip()
-HUGGINGFACE_HUB_CACHE: str = os.getenv("HUGGINGFACE_HUB_CACHE", "").strip()
-TORCH_HOME: str = os.getenv("TORCH_HOME", "").strip()
+HF_HOME: str = settings.hf_home.strip()
+HUGGINGFACE_HUB_CACHE: str = settings.huggingface_hub_cache.strip()
+TORCH_HOME: str = settings.torch_home.strip()
 
 # 超时控制（秒）
-TTS_TIMEOUT_SEC: float = _safe_float_env("TTS_TIMEOUT_SEC", 120.0)
-PARSE_TIMEOUT_SEC: float = _safe_float_env("PARSE_TIMEOUT_SEC", 1800.0)
-LLM_TIMEOUT_SEC: float = _safe_float_env("LLM_TIMEOUT_SEC", 60.0)
+TTS_TIMEOUT_SEC: float = settings.tts_timeout_sec
+PARSE_TIMEOUT_SEC: float = settings.parse_timeout_sec
+LLM_TIMEOUT_SEC: float = settings.llm_timeout_sec
 
 # 大模型 API（兼容 OpenAI SDK）
-LLM_API_KEY: str = os.getenv("LLM_API_KEY", "").strip()
-LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").strip()
-LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
+LLM_API_KEY: str = settings.llm_api_key.strip()
+LLM_BASE_URL: str = settings.llm_base_url.strip()
+LLM_MODEL: str = settings.llm_model.strip()
 
 # HuggingFace pyannote 鉴权 Token
-HF_TOKEN: str = os.getenv("HF_TOKEN", "").strip()
+HF_TOKEN: str = settings.hf_token.strip()
 
 # 时长约束反思闭环核心阈值（见 ARCHITECTURE.md 铁律 #6）
 DURATION_OVERFLOW_RATIO: float = 1.15
