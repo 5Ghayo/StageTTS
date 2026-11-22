@@ -1,0 +1,192 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  /* 3-Tier Matte Neutral Charcoal Scale (Zero Color Cast, Low-Wireframe) */
+  --bg-gap: #121212;
+  --bg-gap-rgb: 18 18 18;
+  --bg-canvas: #161616;
+  --bg-canvas-rgb: 22 22 22;
+  --bg-workspace: #161616;
+  --bg-workspace-rgb: 22 22 22;
+  --bg-trough: #181818;
+  --bg-trough-rgb: 24 24 24;
+  --bg-panel: #222222;
+  --bg-panel-rgb: 34 34 34;
+  --bg-surface: #2C2C2C;
+  --bg-surface-rgb: 44 44 44;
+  --bg-hover: #363636;
+  --bg-hover-rgb: 54 54 54;
+  --bg-active: #333333;
+  --bg-active-rgb: 51 51 51;
+
+  /* 3-Layer Ultra-Low-Contrast Hairlines */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-dashed: rgba(255, 255, 255, 0.08);
+  --border-track: rgba(255, 255, 255, 0.05);
+  --border-strong: rgba(255, 255, 255, 0.08);
+
+  /* Text Hierarchy */
+  --text-primary: #E6E6E6;
+  --text-primary-rgb: 230 230 230;
+  --text-secondary: #9C9C9C;
+  --text-secondary-rgb: 156 156 156;
+  --text-muted: #6C6C6C;
+  --text-muted-rgb: 108 108 108;
+
+  /* Muted Semantic Color Budget */
+  --accent-primary: #3A6EA5;
+  --accent-primary-rgb: 58 110 165;
+  --accent-primary-hover: #467DB8;
+  --accent-primary-hover-rgb: 70 125 184;
+  --status-ready: #4FA882;
+  --status-ready-rgb: 79 168 130;
+  --status-warning: #D4933D;
+  --status-warning-rgb: 212 147 61;
+  --status-error: #C95252;
+  --status-error-rgb: 201 82 82;
+  --playhead: #D94A4A;
+  --playhead-rgb: 217 74 74;
+
+  /* Desaturated Speaker, Slider & Waveform Tokens */
+  --speaker-a: #5B8DEF;
+  --speaker-a-rgb: 91 141 239;
+  --speaker-b: #4FA882;
+  --speaker-b-rgb: 79 168 130;
+  --speaker-c: #C99A4E;
+  --speaker-c-rgb: 201 154 78;
+  --slider-track: #383838;
+  --slider-fill: #A8A8A8;
+  --wave-bar: #6E7681;
+  --wave-active: #B0B8C1;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background-color: var(--bg-gap);
+  color: var(--text-primary);
+  font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+}
+
+/* Keep root 1rem = 16px on html so Tailwind spacing/height utilities stay exact */
+body {
+  font-size: 12px;
+}
+
+/* Monochrome NLE Thin Scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3A3A3A #1A1A1A;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #1A1A1A;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: #3A3A3A;
+  border-radius: 2px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: #4D4D4D;
+}
+
+/* Monochrome Range Slider Controls */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  height: 16px;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 1px;
+  background: var(--slider-track);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -3.5px;
+  border-radius: 2px;
+  background: var(--slider-fill);
+  border: 1px solid #161616;
+}
+
+input[type="range"]:hover::-webkit-slider-thumb {
+  background: var(--text-primary);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 3px;
+  border-radius: 1px;
+  background: var(--slider-track);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--slider-fill);
+  border: 1px solid #161616;
+}
+
+input[type="checkbox"] {
+  accent-color: #A8A8A8;
+}
+
+/* ComfyUI (@xyflow/react) Matte Neutral Theme */
+.react-flow__background {
+  background-color: var(--bg-canvas);
+}
+
+.react-flow__controls {
+  background: var(--bg-panel) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 4px !important;
+  overflow: hidden;
+  box-shadow: none !important;
+}
+
+.react-flow__controls-button {
+  background: var(--bg-panel) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+  color: var(--text-secondary) !important;
+  fill: var(--text-secondary) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--bg-hover) !important;
+  color: var(--text-primary) !important;
+  fill: var(--text-primary) !important;
+}
+
+.react-flow__minimap {
+  background-color: var(--bg-panel) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 4px !important;
+  box-shadow: none !important;
+}
+
+.react-flow__edge.animated .react-flow__edge-path {
+  stroke-dasharray: 6 4;
+}
+
+.react-flow__attribution {
+  display: none !important;
+}

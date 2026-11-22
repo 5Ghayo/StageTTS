@@ -1,0 +1,107 @@
+# ==========================================
+# Python / Virtual Environments / Caches
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+env_parse/
+env_backend/
+env_tts/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+*.whl
+
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+*.pem
+*.key
+
+# ==========================================
+# Node / Vite / TypeScript Frontend
+# ==========================================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+.eslintcache
+.npm/
+*.local
+
+# ==========================================
+# Logs & Temporary Files
+# ==========================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# ==========================================
+# Model Weights & Large Media Assets
+# ==========================================
+*.ckpt
+*.pth
+*.safetensors
+*.pt
+*.bin
+*.onnx
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.flv
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.opus
+
+# ==========================================
+# Runtime Workspace Artifacts
+# (Keep only demo mock workspace/proj_demo_01/script.json)
+# ==========================================
+workspace/*
+!workspace/proj_demo_01/
+workspace/proj_demo_01/*
+!workspace/proj_demo_01/script.json
+
+# ==========================================
+# Static Assets Skeleton (Keep .gitkeep only)
+# ==========================================
+!.gitkeep
+assets/models/*
+!assets/models/.gitkeep
+assets/refs/*
+!assets/refs/.gitkeep
+
+# ==========================================
+# IDE & OS Artifacts
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

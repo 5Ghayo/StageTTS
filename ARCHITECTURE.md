@@ -1,0 +1,243 @@
+# StageTTS 全局架构与开发契约（ARCHITECTURE.md）
+
+> 本文档是 **StageTTS** 全团队（成员 A/B/C/D）与 AI Coding 工具的**唯一架构与接口契约（Single Source of Truth）**。任何代码生成、模块重构或接口变更均须严格遵守本文档约定。
+
+---
+
+## 1. 项目定位与双模核心架构
+
+**StageTTS** 是面向个人创作者、学习者与中小团队的本地化可控音视频生产平台（基准硬件：单卡消费级 GPU **NVIDIA RTX 5060 8GB**）。
+
+系统以标准化剧本文件 **`workspace/{project_id}/script.json`** 作为全链路枢纽，彻底解耦上游“离线高显存感知解析/语音合成”与下游“轻量级交互精修/舞台渲染”，一套引擎原生支持两种工作模式：
+
+- **模式 A（`video_dubbing`）**：多角色视频重配（外语网课、科普、动漫切片、短剧二创）。保留原画面与原 BGM，支持单句情绪切换、笑声/叹息原声保留、Agent 自然语言批处理及无损/合规水印导出。
+- **模式 B（`virtual_stage`）**：单人叙事/播客虚拟演播室。离线合成高质量多情绪配音，前端基于 Web Audio API `AnalyserNode` 实时提取音频 RMS 能量驱动 Live2D（或 Three-VRM）嘴型，并随 `script.json` 时间节点触发表情与动作切换。
+
+### 系统总体数据流
+
+```text
+[输入层] 原始视频 / 动漫切片 / 播客音频 / 脚本文本
+   │
+   ▼  (独立子进程 env_parse，运行结束由 OS 100% 释放显存)
+[感知解析层] workers/parse_worker.py
+   ├── Demucs (htdemucs)       ──▶ 分离纯人声 (vocals.wav) 与背景伴奏 (bgm.wav)
+   ├── WhisperX + pyannote 3.1 ──▶ 提取词级精准时间戳与说话人聚类 (SPEAKER_XX)
+   └── Emotion2Vec / LLM       ──▶ 口语化翻译、原声叹词标记、情绪与动作标签
+   │
+   ▼  输出全链路唯一真相源：workspace/{project_id}/script.json
+[交互精修与 Agent 协同层] backend/ (env_backend, 纯 CPU) + frontend/ (Node.js)
+   ├── GUI 手动精修：wavesurfer.js 波形色块轨道 + Inspector 单句修改与局部重合成
+   └── Agent 协同闭环：大模型 Function Calling 调度 5 大确定性工具 + 时长反思改写闭环
+   │
+   ▼  (独立推理服务 env_tts，按 speaker 分组切换权重)
+[离线合成与后期层]
+   ├── GPT-SoVITS (api_v2.py, 127.0.0.1:9880) ──▶ 动态情绪参考音频路由 + 分组批合成
+   └── pydub + FFmpeg (6.x+)                   ──▶ 原声保留 + 毫秒拼轨 + 混音导出
+   │
+   ├──▶ [模式 A：video_dubbing]   FFmpeg 混入原 BGM 与原画面流，输出 output.mp4
+   └──▶ [模式 B：virtual_stage] 前端 Live2D / Three-VRM 读取 script.json + 音频实时演出
+```
+
+---
+
+## 2. AI Coding 硬性铁律（Hard Invariants）
+
+所有开发人员与 AI Coding 助手编写代码时，**严禁违背以下 9 条铁律**：
+
+1. **四环境物理隔离，严禁混装依赖**
+   - `env_parse`（Conda Python 3.10）：PyTorch (`cu128`)、`demucs`、`whisperx`、`pyannote.audio 3.1`。
+   - `env_tts`（Conda Python 3.10）：GPT-SoVITS CUDA 12.8 适配版整合环境（`is_half: true`，监听 `127.0.0.1:9880`）。
+   - `env_backend`（Conda / venv Python 3.10，**纯 CPU 0 显存**）：`fastapi`、`uvicorn`、`pydantic>=2.7`、`openai`、`pydub`、`requests`。
+   - `frontend`（Node.js 20 LTS）：Vite + React 18 + TypeScript + TailwindCSS + Zustand + `wavesurfer.js v7` + `pixi-live2d-display`。
+   - 严禁在 `env_backend` 中直接 `import torch` / `whisperx` / `demucs`。
+
+2. **RTX 5060 8GB（Blackwell `sm_120`）串行显存接力与单任务防 OOM**
+   - `env_parse` 必须由后端通过 `subprocess.run` 启动独立进程 `workers/parse_worker.py` 执行，进程退出后由操作系统 100% 回收显存。
+   - 若 `env_parse` 显存紧张，允许通过配置 `WHISPER_COMPUTE_TYPE=int8` 将 WhisperX 显存峰值从 ~5.2 GB 降至 ~3.4 GB。
+   - 后端必须在进程内维护单任务锁/队列（见 `backend/services/task_runner.py`），禁止并发启动多个解析或批量合成任务导致 8GB 显存 OOM。
+
+3. **按说话人（`speaker`）分组批量合成**
+   - 调用 GPT-SoVITS 合成多个片段时，必须先按 `segment.speaker` 分组，在切换到下一个角色前完成该角色名下全部待合成片段，**每个角色最多触发一次权重切换**，严禁按时间顺序逐句来回切换 `gpt_weights` / `sovits_weights`。
+
+4. **动态情绪参考音频路由与零样本兜底**
+   - 合成前根据 `segment.emotion` 查询 `characters[speaker].emotion_refs[emotion]`；若目标情绪不存在，自动回退到 `emotion_refs["neutral"]`，再无则取任意可用参考音。
+   - 若角色未绑定微调权重（`gpt_weights` 或 `sovits_weights` 为空），系统从 `vocals.wav` 中截取该角色 5–8 秒干净原声片段作为零样本克隆（Zero-shot）参考输入兜底。
+
+5. **Agent 严禁裸写 FFmpeg 或 Shell 命令**
+   - 大模型 Agent 只能通过 OpenAI Function Calling 调度后端封装好的 **5 个确定性原子工具**（`query_script`、`batch_update_segments`、`synthesize_segments`、`update_mix_settings`、`render_final_video`）。禁止让 LLM 生成并执行任意 FFmpeg 命令或 Python 代码。
+
+6. **时长约束反思闭环规范**
+   - 每次合成单句完成后，工具层检测 `actual_duration` 与原时间槽 `slot_duration = end - start`：
+     - 若 `actual_duration > slot_duration * 1.15`，**不得强行高倍加速**，必须将超标秒数与建议删减字数作为结构化反馈回传 LLM，触发简练口语化重写并重合成，**最多迭代 2 轮**（`MAX_REFLECTION_ROUNDS = 2`）。
+     - 对不超过阈值或改写后仍存在微小超出的片段，仅施加温和变速 `speed_factor <= 1.15`（`MAX_GENTLE_SPEED = 1.15`）。
+
+7. **音视频后期与 FFmpeg 硬水印坑点规避**
+   - `pydub` 按毫秒 `overlay` 拼接完整人声轨（避免长命令行参数溢出）。当 `segment.keep_original == true` 时，直接从 `vocals.wav` 对应 `[start, end]` 切片保留原声（笑声、叹息等），跳过 TTS 音频。
+   - FFmpeg 混音必须使用 `amix=inputs=2:duration=first:normalize=0`（配合精确音量系数 `media.bgm_volume`），禁止使用默认 `normalize=1` 导致音量被莫名腰斩。
+   - **关键坑点**：FFmpeg 的 `-c:v copy`（视频流直拷贝）**不能与 `-vf`（视频滤镜，如烧录右下角视觉水印）同时使用**，否则 FFmpeg 直接报错退出。因此：
+     - **快速无损预览/导出（`burn_watermark=false`）**：使用 `-c:v copy`，合规标识由前端播放层或软字幕展示；
+     - **合规硬水印成片导出（`burn_watermark=true`）**：必须去掉 `-c:v copy`，改用 `-c:v h264_nvenc`（RTX 5060 硬件加速，或降级 `libx264 -preset veryfast`）配合 `-vf drawtext=...` 烧录“AI 合成语音”水印。
+
+8. **前端音频防缓存机制**
+   - 单句重合成会覆盖同一个本地文件（如 `tts/seg_0000.wav`）。前端播放或加载波形/试听音频 URL 时，**必须拼接防缓存版本参数** `?t=<timestamp>`（由 Zustand `audioVersionMap` 维护），禁止直接缓存旧音频 URL。
+
+9. **AI 伦理、声音版权与显式标识合规**
+   - 测试与公开演示仅限使用**团队成员自录授权音色**或**开源无版权许可音色**，禁止未授权克隆商业声优、影视角色或公众人物声线。
+   - 模式 A 视频播放器与模式 B 虚拟舞台 UI 默认显示“**AI 合成语音**”合规提示标识。
+
+---
+
+## 3. 核心中间表示：`script.json` 协议规范
+
+`backend/schemas.py`（Pydantic v2）与 `frontend/src/types/script.ts`（TypeScript）必须与以下结构保持 **1:1 字段名与类型一致**。
+
+### 3.1 完整协议示例
+
+```json
+{
+  "project_id": "proj_demo_01",
+  "mode": "video_dubbing",
+  "media": {
+    "source_video": "/workspace/proj_demo_01/input.mp4",
+    "vocals_wav": "/workspace/proj_demo_01/vocals.wav",
+    "bgm_wav": "/workspace/proj_demo_01/bgm.wav",
+    "output_video": null,
+    "duration": 45.2,
+    "bgm_volume": 0.75
+  },
+  "characters": {
+    "SPEAKER_00": {
+      "display_name": "角色A",
+      "color": "#3b82f6",
+      "gpt_weights": "GPT_weights_v2/char_A.ckpt",
+      "sovits_weights": "SoVITS_weights_v2/char_A.pth",
+      "emotion_refs": {
+        "neutral": { "wav": "/assets/refs/A_neutral.wav", "text": "今天天气不错。", "lang": "zh" },
+        "angry":   { "wav": "/assets/refs/A_angry.wav",   "text": "你到底在干什么！", "lang": "zh" },
+        "happy":   { "wav": "/assets/refs/A_happy.wav",   "text": "太好了，我们成功了！", "lang": "zh" },
+        "sad":     { "wav": "/assets/refs/A_sad.wav",     "text": "原来是这样啊……", "lang": "zh" }
+      },
+      "avatar": { "type": "live2d", "model_url": "/assets/models/host_a/model3.json" }
+    }
+  },
+  "segments": [
+    {
+      "id": 0,
+      "start": 1.24,
+      "end": 3.85,
+      "speaker": "SPEAKER_00",
+      "orig_text": "Wait, are you sure about this?",
+      "target_text": "等等，你确定要这么做吗？",
+      "target_lang": "zh",
+      "emotion": "angry",
+      "action": "shake_head",
+      "keep_original": false,
+      "speed_factor": 1.0,
+      "tts_wav": "/workspace/proj_demo_01/tts/seg_0000.wav",
+      "actual_duration": 2.41,
+      "status": "ready"
+    }
+  ]
+}
+```
+
+### 3.2 枚举与字段字典
+
+- **`ProjectMode`**：`"video_dubbing"` | `"virtual_stage"`
+- **`EmotionType`**：`"neutral"` | `"angry"` | `"happy"` | `"sad"` | `"whisper"`
+- **`SegmentStatus`**：`"pending"` | `"synthesizing"` | `"ready"` | `"error"`
+- **`AvatarType`**：`"live2d"` | `"vrm"`
+
+| 层级 | 字段名 | 类型 | 必填 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| Root | `project_id` | `string` | 是 | 项目唯一 ID（对应 `workspace/{project_id}/` 目录名） |
+| Root | `mode` | `ProjectMode` | 是 | 当前工作模式 |
+| Root | `media` | `MediaInfo` | 是 | 媒体路径与全局混音参数 |
+| Root | `characters` | `Record<string, CharacterConfig>` | 是 | 说话人映射字典（Key 如 `SPEAKER_00`） |
+| Root | `segments` | `Segment[]` | 是 | 按时间排序的台词片段列表 |
+| `media` | `source_video` | `string \| null` | 否 | 原视频/源音频 URL（如 `/workspace/{id}/input.mp4`） |
+| `media` | `vocals_wav` | `string \| null` | 否 | Demucs 分离纯人声 URL |
+| `media` | `bgm_wav` | `string \| null` | 否 | Demucs 分离伴奏 URL |
+| `media` | `output_video` | `string \| null` | 否 | 最终渲染输出 URL（如 `/workspace/{id}/output.mp4`） |
+| `media` | `duration` | `number` | 是 | 项目总时长（秒） |
+| `media` | `bgm_volume` | `number` | 是 | 伴奏混音系数（`0.0` ~ `2.0`，默认 `0.75`） |
+| `character` | `display_name` | `string` | 是 | 前端显示角色名 |
+| `character` | `color` | `string` | 是 | 波形轨道色块 Hex 颜色（如 `#3b82f6`） |
+| `character` | `gpt_weights` | `string \| null` | 否 | GPT-SoVITS GPT 模型权重路径 |
+| `character` | `sovits_weights` | `string \| null` | 否 | GPT-SoVITS SoVITS 模型权重路径 |
+| `character` | `emotion_refs` | `Partial<Record<EmotionType, EmotionRef>>` | 是 | 情绪参考音频库（`wav`, `text`, `lang`） |
+| `character` | `avatar` | `AvatarConfig \| null` | 否 | 虚拟舞台形象配置（`type`, `model_url`） |
+| `segment` | `id` | `number` | 是 | 片段整型唯一 ID（从 0 递增） |
+| `segment` | `start` | `number` | 是 | 起始时间（秒） |
+| `segment` | `end` | `number` | 是 | 结束时间（秒，必须 `> start`） |
+| `segment` | `speaker` | `string` | 是 | 关联 `characters` 的 Key |
+| `segment` | `orig_text` | `string` | 是 | 原语种识别文本 |
+| `segment` | `target_text` | `string` | 是 | 目标配音文本 |
+| `segment` | `target_lang` | `string` | 是 | 目标语种代码（如 `zh`, `en`, `ja`） |
+| `segment` | `emotion` | `EmotionType` | 是 | 情绪标签 |
+| `segment` | `action` | `string \| null` | 否 | 虚拟舞台预制动作标签（如 `shake_head`, `nod`） |
+| `segment` | `keep_original` | `boolean` | 是 | `true` 时保留 `vocals.wav` 原声，不做 TTS 替换 |
+| `segment` | `speed_factor` | `number` | 是 | 温和语速调整系数（默认 `1.0`，建议上限 `1.15`） |
+| `segment` | `tts_wav` | `string \| null` | 否 | 单句合成音频 URL（如 `/workspace/{id}/tts/seg_0000.wav`） |
+| `segment` | `actual_duration` | `number \| null` | 否 | 实际合成音频时长（秒） |
+| `segment` | `status` | `SegmentStatus` | 是 | 片段状态 |
+
+---
+
+## 4. REST API 与静态资源接口契约
+
+后端运行于 `http://127.0.0.1:8000`；前端 Vite 开发服务器将 `/api`、`/workspace`、`/assets` 代理至后端。
+
+| 方法 | 路径 | 说明 | 请求体 / 参数 | 响应体 |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/health` | 健康检查（含目录与任务锁状态） | — | `{ "status": "ok", "busy": false }` |
+| `GET` | `/api/projects` | 列出 `workspace/` 下所有含 `script.json` 的项目 | — | `{ "projects": ["proj_demo_01", ...] }` |
+| `POST` | `/api/projects/upload` | 创建项目并上传源视频/音频 | `multipart/form-data` (`file`, `mode?`, `project_id?`) | `{ "project_id": "...", "media_url": "..." }` |
+| `POST` | `/api/projects/{project_id}/parse` | 触发 `env_parse` 子进程解析并生成 `script.json`（受单任务锁保护） | `{ "target_lang": "zh", "compute_type": "float16" }` | `ProjectScript` |
+| `GET` | `/api/projects/{project_id}/script` | 读取指定项目的 `script.json` | — | `ProjectScript` |
+| `PUT` | `/api/projects/{project_id}/script` | 保存前端修改后的完整 `ProjectScript`（Pydantic 校验后落盘） | `ProjectScript` | `ProjectScript` |
+| `POST` | `/api/projects/{project_id}/synthesize` | 按 `speaker` 分组批量合成指定片段并返回时长质检结果 | `SynthesizeRequest` | `SynthesizeResponse` |
+| `POST` | `/api/projects/{project_id}/agent/chat` | 自然语言批量剪辑对话（多轮工具调用 + 超时反思改写） | `AgentChatRequest` | `AgentChatResponse` |
+| `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + FFmpeg 混音导出 `output.mp4` | `RenderRequest` | `RenderResponse` |
+| `STATIC` | `/workspace/*` | 静态挂载 `workspace/` 目录（提供视频、人声、伴奏、单句 TTS 音频） | — | 二进制流 |
+| `STATIC` | `/assets/*` | 静态挂载 `assets/` 目录（提供 Live2D/VRM 模型与情绪参考音频） | — | 二进制流 |
+
+---
+
+## 5. Agent 五大确定性原子工具契约
+
+定义于 `backend/agent/tools.py`，供 `backend/agent/orchestrator.py` 在 Function Calling 循环中调度：
+
+| 工具名 | 参数签名 | 返回值结构 | 副作用 |
+| :--- | :--- | :--- | :--- |
+| `query_script` | `project_id: str`, `start_sec: float \| None = None`, `end_sec: float \| None = None`, `speaker: str \| None = None` | `{ "count": int, "segments": list[dict] }` | 只读查询 `script.json`，不写盘 |
+| `batch_update_segments` | `project_id: str`, `updates: list[SegmentPatch]`（含 `id` 及可选 `speaker` / `target_text` / `emotion` / `action` / `keep_original` / `speed_factor`） | `{ "updated_ids": list[int], "marked_pending_ids": list[int] }` | 修改指定片段字段；若修改了 `speaker`/`target_text`/`emotion`/`keep_original`，自动将 `status` 置为 `"pending"` 并持久化 `script.json` |
+| `synthesize_segments` | `project_id: str`, `segment_ids: list[int] \| None = None`（为 `None` 时合成全部 `status != "ready"` 且 `keep_original == false` 的片段） | `{ "synthesized_ids": list[int], "overflow_segments": list[SegmentDurationCheck], "errors": list[str] }` | 按 `speaker` 分组调用 GPT-SoVITS 合成 WAV，更新 `tts_wav` / `actual_duration` / `status` 并写盘；返回超长（`> 1.15x`）片段清单供反思改写 |
+| `update_mix_settings` | `project_id: str`, `bgm_volume: float`（限 `0.0` ~ `2.0`） | `{ "bgm_volume": float }` | 更新 `media.bgm_volume` 并持久化 `script.json` |
+| `render_final_video` | `project_id: str`, `burn_watermark: bool = False` | `{ "output_video": str, "duration": float, "burn_watermark": bool }` | 触发 `pydub` 拼轨与 FFmpeg 混音导出，写回 `media.output_video` 并持久化 `script.json` |
+
+---
+
+## 6. 4 人并行协作边界与契约修改流程
+
+| 成员 | 目录与文件所有权 | 核心职责 |
+| :--- | :--- | :--- |
+| **成员 A** | `workers/parse_worker.py`、`experiments/` | 维护 `env_parse` 环境、完成 Demucs/WhisperX/pyannote/标注流水线，产出消融实验脚本与图表 |
+| **成员 B** | `backend/`（`main.py`, `config.py`, `schemas.py`, `agent/`, `services/`） | 维护 `env_backend` 与 `env_tts` 联调、GPT-SoVITS 分组合成、Agent 5 工具与反思闭环、FFmpeg 混音 |
+| **成员 C** | `frontend/`（除 `VirtualStage.tsx` 外的全量组件、Store 与样式） | 类 PR 三栏工作台、`wavesurfer.js` 波形色块轨道、`Inspector` 单句精修、`AgentChat` 对话交互 |
+| **成员 D** | `frontend/src/components/VirtualStage.tsx`、`assets/`、`README.md` | Live2D/Three-VRM 虚拟演播室嘴型与动作驱动、授权情绪参考音库、合规提示与演示交付 |
+
+**契约变更流程**：任何涉及 `script.json` 结构、REST API 路径/字段或 Agent 工具签名的改动，必须先由提出方同步更新本文件（`ARCHITECTURE.md`）、`backend/schemas.py` 与 `frontend/src/types/script.ts` 并在群内通知全员对齐后方可合并代码。
+
+---
+
+## 7. 技术栈锁定版本参考
+
+| 层级 | 锁定技术栈与版本范围 |
+| :--- | :--- |
+| **前端核心** | Node.js 20 LTS, Vite `^5.4.0`, React `^18.3.1`, TypeScript `^5.5.0`, TailwindCSS `^3.4.0`, Zustand `^4.5.0`, `@xyflow/react` `^12.3.6`, `lucide-react` `^0.469.0` |
+| **波形与舞台** | `wavesurfer.js` `^7.8.0` (含 `@wavesurfer/react` 或 `regions` 插件), `pixi.js` `^7.4.0`, `pixi-live2d-display-lipsyncpatch` `^0.5.0-ls-8`（可选进阶 `three` + `@pixiv/three-vrm` v3） |
+| **主后端** | Python 3.10, `fastapi>=0.115.0`, `uvicorn[standard]>=0.30.0`, `pydantic>=2.7.0`, `openai>=1.40.0`, `pydub>=0.25.1` |
+| **感知解析** | Python 3.10, PyTorch (`cu128`), `demucs`, `whisperx` (`large-v3`), `pyannote.audio 3.1` |
+| **语音合成** | GPT-SoVITS (`api_v2.py`, CUDA 12.8 适配版, `is_half: true`) |
+| **音视频工具** | FFmpeg `6.x+` (含 `nvenc` / `libx264` 与 `amix` 滤镜) |
