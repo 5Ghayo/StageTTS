@@ -271,9 +271,50 @@ PIP_CACHE_DIR=F:/Download/StageTTS/pip_cache
 
 ### 5.1 安装 FFmpeg
 
-#### Windows
+#### Windows：一键脚本自动下载并配置（推荐）
 
-推荐：
+在项目根目录打开 PowerShell，运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_ffmpeg_windows.ps1
+```
+
+脚本会自动完成：
+
+1. 下载 FFmpeg Essentials Windows 构建；
+2. 解压到：
+
+```text
+%LOCALAPPDATA%\StageTTS\ffmpeg
+```
+
+3. 把 `ffmpeg.exe` / `ffprobe.exe` 所在目录加入**当前用户 PATH**；
+4. 立即在当前终端验证 `ffmpeg -version` 与 `ffprobe -version`。
+
+如果你想装更大的 full build，或指定安装目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_ffmpeg_windows.ps1 -Full -InstallDir F:\Tools\ffmpeg
+```
+
+如果系统里已经有 FFmpeg，但你想强制重装：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_ffmpeg_windows.ps1 -Force
+```
+
+验证：
+
+```powershell
+ffmpeg -version
+ffprobe -version
+```
+
+如果能输出版本号，说明成功。
+
+#### Windows：手动安装
+
+也可以手动安装：
 
 1. 下载 FFmpeg Windows build；
 2. 解压到例如：
