@@ -58,7 +58,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         title: "音轨分离",
         category: "parse",
         env: "env_parse",
-        vramGb: null,
+        vramGb: 1.8,
         status: "done",
         inputs: [{ id: "in-media", label: "媒体流", type: "MEDIA" }],
         outputs: [
