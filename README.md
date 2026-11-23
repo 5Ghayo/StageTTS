@@ -770,6 +770,8 @@ StageTTS/
 
 ## 10. 评测计划
 
+论文训练数据入口见 [训练音频工具链](workers/RESEARCH_TRAINING.md)。
+
 评测脚本在 [experiments/](experiments)，目前是骨架：
 
 - `eval_diarization.py`：Banquet 分离前后 WER/CER、DER 对比
