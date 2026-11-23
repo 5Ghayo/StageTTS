@@ -219,7 +219,8 @@
 | `POST` | `/api/projects/{project_id}/synthesize` | 按 `speaker` 分组批量合成指定片段并返回时长质检结果 | `SynthesizeRequest` | `SynthesizeResponse` |
 | `POST` | `/api/projects/{project_id}/agent/chat` | 自然语言批量剪辑对话（多轮工具调用 + 超时反思改写） | `AgentChatRequest` | `AgentChatResponse` |
 | `GET` | `/api/projects/{project_id}/subtitles` | 导出当前剧本的 ASS 字幕文件（`layout=target\|bilingual`） | Query: `layout` | UTF-8-SIG ASS 文本 |
-| `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + 四轨独立混音/自动闪避 + FFmpeg 导出 `output.mp4`（支持 ASS 硬字幕与硬水印单次重编码） | `RenderRequest` | `RenderResponse` |
+| `GET` | `/api/export/dirs` | 获取工作区与本机推荐导出目录（视频/下载/桌面） | — | `ExportDirsResponse` |
+| `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + 四轨独立混音/自动闪避 + FFmpeg 导出成片，支持自定义文件名/本机目录落盘、ASS 硬字幕与外挂 ASS 字幕 | `RenderRequest` | `RenderResponse` |
 | `STATIC` | `/workspace/*` | 静态挂载 `workspace/` 目录（提供视频、人声、伴奏、单句 TTS 音频） | — | 二进制流 |
 | `STATIC` | `/assets/*` | 静态挂载 `assets/` 目录（提供 Live2D/VRM 模型与情绪参考音频） | — | 二进制流 |
 

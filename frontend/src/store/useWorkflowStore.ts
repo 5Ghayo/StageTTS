@@ -729,12 +729,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         setNodeStatus("virtual_stage_out", "running");
         get().appendLog("env_backend", "正在执行 pydub 毫秒拼轨与 FFmpeg 混音封装...", "info");
 
-        const renderRes = await renderVideo(
-          activeScript.project_id,
-          cfg.burnWatermark,
-          cfg.burnSubtitles,
-          activeScript.media.auto_ducking ?? true,
-        );
+        const renderRes = await renderVideo(activeScript.project_id, {
+          burn_watermark: cfg.burnWatermark,
+          burn_subtitles: cfg.burnSubtitles,
+          auto_ducking: activeScript.media.auto_ducking ?? true,
+        });
         activeScript = {
           ...activeScript,
           media: {

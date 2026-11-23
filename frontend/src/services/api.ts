@@ -2,6 +2,7 @@ import createClient from "openapi-fetch";
 import type { components, paths } from "../types/api.generated";
 import type {
   AgentChatResponse,
+  ExportDirsResponse,
   GpuDevice,
   GpuStatusResponse,
   HealthResponse,
@@ -10,15 +11,15 @@ import type {
   ProjectScript,
   ReferencePreview,
   ReferenceUploadResponse,
+  RenderRequest,
   RenderResponse,
-  SubtitleBurnMode,
   SubtitleLayout,
   SynthesizeResponse,
   TranslationResponse,
   UploadResponse,
 } from "../types/script";
 
-export type { GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
+export type { ExportDirsResponse, GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
 
 export class ApiError extends Error {
   status: number;
@@ -217,23 +218,25 @@ export function sendAgentChat(
   );
 }
 
+export function fetchExportDirs(): Promise<ExportDirsResponse> {
+  return unwrap(apiClient.GET("/api/export/dirs"));
+}
+
 export function getSubtitlesUrl(projectId: string, layout: SubtitleLayout = "target"): string {
   return `/api/projects/${encodeURIComponent(projectId)}/subtitles?layout=${encodeURIComponent(layout)}`;
 }
 
 export function renderVideo(
   projectId: string,
-  burnWatermark = false,
-  burnSubtitles: SubtitleBurnMode = "none",
-  autoDucking?: boolean,
+  options: Partial<RenderRequest> = {},
 ): Promise<RenderResponse> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/render", {
       params: { path: { project_id: projectId } },
       body: {
-        burn_watermark: burnWatermark,
-        burn_subtitles: burnSubtitles,
-        ...(autoDucking !== undefined ? { auto_ducking: autoDucking } : {}),
+        burn_watermark: false,
+        burn_subtitles: "none",
+        ...options,
       },
     }),
   );

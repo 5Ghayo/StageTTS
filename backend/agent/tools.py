@@ -13,8 +13,15 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from weakref import WeakValueDictionary
 
 from backend import config
-from backend.schemas import ProjectScript, SegmentPatch, StemVolumes, SubtitleBurnMode, SynthesizeResponse
-from backend.services.media_mixer import mix_and_render, resolve_effective_auto_ducking
+from backend.schemas import (
+    ProjectScript,
+    SegmentPatch,
+    StemVolumes,
+    SubtitleBurnMode,
+    SubtitleLayout,
+    SynthesizeResponse,
+)
+from backend.services.media_mixer import export_project_deliverables
 from backend.services.synthesis import synthesize_with_duration_check
 from backend.services.task_runner import GpuBusyError, gpu_task_guard
 from backend.services.tts_client import TTSServiceUnavailableError
@@ -205,27 +212,26 @@ def render_final_video(
     project_id: str,
     burn_watermark: bool = False,
     burn_subtitles: SubtitleBurnMode = "none",
+    export_ass_sidecar: Optional[SubtitleLayout] = None,
     auto_ducking: Optional[bool] = None,
+    output_filename: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """触发 pydub 拼轨与 FFmpeg 混音封装，输出成片路径并回写 script.json。"""
     with project_task_guard(project_id):
         script = load_project_script(project_id)
-        output_video, duration = mix_and_render(
+        result = export_project_deliverables(
             script,
             burn_watermark=burn_watermark,
             burn_subtitles=burn_subtitles,
+            export_ass_sidecar=export_ass_sidecar,
             auto_ducking=auto_ducking,
+            output_filename=output_filename,
+            output_dir=output_dir,
         )
-        effective_ducking = resolve_effective_auto_ducking(script, auto_ducking)
-        script.media.output_video = output_video
+        script.media.output_video = result["output_video"]
         save_project_script(script)
-    return {
-        "output_video": output_video,
-        "duration": duration,
-        "burn_watermark": burn_watermark,
-        "burn_subtitles": burn_subtitles,
-        "auto_ducking": effective_ducking,
-    }
+    return result
 
 
 TOOL_REGISTRY: Dict[str, Callable[..., Dict[str, Any]]] = {

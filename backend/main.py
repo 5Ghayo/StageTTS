@@ -27,6 +27,8 @@ from backend.agent.tools import (
 from backend.schemas import (
     AgentChatRequest,
     AgentChatResponse,
+    ExportDirOption,
+    ExportDirsResponse,
     GpuStatusResponse,
     HealthResponse,
     MediaInfo,
@@ -421,6 +423,25 @@ def download_project_subtitles(
     )
 
 
+@app.get("/api/export/dirs", response_model=ExportDirsResponse)
+def get_export_dirs() -> ExportDirsResponse:
+    """返回项目工作区及本机常用推荐导出目录。"""
+    candidates = [
+        ("视频目录", Path.home() / "Videos"),
+        ("下载目录", Path.home() / "Downloads"),
+        ("桌面", Path.home() / "Desktop"),
+    ]
+    suggested = [
+        ExportDirOption(label=label, path=str(path.resolve()))
+        for label, path in candidates
+        if path.is_dir()
+    ]
+    return ExportDirsResponse(
+        workspace_dir=str(config.WORKSPACE_DIR.resolve()),
+        suggested_dirs=suggested,
+    )
+
+
 @app.post("/api/projects/{project_id}/render", response_model=RenderResponse)
 def render_project_video(project_id: str, req: RenderRequest) -> RenderResponse:
     """执行 pydub 毫秒拼轨与 FFmpeg 混音封装，导出 output.mp4（或虚拟舞台音频）。"""
@@ -431,6 +452,9 @@ def render_project_video(project_id: str, req: RenderRequest) -> RenderResponse:
             safe_id,
             burn_watermark=req.burn_watermark,
             burn_subtitles=req.burn_subtitles,
+            export_ass_sidecar=req.export_ass_sidecar,
             auto_ducking=req.auto_ducking,
+            output_filename=req.output_filename,
+            output_dir=req.output_dir,
         ),
     )

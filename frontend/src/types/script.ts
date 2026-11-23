@@ -53,4 +53,7 @@ export type SegmentDurationCheck = components["schemas"]["SegmentDurationCheck"]
 export type SynthesizeResponse = components["schemas"]["SynthesizeResponse"];
 export type ToolCallLog = components["schemas"]["ToolCallLog"];
 export type AgentChatResponse = components["schemas"]["AgentChatResponse"];
+export type ExportDirOption = components["schemas"]["ExportDirOption"];
+export type ExportDirsResponse = components["schemas"]["ExportDirsResponse"];
+export type RenderRequest = components["schemas"]["RenderRequest"];
 export type RenderResponse = components["schemas"]["RenderResponse"];

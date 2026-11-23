@@ -276,6 +276,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/export/dirs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Export Dirs
+         * @description 返回项目工作区及本机常用推荐导出目录。
+         */
+        get: operations["get_export_dirs_api_export_dirs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/render": {
         parameters: {
             query?: never;
@@ -461,6 +481,29 @@ export interface components {
              * @default zh
              */
             lang: string;
+        };
+        /**
+         * ExportDirOption
+         * @description 前端导出弹窗可选本机目录。
+         */
+        ExportDirOption: {
+            /** Label */
+            label: string;
+            /** Path */
+            path: string;
+        };
+        /**
+         * ExportDirsResponse
+         * @description 工作区与本机推荐导出目录列表。
+         */
+        ExportDirsResponse: {
+            /** Workspace Dir */
+            workspace_dir: string;
+            /**
+             * Suggested Dirs
+             * @default []
+             */
+            suggested_dirs: components["schemas"]["ExportDirOption"][];
         };
         /**
          * GpuDevice
@@ -718,10 +761,25 @@ export interface components {
              */
             burn_subtitles: "none" | "target" | "bilingual";
             /**
+             * Export Ass Sidecar
+             * @description 可选：同步导出同名外挂 ASS 字幕（target / bilingual）
+             */
+            export_ass_sidecar?: ("target" | "bilingual") | null;
+            /**
              * Auto Ducking
              * @description 是否启用 BGM 自动闪避；为空时沿用 script.media.auto_ducking
              */
             auto_ducking?: boolean | null;
+            /**
+             * Output Filename
+             * @description 可选自定义输出文件名（如 my_dub.mp4）
+             */
+            output_filename?: string | null;
+            /**
+             * Output Dir
+             * @description 可选本机额外保存目录绝对路径（支持 ~ 展开）
+             */
+            output_dir?: string | null;
         };
         /**
          * RenderResponse
@@ -747,6 +805,15 @@ export interface components {
              * @default true
              */
             auto_ducking: boolean;
+            /**
+             * Saved Path
+             * @default
+             */
+            saved_path: string;
+            /** Subtitle Url */
+            subtitle_url?: string | null;
+            /** Subtitle Saved Path */
+            subtitle_saved_path?: string | null;
         };
         /**
          * Segment
@@ -1457,6 +1524,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_export_dirs_api_export_dirs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportDirsResponse"];
                 };
             };
         };

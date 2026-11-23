@@ -300,6 +300,22 @@ class AgentChatResponse(BaseModel):
     script: ProjectScript
 
 
+class ExportDirOption(BaseModel):
+    """前端导出弹窗可选本机目录。"""
+
+    label: str
+    path: str
+
+
+class ExportDirsResponse(BaseModel):
+    """工作区与本机推荐导出目录列表。"""
+
+    workspace_dir: str
+    suggested_dirs: List[ExportDirOption] = Field(
+        default_factory=list, json_schema_extra={"default": []},
+    )
+
+
 class RenderRequest(BaseModel):
     """成片导出混音请求。"""
 
@@ -311,9 +327,21 @@ class RenderRequest(BaseModel):
         default="none",
         description="是否将 ASS 字幕烧录进成片画面：none / target / bilingual",
     )
+    export_ass_sidecar: Optional[SubtitleLayout] = Field(
+        default=None,
+        description="可选：同步导出同名外挂 ASS 字幕（target / bilingual）",
+    )
     auto_ducking: Optional[bool] = Field(
         default=None,
         description="是否启用 BGM 自动闪避；为空时沿用 script.media.auto_ducking",
+    )
+    output_filename: Optional[str] = Field(
+        default=None,
+        description="可选自定义输出文件名（如 my_dub.mp4）",
+    )
+    output_dir: Optional[str] = Field(
+        default=None,
+        description="可选本机额外保存目录绝对路径（支持 ~ 展开）",
     )
 
 
@@ -326,3 +354,6 @@ class RenderResponse(BaseModel):
     burn_watermark: bool
     burn_subtitles: SubtitleBurnMode = "none"
     auto_ducking: bool = True
+    saved_path: str = ""
+    subtitle_url: Optional[str] = None
+    subtitle_saved_path: Optional[str] = None

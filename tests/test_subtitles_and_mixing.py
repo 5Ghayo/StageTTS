@@ -276,3 +276,92 @@ class SubtitlesAndMixingTest(unittest.TestCase):
             self.assertEqual(res2["bgm_volume"], 0.8)
             self.assertEqual(res2["stem_volumes"], {"singing": 1.0, "music": 0.35, "effects": 1.25})
             self.assertFalse(res2["auto_ducking"])
+
+    def test_render_custom_filename_output_dir_and_ass_sidecar(self):
+        with ExitStack() as stack:
+            temp = stack.enter_context(tempfile.TemporaryDirectory())
+            export_dir = Path(temp) / "exports"
+            workspace_dir = Path(temp) / "ws"
+            stack.enter_context(patch.object(config, "WORKSPACE_DIR", workspace_dir))
+            project_dir = workspace_dir / "custom_out"
+            tts_dir = project_dir / "tts"
+            tts_dir.mkdir(parents=True)
+
+            input_mp4 = project_dir / "input.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=1.5",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo:d=1.5",
+                    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(input_mp4),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            _write_tone_wav(tts_dir / "seg_0000.wav", 1.0, rate=44100, channels=1, amplitude=6000)
+
+            script = ProjectScript(
+                project_id="custom_out",
+                mode="video_dubbing",
+                media=MediaInfo(source_video="/workspace/custom_out/input.mp4", duration=1.5),
+                segments=[
+                    Segment(
+                        id=0, start=0.1, end=1.2, speaker="SPEAKER_00",
+                        orig_text="Hello export",
+                        target_text="你好导出",
+                        tts_wav="/workspace/custom_out/tts/seg_0000.wav",
+                        status="ready",
+                    )
+                ],
+            )
+            tools.save_project_script(script)
+
+            with TestClient(app) as client:
+                dirs_resp = client.get("/api/export/dirs")
+                self.assertEqual(dirs_resp.status_code, 200)
+                self.assertEqual(dirs_resp.json()["workspace_dir"], str(workspace_dir.resolve()))
+
+                resp = client.post(
+                    "/api/projects/custom_out/render",
+                    json={
+                        "output_filename": "custom_clip.mp4",
+                        "output_dir": str(export_dir),
+                        "export_ass_sidecar": "bilingual",
+                    },
+                )
+                self.assertEqual(resp.status_code, 200, resp.text)
+                body = resp.json()
+                self.assertEqual(body["output_video"], "/workspace/custom_out/custom_clip.mp4")
+                self.assertEqual(body["subtitle_url"], "/workspace/custom_out/custom_clip.ass")
+                self.assertEqual(body["saved_path"], str((export_dir / "custom_clip.mp4").resolve()))
+                self.assertEqual(body["subtitle_saved_path"], str((export_dir / "custom_clip.ass").resolve()))
+                self.assertTrue((project_dir / "custom_clip.mp4").is_file())
+                self.assertTrue((export_dir / "custom_clip.mp4").is_file())
+                ass_bytes = (export_dir / "custom_clip.ass").read_bytes()
+                self.assertTrue(ass_bytes.startswith(b"\xef\xbb\xbf"))
+                self.assertIn("你好导出", ass_bytes.decode("utf-8-sig"))
+
+    def test_render_rejects_invalid_output_filename_or_relative_output_dir(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            project_dir = Path(temp) / "bad_export"
+            project_dir.mkdir()
+            (project_dir / "input.mp4").write_bytes(b"stub")
+            tools.save_project_script(
+                ProjectScript(
+                    project_id="bad_export",
+                    mode="video_dubbing",
+                    media=MediaInfo(source_video="/workspace/bad_export/input.mp4", duration=1.0),
+                )
+            )
+            with TestClient(app) as client:
+                bad_name = client.post(
+                    "/api/projects/bad_export/render",
+                    json={"output_filename": "../escape.mp4"},
+                )
+                self.assertEqual(bad_name.status_code, 400)
+
+                bad_dir = client.post(
+                    "/api/projects/bad_export/render",
+                    json={"output_dir": "relative/exports"},
+                )
+                self.assertEqual(bad_dir.status_code, 400)

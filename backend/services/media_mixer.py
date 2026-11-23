@@ -8,12 +8,12 @@ import subprocess
 import tempfile
 import wave
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydub import AudioSegment
 
 from backend import config
-from backend.schemas import ProjectScript, Segment, StemVolumes, SubtitleBurnMode
+from backend.schemas import ProjectScript, Segment, StemVolumes, SubtitleBurnMode, SubtitleLayout
 from backend.services.subtitles import write_ass_file
 from backend.services.task_runner import probe_media_duration
 
@@ -396,11 +396,53 @@ def _build_drawtext_filter() -> str:
     )
 
 
+def _sanitize_output_filename(raw_name: Optional[str], expected_ext: str) -> str:
+    """校验并规范化导出文件名，防止路径穿越或非法字符。"""
+    cleaned = (raw_name or "").strip()
+    if not cleaned:
+        return f"output{expected_ext}"
+    if "/" in cleaned or "\\" in cleaned or ".." in cleaned or any(ch in '<>:"|?*' for ch in cleaned) or cleaned in {".", ".."}:
+        raise ValueError("输出文件名不能包含路径分隔符或非法字符")
+    suffix = Path(cleaned).suffix.lower()
+    if not suffix:
+        return f"{cleaned}{expected_ext}"
+    if suffix != expected_ext:
+        raise ValueError(f"当前模式导出文件后缀必须为 {expected_ext}")
+    return cleaned
+
+
+def _resolve_export_dir(raw_dir: Optional[str]) -> Optional[Path]:
+    """校验并创建外部导出目录（必须为绝对路径或以 ~ 开头）。"""
+    cleaned = (raw_dir or "").strip()
+    if not cleaned:
+        return None
+    candidate = Path(cleaned).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("保存目录请填写绝对路径（支持 ~ 开头）")
+    if candidate.exists() and not candidate.is_dir():
+        raise ValueError(f"保存路径不是目录：{candidate}")
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate.resolve()
+
+
+def _copy_file_atomic(src: Path, dest_dir: Path, filename: str) -> Path:
+    """在目标目录内原子拷贝产物文件，兼容跨盘/跨分区移动。"""
+    target = (dest_dir / filename).resolve()
+    if target == src.resolve():
+        return target
+    with tempfile.TemporaryDirectory(dir=dest_dir, prefix=".stagetts_export_") as tmp_dir:
+        tmp_file = Path(tmp_dir) / filename
+        shutil.copyfile(src, tmp_file)
+        tmp_file.replace(target)
+    return target
+
+
 def mix_and_render(
     script: ProjectScript,
     burn_watermark: bool = False,
     burn_subtitles: SubtitleBurnMode = "none",
     auto_ducking: Optional[bool] = None,
+    output_filename: Optional[str] = None,
 ) -> Tuple[str, float]:
     """执行 pydub 毫秒拼轨与 FFmpeg 混音封装导出。
 
@@ -412,21 +454,28 @@ def mix_and_render(
     if not check_ffmpeg_available():
         raise RuntimeError("未在系统 PATH 中检测到 ffmpeg，请确认已安装 FFmpeg 6.x+。")
 
-    project_dir: Path = config.WORKSPACE_DIR / script.project_id
-    project_dir.mkdir(parents=True, exist_ok=True)
-    dubbed_vocals_path = _build_vocal_track(script, project_dir)
-    vocal_sr = _probe_wav_sample_rate(dubbed_vocals_path, default=44100)
-    stems_paths, bgm_path = _resolve_background_tracks(script)
-
     source_video_path: Optional[Path] = None
     if script.media.source_video:
         candidate_video = config.resolve_media_path(script.media.source_video)
         if candidate_video.is_file():
             source_video_path = candidate_video
 
-    # 模式 B 虚拟舞台若无源视频文件，导出完整混音音频 output.wav
-    if script.mode == "virtual_stage" and source_video_path is None:
-        output_wav = project_dir / "output.wav"
+    is_audio_export = script.mode == "virtual_stage" and source_video_path is None
+    if not is_audio_export and source_video_path is None:
+        raise FileNotFoundError(
+            f"未找到源视频文件 ({script.media.source_video})，无法封装 output.mp4"
+        )
+    target_filename = _sanitize_output_filename(output_filename, ".wav" if is_audio_export else ".mp4")
+
+    project_dir: Path = config.WORKSPACE_DIR / script.project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+    dubbed_vocals_path = _build_vocal_track(script, project_dir)
+    vocal_sr = _probe_wav_sample_rate(dubbed_vocals_path, default=44100)
+    stems_paths, bgm_path = _resolve_background_tracks(script)
+
+    # 模式 B 虚拟舞台若无源视频文件，导出完整混音音频
+    if is_audio_export:
+        output_wav = project_dir / target_filename
         if stems_paths is not None or bgm_path is not None:
             cmd = ["ffmpeg", "-y", "-i", str(dubbed_vocals_path)]
             if stems_paths is not None:
@@ -452,14 +501,10 @@ def mix_and_render(
             shutil.copyfile(dubbed_vocals_path, output_wav)
 
         out_duration = probe_media_duration(output_wav) or script.media.duration
-        return f"/workspace/{script.project_id}/output.wav", out_duration
+        return f"/workspace/{script.project_id}/{target_filename}", out_duration
 
-    if source_video_path is None:
-        raise FileNotFoundError(
-            f"未找到源视频文件 ({script.media.source_video})，无法封装 output.mp4"
-        )
-
-    output_mp4 = project_dir / "output.mp4"
+    assert source_video_path is not None
+    output_mp4 = project_dir / target_filename
     base_inputs: List[str] = ["ffmpeg", "-y", "-i", str(source_video_path), "-i", str(dubbed_vocals_path)]
     if stems_paths is not None:
         for p in stems_paths:
@@ -525,4 +570,56 @@ def mix_and_render(
                 raise RuntimeError(f"FFmpeg 视频重编码导出失败: {proc.stderr[-600:]}")
 
     out_duration = probe_media_duration(output_mp4) or script.media.duration
-    return f"/workspace/{script.project_id}/output.mp4", out_duration
+    return f"/workspace/{script.project_id}/{target_filename}", out_duration
+
+
+def export_project_deliverables(
+    script: ProjectScript,
+    *,
+    burn_watermark: bool = False,
+    burn_subtitles: SubtitleBurnMode = "none",
+    export_ass_sidecar: Optional[SubtitleLayout] = None,
+    auto_ducking: Optional[bool] = None,
+    output_filename: Optional[str] = None,
+    output_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """导出成片与可选外挂 ASS 字幕，并按需原子落盘至用户指定本机目录。"""
+    target_dir = _resolve_export_dir(output_dir)
+    output_url, duration = mix_and_render(
+        script,
+        burn_watermark=burn_watermark,
+        burn_subtitles=burn_subtitles,
+        auto_ducking=auto_ducking,
+        output_filename=output_filename,
+    )
+    workspace_output = config.resolve_media_path(output_url)
+    saved_path = (
+        _copy_file_atomic(workspace_output, target_dir, workspace_output.name)
+        if target_dir is not None
+        else workspace_output
+    )
+
+    subtitle_url: Optional[str] = None
+    subtitle_saved_path: Optional[str] = None
+    if export_ass_sidecar is not None:
+        ass_name = f"{workspace_output.stem}.ass"
+        workspace_ass = workspace_output.parent / ass_name
+        write_ass_file(script, export_ass_sidecar, workspace_ass)
+        subtitle_url = f"/workspace/{script.project_id}/{ass_name}"
+        copied_ass = (
+            _copy_file_atomic(workspace_ass, target_dir, ass_name)
+            if target_dir is not None
+            else workspace_ass
+        )
+        subtitle_saved_path = str(copied_ass)
+
+    return {
+        "output_video": output_url,
+        "duration": duration,
+        "burn_watermark": burn_watermark,
+        "burn_subtitles": burn_subtitles,
+        "auto_ducking": resolve_effective_auto_ducking(script, auto_ducking),
+        "saved_path": str(saved_path),
+        "subtitle_url": subtitle_url,
+        "subtitle_saved_path": subtitle_saved_path,
+    }
