@@ -7,6 +7,9 @@ import re
 from typing import Any
 
 MAX_SECONDS = 14.0
+# When no natural pause exists before MAX_SECONDS, allow a controlled overflow so
+# that CJK compounds (which WhisperX tokenizes per character) are not split mid-word.
+HARD_MAX_SECONDS = 20.0
 PREFERRED_SECONDS = 8.0
 MIN_FRAGMENT_SECONDS = 2.5
 MERGE_GAP_SECONDS = 0.65
@@ -86,7 +89,7 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
             alignment_needs_review=(
                 not offsets or raw_start is None or raw_end != end
                 or len(ordered_starts) != len(part_words) or ordered_starts != sorted(ordered_starts)
-                or part_end - part_start > MAX_SECONDS
+                or part_end - part_start > HARD_MAX_SECONDS
             ),
             speaker_needs_review=(
                 diarized and (
@@ -113,7 +116,20 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
                 and (PUNCTUATION.search(text[offsets[i - 1]:offsets[i]].rstrip())
                      or words[i]["start"] - words[i - 1]["end"] >= PAUSE_SECONDS)
             ]
-            cut = natural[-1] if natural else (fitting[-1] if fitting else available[0])
+            if natural:
+                cut = natural[-1]
+            elif fitting:
+                pauses = [i for i in fitting if words[i]["start"] - words[i - 1]["end"] >= PAUSE_SECONDS]
+                cut = pauses[-1] if pauses else fitting[-1]
+            else:
+                # No cut fits within MAX_SECONDS: extend to the first real pause before
+                # HARD_MAX_SECONDS instead of slicing a CJK compound in half.
+                extended = [
+                    i for i in available
+                    if words[i - 1]["end"] - part_start <= HARD_MAX_SECONDS
+                    and words[i]["start"] - words[i - 1]["end"] >= PAUSE_SECONDS
+                ]
+                cut = extended[0] if extended else available[0]
             segments.append(part(left, cut))
             left = cut
             part_start = words[left]["start"]
@@ -139,7 +155,7 @@ def _review_flags(seg: dict, diarized: bool) -> tuple[bool, bool]:
     starts = [word["start"] for word in words if word["start"] is not None]
     alignment = (
         not words or len(starts) != len(words) or starts != sorted(starts)
-        or seg["end"] - seg["start"] > MAX_SECONDS
+        or seg["end"] - seg["start"] > HARD_MAX_SECONDS
     )
     speakers = {word.get("speaker") for word in words if word.get("start") is not None}
     speaker_review = diarized and (len(speakers) != 1 or None in speakers)

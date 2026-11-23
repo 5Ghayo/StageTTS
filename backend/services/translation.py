@@ -201,6 +201,20 @@ def _repair_entries(
     return repaired
 
 
+def _is_non_speech(text: str) -> bool:
+    """Only genuine interjections/laughter deserve keep_original=true.
+
+    A full sentence that merely looks short or colloquial must still be dubbed;
+    otherwise a normal line silently keeps the source audio.
+    """
+    stripped = re.sub(r"[\s\W_]+", "", text or "")
+    if not stripped:
+        return True
+    if len(stripped) > 8:
+        return False
+    return not re.search(r"[A-Za-z\u3040-\u30ff\u4e00-\u9fff]{4,}", stripped)
+
+
 def _apply_translation(seg: Segment, text: str, entry: dict) -> bool:
     text = text.strip()
     complete, omitted = _self_check_flags(entry)
@@ -209,7 +223,9 @@ def _apply_translation(seg: Segment, text: str, entry: dict) -> bool:
     emotion = entry.get("emotion")
     emotion = emotion if isinstance(emotion, str) and emotion in EMOTIONS else "neutral"
     action = entry.get("action")
-    keep_original = entry.get("keep_original") is True
+    requested_keep = entry.get("keep_original") is True
+    # Guard against the model over-marking normal dialogue as "keep original".
+    keep_original = requested_keep and _is_non_speech(seg.orig_text)
     needs_resynth = (text, emotion, keep_original) != (seg.target_text, seg.emotion, seg.keep_original)
     seg.target_text = text
     seg.emotion = emotion
