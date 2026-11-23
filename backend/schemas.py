@@ -13,6 +13,8 @@ ProjectMode = Literal["video_dubbing", "virtual_stage"]
 EmotionType = Literal["neutral", "angry", "happy", "sad", "whisper"]
 SegmentStatus = Literal["pending", "synthesizing", "ready", "error"]
 AvatarType = Literal["live2d", "vrm"]
+SubtitleBurnMode = Literal["none", "target", "bilingual"]
+SubtitleLayout = Literal["target", "bilingual"]
 
 
 class CinematicStems(BaseModel):
@@ -22,6 +24,14 @@ class CinematicStems(BaseModel):
     effects: str
 
 
+class StemVolumes(BaseModel):
+    """Banquet 四轨分离后各背景子轨独立音量系数（0.0 ~ 2.0）。"""
+
+    singing: float = Field(default=1.0, ge=0.0, le=2.0, description="歌声轨音量系数")
+    music: float = Field(default=1.0, ge=0.0, le=2.0, description="伴奏音乐轨音量系数")
+    effects: float = Field(default=1.0, ge=0.0, le=2.0, description="环境与音效轨音量系数")
+
+
 class MediaInfo(BaseModel):
     """项目关联音视频资源与全局混音参数。"""
 
@@ -29,9 +39,11 @@ class MediaInfo(BaseModel):
     vocals_wav: Optional[str] = Field(default=None, description="识别和参考音使用的对白轨 URL")
     bgm_wav: Optional[str] = Field(default=None, description="歌声、伴奏和音效合成的背景轨 URL")
     cinematic_stems: Optional[CinematicStems] = Field(default=None, description="影视四轨分离结果")
+    stem_volumes: Optional[StemVolumes] = Field(default=None, description="四轨分离背景子轨独立音量系数")
     output_video: Optional[str] = Field(default=None, description="最终混音成片 URL")
     duration: float = Field(ge=0.0, description="媒体总时长（秒）")
     bgm_volume: float = Field(default=0.75, ge=0.0, le=2.0, description="BGM 混音音量系数")
+    auto_ducking: bool = Field(default=True, description="人声出现时是否自动闪避背景音乐")
 
 
 class EmotionRef(BaseModel):
@@ -295,6 +307,14 @@ class RenderRequest(BaseModel):
         default=False,
         description="为 True 时通过重编码烧录“AI 合成语音”硬水印；False 时使用 -c:v copy 快速无损导出",
     )
+    burn_subtitles: SubtitleBurnMode = Field(
+        default="none",
+        description="是否将 ASS 字幕烧录进成片画面：none / target / bilingual",
+    )
+    auto_ducking: Optional[bool] = Field(
+        default=None,
+        description="是否启用 BGM 自动闪避；为空时沿用 script.media.auto_ducking",
+    )
 
 
 class RenderResponse(BaseModel):
@@ -304,3 +324,5 @@ class RenderResponse(BaseModel):
     output_video: str
     duration: float
     burn_watermark: bool
+    burn_subtitles: SubtitleBurnMode = "none"
+    auto_ducking: bool = True

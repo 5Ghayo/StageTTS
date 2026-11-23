@@ -1,7 +1,9 @@
 import { X } from "lucide-react";
 import type React from "react";
+import { getSubtitlesUrl } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
+import type { StemVolumes } from "../../types/script";
 import { CharacterPanel } from "./CharacterPanel";
 import { TranslationSettings } from "./TranslationSettings";
 
@@ -12,6 +14,8 @@ export const AssetBinPanel: React.FC = () => {
   const script = useProjectStore((s) => s.script);
   const selectSegment = useProjectStore((s) => s.selectSegment);
   const setCurrentTime = useProjectStore((s) => s.setCurrentTime);
+  const updateStemVolume = useProjectStore((s) => s.updateStemVolume);
+  const updateAutoDucking = useProjectStore((s) => s.updateAutoDucking);
 
   const leftDrawer = useWorkflowStore((s) => s.leftDrawer);
   const toggleLeftDrawer = useWorkflowStore((s) => s.toggleLeftDrawer);
@@ -21,6 +25,13 @@ export const AssetBinPanel: React.FC = () => {
   }
 
   const stems = script.media.cinematic_stems;
+  const stemVolumes = script.media.stem_volumes ?? { singing: 1, music: 1, effects: 1 };
+  const autoDucking = script.media.auto_ducking ?? true;
+  const stemControls: Array<{ key: keyof StemVolumes; label: string }> = [
+    { key: "singing", label: "歌声" },
+    { key: "music", label: "音乐" },
+    { key: "effects", label: "音效" },
+  ];
   const mediaRows = [
     { label: "原视频流", ready: Boolean(script.media.source_video) },
     ...(stems
@@ -90,6 +101,64 @@ export const AssetBinPanel: React.FC = () => {
                   </span>
                 </div>
               ))}
+            </div>
+
+            <div className="space-y-2.5 border-b border-dashed border-white/[0.08] p-3.5">
+              <div className="text-[11px] font-medium text-secondary">混音与四轨平衡</div>
+              {stems && (
+                <div className="space-y-1.5">
+                  {stemControls.map((item) => {
+                    const value = stemVolumes[item.key] ?? 1;
+                    return (
+                      <div key={item.key} className="flex items-center gap-2 text-[11px]">
+                        <span className="w-8 shrink-0 text-secondary">{item.label}</span>
+                        <input
+                          aria-label={`${item.label}轨音量`}
+                          type="range"
+                          min={0}
+                          max={2}
+                          step={0.05}
+                          value={value}
+                          onChange={(e) => updateStemVolume(item.key, Number(e.target.value))}
+                          className="min-w-0 flex-1"
+                        />
+                        <span className="w-9 shrink-0 text-right font-mono tabular-nums text-secondary">
+                          {Math.round(value * 100)}%
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <label className="flex cursor-pointer items-center justify-between gap-2 text-[11px] text-primary">
+                <span>人声自动闪避 BGM</span>
+                <input
+                  type="checkbox"
+                  checked={autoDucking}
+                  onChange={(e) => updateAutoDucking(e.target.checked)}
+                  className="h-3.5 w-3.5"
+                />
+              </label>
+
+              <div className="flex items-center justify-between gap-2 pt-1 text-[11px]">
+                <span className="text-secondary">ASS 字幕导出</span>
+                <div className="flex items-center gap-1.5">
+                  <a
+                    href={getSubtitlesUrl(script.project_id, "target")}
+                    download={`${script.project_id}_target.ass`}
+                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary transition-colors hover:bg-[#363636]"
+                  >
+                    单语
+                  </a>
+                  <a
+                    href={getSubtitlesUrl(script.project_id, "bilingual")}
+                    download={`${script.project_id}_bilingual.ass`}
+                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary transition-colors hover:bg-[#363636]"
+                  >
+                    双语
+                  </a>
+                </div>
+              </div>
             </div>
 
             <div className="p-3.5">

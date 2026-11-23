@@ -2,6 +2,7 @@ import { AlertTriangle, Cpu, Sliders, Sparkles, Terminal } from "lucide-react";
 import type React from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
+import type { StemVolumes, SubtitleBurnMode } from "../../types/script";
 
 /**
  * 扁平化节点参数检查器（#222222 面板 + #181818 凹槽控件 + 极淡虚线分组）。
@@ -10,6 +11,8 @@ export const NodeInspectorPanel: React.FC = () => {
   const script = useProjectStore((s) => s.script);
   const setMode = useProjectStore((s) => s.setMode);
   const updateBgmVolume = useProjectStore((s) => s.updateBgmVolume);
+  const updateStemVolume = useProjectStore((s) => s.updateStemVolume);
+  const updateAutoDucking = useProjectStore((s) => s.updateAutoDucking);
 
   const selectedNodeId = useWorkflowStore((s) => s.selectedNodeId);
   const nodes = useWorkflowStore((s) => s.nodes);
@@ -112,12 +115,13 @@ export const NodeInspectorPanel: React.FC = () => {
         <div className="space-y-3 border-b border-dashed border-white/[0.08] pb-3">
           <div className="space-y-1">
             <div className="flex justify-between text-[11px]">
-              <span className="whitespace-nowrap text-secondary">伴奏音量</span>
+              <span className="whitespace-nowrap text-secondary">伴奏主音量</span>
               <span className="font-mono tabular-nums text-primary">
                 {Math.round((script?.media.bgm_volume ?? 0.75) * 100)}%
               </span>
             </div>
             <input
+              aria-label="伴奏主音量"
               type="range"
               min={0}
               max={2}
@@ -126,6 +130,71 @@ export const NodeInspectorPanel: React.FC = () => {
               onChange={(e) => updateBgmVolume(Number(e.target.value))}
               className="w-full"
             />
+          </div>
+
+          {script?.media.cinematic_stems && (
+            <div className="space-y-1.5 border-t border-white/[0.05] pt-2">
+              {(
+                [
+                  { key: "singing", label: "歌声轨" },
+                  { key: "music", label: "音乐轨" },
+                  { key: "effects", label: "音效轨" },
+                ] as Array<{ key: keyof StemVolumes; label: string }>
+              ).map((item) => {
+                const value = script.media.stem_volumes?.[item.key] ?? 1;
+                return (
+                  <div key={item.key} className="flex items-center gap-2 text-[11px]">
+                    <span className="w-11 shrink-0 text-secondary">{item.label}</span>
+                    <input
+                      aria-label={item.label}
+                      type="range"
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      value={value}
+                      onChange={(e) => updateStemVolume(item.key, Number(e.target.value))}
+                      className="min-w-0 flex-1"
+                    />
+                    <span className="w-9 shrink-0 text-right font-mono tabular-nums text-secondary">
+                      {Math.round(value * 100)}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <label className="flex cursor-pointer items-center justify-between gap-2 text-[11px] text-primary">
+            <span>人声自动闪避背景音乐</span>
+            <input
+              type="checkbox"
+              checked={script?.media.auto_ducking ?? true}
+              onChange={(e) => updateAutoDucking(e.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+          </label>
+
+          <div className="flex items-center gap-2">
+            <label
+              htmlFor="node-burn-subtitles"
+              className="w-20 shrink-0 whitespace-nowrap text-[11px] text-secondary"
+            >
+              烧录 ASS 字幕
+            </label>
+            <select
+              id="node-burn-subtitles"
+              value={pipelineConfig.burnSubtitles}
+              onChange={(e) =>
+                updatePipelineConfig({
+                  burnSubtitles: e.target.value as SubtitleBurnMode,
+                })
+              }
+              className="h-7 flex-1 rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary transition-colors focus:border-white/25 focus:outline-none"
+            >
+              <option value="none">不烧录（快速无损）</option>
+              <option value="target">单语译文 ASS</option>
+              <option value="bilingual">双语对照 ASS</option>
+            </select>
           </div>
 
           <label className="flex cursor-pointer items-start gap-2 pt-1 text-primary">
@@ -139,7 +208,7 @@ export const NodeInspectorPanel: React.FC = () => {
               <div className="font-medium">导出时烧录“AI 合成语音”水印</div>
               <p className="mt-1 flex items-center gap-1 text-[11px] text-status-warning">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
-                <span>开启后将重编码画面，关闭则秒级无损导出</span>
+                <span>开启硬字幕或水印时将单次重编码，全关闭则秒级无损导出</span>
               </p>
             </div>
           </label>

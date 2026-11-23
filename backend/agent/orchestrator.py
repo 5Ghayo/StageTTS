@@ -36,9 +36,12 @@ def _summarize_tool_result(tool_name: str, result: Dict[str, Any]) -> str:
         long = len(durations) - short
         return f"合成片段 {synth}（时长偏差: 超长 {long} 条 / 过短 {short} 条）"
     if tool_name == "update_mix_settings":
-        return f"已更新 BGM 音量为 {result.get('bgm_volume')}"
+        return (
+            f"已更新混音设置（总音量 {result.get('bgm_volume')}，"
+            f"自动闪避 {'开' if result.get('auto_ducking', True) else '关'}）"
+        )
     if tool_name == "render_final_video":
-        return f"已导出成片 {result.get('output_video')}"
+        return f"已导出成片 {result.get('output_video')}（字幕={result.get('burn_subtitles', 'none')}）"
     return "执行完成"
 
 

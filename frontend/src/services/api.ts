@@ -11,6 +11,8 @@ import type {
   ReferencePreview,
   ReferenceUploadResponse,
   RenderResponse,
+  SubtitleBurnMode,
+  SubtitleLayout,
   SynthesizeResponse,
   TranslationResponse,
   UploadResponse,
@@ -215,11 +217,24 @@ export function sendAgentChat(
   );
 }
 
-export function renderVideo(projectId: string, burnWatermark = false): Promise<RenderResponse> {
+export function getSubtitlesUrl(projectId: string, layout: SubtitleLayout = "target"): string {
+  return `/api/projects/${encodeURIComponent(projectId)}/subtitles?layout=${encodeURIComponent(layout)}`;
+}
+
+export function renderVideo(
+  projectId: string,
+  burnWatermark = false,
+  burnSubtitles: SubtitleBurnMode = "none",
+  autoDucking?: boolean,
+): Promise<RenderResponse> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/render", {
       params: { path: { project_id: projectId } },
-      body: { burn_watermark: burnWatermark },
+      body: {
+        burn_watermark: burnWatermark,
+        burn_subtitles: burnSubtitles,
+        ...(autoDucking !== undefined ? { auto_ducking: autoDucking } : {}),
+      },
     }),
   );
 }

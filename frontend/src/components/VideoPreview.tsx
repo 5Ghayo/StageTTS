@@ -167,6 +167,10 @@ export const VideoPreview: React.FC = () => {
         vocals={vocals}
         muteVocals={muteSource || trackStates.vocalsMuted}
         bgm={bgm}
+        stems={script?.media.cinematic_stems}
+        stemVolumes={script?.media.stem_volumes}
+        autoDucking={script?.media.auto_ducking ?? true}
+        replacesSource={replacesSource}
         muteBgm={trackStates.dubSolo || trackStates.bgmMuted}
         bgmVolume={script?.media.bgm_volume}
       />

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
-import type { Segment } from "../types/script";
+import type { CinematicStems, Segment, StemVolumes } from "../types/script";
 
 const EMPTY_SEGMENTS: Segment[] = [];
 
@@ -140,6 +140,10 @@ export function TimelineAudio({
   dubMuted,
   vocals,
   bgm,
+  stems,
+  stemVolumes,
+  autoDucking = true,
+  replacesSource = false,
   muteVocals,
   muteBgm,
   bgmVolume,
@@ -150,23 +154,58 @@ export function TimelineAudio({
   dubMuted: boolean;
   vocals?: string | null;
   bgm?: string | null;
+  stems?: CinematicStems | null;
+  stemVolumes?: StemVolumes | null;
+  autoDucking?: boolean;
+  replacesSource?: boolean;
   muteVocals?: boolean;
   muteBgm?: boolean;
   bgmVolume?: number;
 }) {
+  const masterBgm = bgmVolume ?? 0.75;
+  const duckFactor = autoDucking && replacesSource && !dubMuted ? 0.45 : 1;
+  const sv = stemVolumes ?? { singing: 1, music: 1, effects: 1 };
+  const useStems = Boolean(stems?.singing && stems?.music && stems?.effects);
+
   return (
     <>
       {vocals && (
         <PreviewAudio src={vocals} time={time} playing={playing} muted={Boolean(muteVocals)} />
       )}
-      {bgm && (
-        <PreviewAudio
-          src={bgm}
-          time={time}
-          playing={playing}
-          muted={Boolean(muteBgm)}
-          volume={bgmVolume}
-        />
+      {useStems && stems ? (
+        <>
+          <PreviewAudio
+            src={stems.singing}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, sv.singing * masterBgm * duckFactor)}
+          />
+          <PreviewAudio
+            src={stems.music}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, sv.music * masterBgm * duckFactor)}
+          />
+          <PreviewAudio
+            src={stems.effects}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, sv.effects * masterBgm)}
+          />
+        </>
+      ) : (
+        bgm && (
+          <PreviewAudio
+            src={bgm}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, masterBgm * duckFactor)}
+          />
+        )
       )}
       {clips.map(({ segment, src, rate }) => (
         <PreviewAudio

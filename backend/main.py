@@ -12,7 +12,7 @@ from typing import AsyncIterator, Dict, List
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
@@ -39,6 +39,7 @@ from backend.schemas import (
     ReferenceUploadResponse,
     RenderRequest,
     RenderResponse,
+    SubtitleLayout,
     SynthesizeRequest,
     SynthesizeResponse,
     TranslationResponse,
@@ -46,6 +47,7 @@ from backend.schemas import (
 )
 from backend.services.media_mixer import check_ffmpeg_available
 from backend.services.references import automatic_reference, store_reference_audio
+from backend.services.subtitles import generate_ass_subtitles
 from backend.services.task_runner import (
     GpuBusyError,
     ParseWorkerError,
@@ -400,11 +402,35 @@ def agent_chat(project_id: str, req: AgentChatRequest) -> AgentChatResponse:
     )
 
 
+@app.get("/api/projects/{project_id}/subtitles")
+def download_project_subtitles(
+    project_id: str,
+    layout: SubtitleLayout = "target",
+) -> Response:
+    """导出指定项目的 ASS 字幕文件（单语译文或双语对照）。"""
+    safe_id = _validate_project_id(project_id)
+    script = load_project_script(safe_id)
+    ass_content = generate_ass_subtitles(script, layout=layout)
+    return Response(
+        content=ass_content.encode("utf-8-sig"),
+        media_type="text/x-ssa; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_id}_{layout}.ass"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.post("/api/projects/{project_id}/render", response_model=RenderResponse)
 def render_project_video(project_id: str, req: RenderRequest) -> RenderResponse:
     """执行 pydub 毫秒拼轨与 FFmpeg 混音封装，导出 output.mp4（或虚拟舞台音频）。"""
     safe_id = _validate_project_id(project_id)
     return RenderResponse(
         project_id=safe_id,
-        **render_final_video(safe_id, burn_watermark=req.burn_watermark),
+        **render_final_video(
+            safe_id,
+            burn_watermark=req.burn_watermark,
+            burn_subtitles=req.burn_subtitles,
+            auto_ducking=req.auto_ducking,
+        ),
     )

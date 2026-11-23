@@ -256,6 +256,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/subtitles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Project Subtitles
+         * @description 导出指定项目的 ASS 字幕文件（单语译文或双语对照）。
+         */
+        get: operations["download_project_subtitles_api_projects__project_id__subtitles_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/render": {
         parameters: {
             query?: never;
@@ -507,6 +527,8 @@ export interface components {
             bgm_wav?: string | null;
             /** @description 影视四轨分离结果 */
             cinematic_stems?: components["schemas"]["CinematicStems"] | null;
+            /** @description 四轨分离背景子轨独立音量系数 */
+            stem_volumes?: components["schemas"]["StemVolumes"] | null;
             /**
              * Output Video
              * @description 最终混音成片 URL
@@ -523,6 +545,12 @@ export interface components {
              * @default 0.75
              */
             bgm_volume: number;
+            /**
+             * Auto Ducking
+             * @description 人声出现时是否自动闪避背景音乐
+             * @default true
+             */
+            auto_ducking: boolean;
         };
         /**
          * ParseRequest
@@ -682,6 +710,18 @@ export interface components {
              * @default false
              */
             burn_watermark: boolean;
+            /**
+             * Burn Subtitles
+             * @description 是否将 ASS 字幕烧录进成片画面：none / target / bilingual
+             * @default none
+             * @enum {string}
+             */
+            burn_subtitles: "none" | "target" | "bilingual";
+            /**
+             * Auto Ducking
+             * @description 是否启用 BGM 自动闪避；为空时沿用 script.media.auto_ducking
+             */
+            auto_ducking?: boolean | null;
         };
         /**
          * RenderResponse
@@ -696,6 +736,17 @@ export interface components {
             duration: number;
             /** Burn Watermark */
             burn_watermark: boolean;
+            /**
+             * Burn Subtitles
+             * @default none
+             * @enum {string}
+             */
+            burn_subtitles: "none" | "target" | "bilingual";
+            /**
+             * Auto Ducking
+             * @default true
+             */
+            auto_ducking: boolean;
         };
         /**
          * Segment
@@ -826,6 +877,30 @@ export interface components {
             overflow_seconds: number;
             /** Needs Reflection */
             needs_reflection: boolean;
+        };
+        /**
+         * StemVolumes
+         * @description Banquet 四轨分离后各背景子轨独立音量系数（0.0 ~ 2.0）。
+         */
+        StemVolumes: {
+            /**
+             * Singing
+             * @description 歌声轨音量系数
+             * @default 1
+             */
+            singing: number;
+            /**
+             * Music
+             * @description 伴奏音乐轨音量系数
+             * @default 1
+             */
+            music: number;
+            /**
+             * Effects
+             * @description 环境与音效轨音量系数
+             * @default 1
+             */
+            effects: number;
         };
         /**
          * SynthesizeRequest
@@ -1340,6 +1415,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentChatResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_project_subtitles_api_projects__project_id__subtitles_get: {
+        parameters: {
+            query?: {
+                layout?: "target" | "bilingual";
+            };
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

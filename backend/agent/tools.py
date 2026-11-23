@@ -13,8 +13,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from weakref import WeakValueDictionary
 
 from backend import config
-from backend.schemas import ProjectScript, SegmentPatch, SynthesizeResponse
-from backend.services.media_mixer import mix_and_render
+from backend.schemas import ProjectScript, SegmentPatch, StemVolumes, SubtitleBurnMode, SynthesizeResponse
+from backend.services.media_mixer import mix_and_render, resolve_effective_auto_ducking
 from backend.services.synthesis import synthesize_with_duration_check
 from backend.services.task_runner import GpuBusyError, gpu_task_guard
 from backend.services.tts_client import TTSServiceUnavailableError
@@ -170,31 +170,61 @@ def synthesize_segments(
 
 def update_mix_settings(
     project_id: str,
-    bgm_volume: float,
+    bgm_volume: Optional[float] = None,
+    singing_volume: Optional[float] = None,
+    music_volume: Optional[float] = None,
+    effects_volume: Optional[float] = None,
+    auto_ducking: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """更新背景伴奏音量系数（限 0.0 ~ 2.0）并持久化 script.json。"""
-    clamped = max(0.0, min(2.0, float(bgm_volume)))
+    """更新背景混音主音量、四轨子音量与自动闪避开关（0.0 ~ 2.0）并持久化 script.json。"""
+    def _clamp(val: float) -> float:
+        return round(max(0.0, min(2.0, float(val))), 3)
+
     with project_task_guard(project_id):
         script = load_project_script(project_id)
-        script.media.bgm_volume = clamped
+        if bgm_volume is not None:
+            script.media.bgm_volume = _clamp(bgm_volume)
+        if any(v is not None for v in (singing_volume, music_volume, effects_volume)):
+            current = script.media.stem_volumes or StemVolumes()
+            script.media.stem_volumes = StemVolumes(
+                singing=_clamp(singing_volume) if singing_volume is not None else current.singing,
+                music=_clamp(music_volume) if music_volume is not None else current.music,
+                effects=_clamp(effects_volume) if effects_volume is not None else current.effects,
+            )
+        if auto_ducking is not None:
+            script.media.auto_ducking = bool(auto_ducking)
         save_project_script(script)
-    return {"bgm_volume": clamped}
+    return {
+        "bgm_volume": script.media.bgm_volume,
+        "stem_volumes": script.media.stem_volumes.model_dump() if script.media.stem_volumes else None,
+        "auto_ducking": script.media.auto_ducking,
+    }
 
 
 def render_final_video(
     project_id: str,
     burn_watermark: bool = False,
+    burn_subtitles: SubtitleBurnMode = "none",
+    auto_ducking: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """触发 pydub 拼轨与 FFmpeg 混音封装，输出成片路径并回写 script.json。"""
     with project_task_guard(project_id):
         script = load_project_script(project_id)
-        output_video, duration = mix_and_render(script, burn_watermark=burn_watermark)
+        output_video, duration = mix_and_render(
+            script,
+            burn_watermark=burn_watermark,
+            burn_subtitles=burn_subtitles,
+            auto_ducking=auto_ducking,
+        )
+        effective_ducking = resolve_effective_auto_ducking(script, auto_ducking)
         script.media.output_video = output_video
         save_project_script(script)
     return {
         "output_video": output_video,
         "duration": duration,
         "burn_watermark": burn_watermark,
+        "burn_subtitles": burn_subtitles,
+        "auto_ducking": effective_ducking,
     }
 
 
@@ -287,14 +317,18 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "update_mix_settings",
-            "description": "动态调节背景伴奏混音音量（0.0 ~ 2.0）。",
+            "description": "动态调节背景伴奏主音量、四轨子音量（歌声/音乐/音效，0.0~2.0）及人声自动闪避开关。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "project_id": {"type": "string", "description": "项目 ID"},
-                    "bgm_volume": {"type": "number", "description": "BGM 音量系数（0.0 到 2.0）"},
+                    "bgm_volume": {"type": "number", "description": "可选，总背景音量系数（0.0 到 2.0）"},
+                    "singing_volume": {"type": "number", "description": "可选，歌声轨音量系数（0.0 到 2.0）"},
+                    "music_volume": {"type": "number", "description": "可选，伴奏音乐轨音量系数（0.0 到 2.0）"},
+                    "effects_volume": {"type": "number", "description": "可选，音效轨音量系数（0.0 到 2.0）"},
+                    "auto_ducking": {"type": "boolean", "description": "可选，是否开启人声自动闪避背景音乐"},
                 },
-                "required": ["project_id", "bgm_volume"],
+                "required": ["project_id"],
             },
         },
     },
@@ -302,7 +336,7 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "render_final_video",
-            "description": "触发 pydub 拼轨与 FFmpeg 混音封装，导出最终成片 output.mp4。",
+            "description": "触发 pydub 拼轨与 FFmpeg 混音封装，导出最终成片 output.mp4（支持 ASS 硬字幕烧录与自动闪避）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -310,6 +344,15 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
                     "burn_watermark": {
                         "type": "boolean",
                         "description": "是否烧录“AI 合成语音”硬水印（默认 false 使用无损流拷贝）",
+                    },
+                    "burn_subtitles": {
+                        "type": "string",
+                        "enum": ["none", "target", "bilingual"],
+                        "description": "是否烧录 ASS 硬字幕（none / target / bilingual，默认 none）",
+                    },
+                    "auto_ducking": {
+                        "type": "boolean",
+                        "description": "可选，覆盖项目的 BGM 自动闪避设置",
                     },
                 },
                 "required": ["project_id"],

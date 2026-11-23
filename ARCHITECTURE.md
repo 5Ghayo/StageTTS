@@ -154,6 +154,8 @@
 - **`EmotionType`**：`"neutral"` | `"angry"` | `"happy"` | `"sad"` | `"whisper"`
 - **`SegmentStatus`**：`"pending"` | `"synthesizing"` | `"ready"` | `"error"`
 - **`AvatarType`**：`"live2d"` | `"vrm"`
+- **`SubtitleBurnMode`**：`"none"` | `"target"` | `"bilingual"`
+- **`SubtitleLayout`**：`"target"` | `"bilingual"`
 
 | 层级 | 字段名 | 类型 | 必填 | 说明 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -167,9 +169,11 @@
 | `media` | `vocals_wav` | `string \| null` | 否 | 对白轨 URL |
 | `media` | `bgm_wav` | `string \| null` | 否 | 歌声、伴奏和音效合成的背景轨 URL |
 | `media` | `cinematic_stems` | `CinematicStems \| null` | 否 | 独立对白、歌声、伴奏、音效 WAV URL |
+| `media` | `stem_volumes` | `StemVolumes \| null` | 否 | 四轨分离背景子轨独立音量系数（`singing` / `music` / `effects`，范围 `0.0` ~ `2.0`） |
 | `media` | `output_video` | `string \| null` | 否 | 最终渲染输出 URL（如 `/workspace/{id}/output.mp4`） |
 | `media` | `duration` | `number` | 是 | 项目总时长（秒） |
-| `media` | `bgm_volume` | `number` | 是 | 伴奏混音系数（`0.0` ~ `2.0`，默认 `0.75`） |
+| `media` | `bgm_volume` | `number` | 是 | 伴奏混音音量主系数（`0.0` ~ `2.0`，默认 `0.75`） |
+| `media` | `auto_ducking` | `boolean` | 否 | 人声出现时是否自动闪避背景音乐（默认 `true`） |
 | `character` | `display_name` | `string` | 是 | 前端显示角色名 |
 | `character` | `speaking_style` | `string` | 否 | 翻译与时长改写使用的角色语气 |
 | `character` | `color` | `string` | 是 | 波形轨道色块 Hex 颜色（如 `#3b82f6`） |
@@ -214,7 +218,8 @@
 | `POST` | `/api/projects/{project_id}/translate` | 按当前术语与角色设置重译，保留失败的台词 | — | `TranslationResponse` |
 | `POST` | `/api/projects/{project_id}/synthesize` | 按 `speaker` 分组批量合成指定片段并返回时长质检结果 | `SynthesizeRequest` | `SynthesizeResponse` |
 | `POST` | `/api/projects/{project_id}/agent/chat` | 自然语言批量剪辑对话（多轮工具调用 + 超时反思改写） | `AgentChatRequest` | `AgentChatResponse` |
-| `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + FFmpeg 混音导出 `output.mp4` | `RenderRequest` | `RenderResponse` |
+| `GET` | `/api/projects/{project_id}/subtitles` | 导出当前剧本的 ASS 字幕文件（`layout=target\|bilingual`） | Query: `layout` | UTF-8-SIG ASS 文本 |
+| `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + 四轨独立混音/自动闪避 + FFmpeg 导出 `output.mp4`（支持 ASS 硬字幕与硬水印单次重编码） | `RenderRequest` | `RenderResponse` |
 | `STATIC` | `/workspace/*` | 静态挂载 `workspace/` 目录（提供视频、人声、伴奏、单句 TTS 音频） | — | 二进制流 |
 | `STATIC` | `/assets/*` | 静态挂载 `assets/` 目录（提供 Live2D/VRM 模型与情绪参考音频） | — | 二进制流 |
 
@@ -229,8 +234,8 @@
 | `query_script` | `project_id: str`, `start_sec: float \| None = None`, `end_sec: float \| None = None`, `speaker: str \| None = None` | `{ "count": int, "segments": list[dict] }` | 只读查询 `script.json`，不写盘 |
 | `batch_update_segments` | `project_id: str`, `updates: list[SegmentPatch]`（含 `id` 及可选 `speaker` / `target_text` / `emotion` / `action` / `keep_original` / `speed_factor`） | `{ "updated_ids": list[int], "marked_pending_ids": list[int] }` | 修改指定片段字段；若修改了 `speaker`/`target_text`/`emotion`/`keep_original`，自动将 `status` 置为 `"pending"` 并持久化 `script.json` |
 | `synthesize_segments` | `project_id: str`, `segment_ids: list[int] \| None = None`（为 `None` 时合成全部 `status != "ready"` 且 `keep_original == false` 的片段） | `{ "synthesized_ids": list[int], "overflow_segments": list[SegmentDurationCheck], "errors": list[str] }` | 按角色分组配音，执行时长闭环并返回最终剩余超长 |
-| `update_mix_settings` | `project_id: str`, `bgm_volume: float`（限 `0.0` ~ `2.0`） | `{ "bgm_volume": float }` | 更新 `media.bgm_volume` 并持久化 `script.json` |
-| `render_final_video` | `project_id: str`, `burn_watermark: bool = False` | `{ "output_video": str, "duration": float, "burn_watermark": bool }` | 触发 `pydub` 拼轨与 FFmpeg 混音导出，写回 `media.output_video` 并持久化 `script.json` |
+| `update_mix_settings` | `project_id: str`, `bgm_volume: float \| None = None`, `singing_volume: float \| None = None`, `music_volume: float \| None = None`, `effects_volume: float \| None = None`, `auto_ducking: bool \| None = None` | `{ "bgm_volume": float, "stem_volumes": StemVolumes \| null, "auto_ducking": bool }` | 更新背景混音主音量、四轨子音量与自动闪避开关并持久化 `script.json` |
+| `render_final_video` | `project_id: str`, `burn_watermark: bool = False`, `burn_subtitles: SubtitleBurnMode = "none"`, `auto_ducking: bool \| None = None` | `{ "output_video": str, "duration": float, "burn_watermark": bool, "burn_subtitles": SubtitleBurnMode, "auto_ducking": bool }` | 触发 `pydub` 拼轨与 FFmpeg 混音封装（支持 ASS 硬字幕烧录与自动闪避），写回 `media.output_video` 并持久化 `script.json` |
 
 ---
 

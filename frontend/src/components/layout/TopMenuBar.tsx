@@ -7,14 +7,22 @@ import {
   Mic,
   Play,
   Save,
+  SlidersHorizontal,
   Sparkles,
   Workflow,
 } from "lucide-react";
 import type React from "react";
 import { useState } from "react";
-import { ApiError, type GpuDevice, fetchGpuStatus, renderVideo } from "../../services/api";
+import {
+  ApiError,
+  type GpuDevice,
+  fetchGpuStatus,
+  getSubtitlesUrl,
+  renderVideo,
+} from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
+import type { SubtitleBurnMode } from "../../types/script";
 import type { WorkspacePreset } from "../../types/workflow";
 
 const PRESET_OPTIONS: Array<{
@@ -54,16 +62,19 @@ export const TopMenuBar: React.FC = () => {
   const isSynthesizing = useProjectStore((s) => s.isSynthesizing);
   const saveProjectScript = useProjectStore((s) => s.saveProjectScript);
   const synthesizeSegment = useProjectStore((s) => s.synthesizeSegment);
+  const updateAutoDucking = useProjectStore((s) => s.updateAutoDucking);
 
   const workspacePreset = useWorkflowStore((s) => s.workspacePreset);
   const setWorkspacePreset = useWorkflowStore((s) => s.setWorkspacePreset);
   const pipelineConfig = useWorkflowStore((s) => s.pipelineConfig);
+  const updatePipelineConfig = useWorkflowStore((s) => s.updatePipelineConfig);
   const isPipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
   const runPipeline = useWorkflowStore((s) => s.runPipeline);
   const appendLog = useWorkflowStore((s) => s.appendLog);
 
   const [actionToast, setActionToast] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
   const { data: gpuData } = useQuery({
     queryKey: ["gpu-status"],
     queryFn: ({ signal }) => fetchGpuStatus(signal),
@@ -147,7 +158,12 @@ export const TopMenuBar: React.FC = () => {
           return;
         }
       }
-      const res = await renderVideo(script.project_id, pipelineConfig.burnWatermark);
+      const res = await renderVideo(
+        script.project_id,
+        pipelineConfig.burnWatermark,
+        pipelineConfig.burnSubtitles,
+        script.media.auto_ducking ?? true,
+      );
       useProjectStore.setState((state) =>
         state.script?.project_id === res.project_id
           ? {
@@ -238,7 +254,7 @@ export const TopMenuBar: React.FC = () => {
       </nav>
 
       {/* 右侧：无外框极淡标签（bg-white/[0.04]） · 实心钢蓝主按钮 */}
-      <div className="flex items-center gap-2">
+      <div className="relative flex items-center gap-2">
         {actionToast && (
           <span className="flex h-6 items-center rounded-[4px] bg-white/[0.06] px-2 text-[11px] text-primary">
             {actionToast}
@@ -296,13 +312,91 @@ export const TopMenuBar: React.FC = () => {
               )}
               <button
                 type="button"
+                title="导出设置与 ASS 字幕下载"
+                onClick={() => setShowExportMenu((prev) => !prev)}
+                className={`flex h-7 items-center gap-1 whitespace-nowrap rounded-[4px] border px-2 py-1 text-[11px] transition-colors ${
+                  showExportMenu ||
+                  pipelineConfig.burnSubtitles !== "none" ||
+                  pipelineConfig.burnWatermark
+                    ? "border-white/20 bg-[#333333] text-primary"
+                    : "border-white/[0.08] bg-[#2C2C2C] text-secondary hover:bg-[#363636] hover:text-primary"
+                }`}
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={1.5} />
+                <span>导出选项</span>
+              </button>
+              <button
+                type="button"
                 disabled={isExporting || isSynthesizing || isLoading || isPipelineRunning}
-                onClick={() => void handleExport()}
+                onClick={() => {
+                  setShowExportMenu(false);
+                  void handleExport();
+                }}
                 className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-[#3A6EA5] px-3 py-1 text-[12px] font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8] disabled:opacity-50"
               >
                 <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
                 <span>{isExporting ? "导出中..." : "导出成片"}</span>
               </button>
+              {showExportMenu && (
+                <div className="absolute right-0 top-9 z-40 w-64 space-y-2.5 rounded-[4px] border border-white/[0.08] bg-[#222222] p-3 text-[12px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <label htmlFor="topbar-burn-subtitles" className="text-[11px] text-secondary">
+                      ASS 硬字幕
+                    </label>
+                    <select
+                      id="topbar-burn-subtitles"
+                      value={pipelineConfig.burnSubtitles}
+                      onChange={(e) =>
+                        updatePipelineConfig({
+                          burnSubtitles: e.target.value as SubtitleBurnMode,
+                        })
+                      }
+                      className="h-7 rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[11px] text-primary focus:outline-none"
+                    >
+                      <option value="none">不烧录</option>
+                      <option value="target">单语译文</option>
+                      <option value="bilingual">双语对照</option>
+                    </select>
+                  </div>
+                  <label className="flex cursor-pointer items-center justify-between gap-2 text-[11px] text-primary">
+                    <span>烧录“AI 合成语音”水印</span>
+                    <input
+                      type="checkbox"
+                      checked={pipelineConfig.burnWatermark}
+                      onChange={(e) => updatePipelineConfig({ burnWatermark: e.target.checked })}
+                      className="h-3.5 w-3.5"
+                    />
+                  </label>
+                  <label className="flex cursor-pointer items-center justify-between gap-2 text-[11px] text-primary">
+                    <span>人声自动闪避 BGM</span>
+                    <input
+                      type="checkbox"
+                      checked={script.media.auto_ducking ?? true}
+                      onChange={(e) => updateAutoDucking(e.target.checked)}
+                      className="h-3.5 w-3.5"
+                    />
+                  </label>
+                  <div className="flex items-center justify-between border-t border-dashed border-white/[0.08] pt-2 text-[11px]">
+                    <span className="text-secondary">下载 ASS 字幕</span>
+                    <div className="flex gap-1.5">
+                      <a
+                        href={getSubtitlesUrl(script.project_id, "target")}
+                        download={`${script.project_id}_target.ass`}
+                        className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary hover:bg-[#363636]"
+                      >
+                        单语
+                      </a>
+                      <a
+                        href={getSubtitlesUrl(script.project_id, "bilingual")}
+                        download={`${script.project_id}_bilingual.ass`}
+                        className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary hover:bg-[#363636]"
+                      >
+                        双语
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )
         )}

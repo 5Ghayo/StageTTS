@@ -16,6 +16,7 @@ import type {
   ProjectScript,
   Segment,
   SegmentPatch,
+  StemVolumes,
 } from "../types/script";
 import { synthesisIssues } from "../utils/synthesisIssues";
 
@@ -82,6 +83,8 @@ interface ProjectState {
   updateSegmentLocal: (patch: SegmentPatch) => void;
   batchUpdateSegmentsLocal: (patches: SegmentPatch[]) => number[];
   updateBgmVolume: (volume: number) => void;
+  updateStemVolume: (stem: keyof StemVolumes, volume: number) => void;
+  updateAutoDucking: (enabled: boolean) => void;
   updateCharacter: (speakerKey: string, patch: Partial<CharacterConfig>) => void;
   addCharacter: (name: string) => string | null;
   mergeCharacters: (source: string, destination: string) => void;
@@ -302,6 +305,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           output_video: null,
           duration,
           bgm_volume: 0.75,
+          auto_ducking: true,
         },
         glossary: {},
         characters: {
@@ -460,6 +464,49 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           media: {
             ...state.script.media,
             bgm_volume: clamped,
+          },
+        },
+      };
+    }),
+
+  updateStemVolume: (stem, volume) =>
+    set((state) => {
+      if (!state.script) {
+        return state;
+      }
+      const clamped = Math.max(0, Math.min(2, Number(volume.toFixed(2))));
+      const current = state.script.media.stem_volumes ?? {
+        singing: 1,
+        music: 1,
+        effects: 1,
+      };
+      return {
+        isDirty: true,
+        script: {
+          ...state.script,
+          media: {
+            ...state.script.media,
+            stem_volumes: {
+              ...current,
+              [stem]: clamped,
+            },
+          },
+        },
+      };
+    }),
+
+  updateAutoDucking: (enabled) =>
+    set((state) => {
+      if (!state.script) {
+        return state;
+      }
+      return {
+        isDirty: true,
+        script: {
+          ...state.script,
+          media: {
+            ...state.script.media,
+            auto_ducking: enabled,
           },
         },
       };
