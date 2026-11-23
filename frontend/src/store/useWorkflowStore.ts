@@ -15,7 +15,9 @@ import {
   saveProjectScript,
   subscribeParseStatus,
   synthesizeSegments,
+  translateProject,
 } from "../services/api";
+import type { ProjectScript } from "../types/script";
 import type {
   CenterViewTab,
   LeftDrawerTab,
@@ -26,13 +28,13 @@ import type {
   StageNodeData,
   WorkspacePreset,
 } from "../types/workflow";
+import { pipelineStartForNode, pipelineNodeHint, type PipelineStartStep } from "../types/workflow";
 import { synthesisIssues } from "../utils/synthesisIssues";
 import { useProjectStore } from "./useProjectStore";
 
 export type StageFlowNode = Node<StageNodeData, "stageNode">;
 
 function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
-  const parseVram = config.computeType === "int8" ? 3.4 : 5.2;
   return [
     {
       id: "media_input",
@@ -43,7 +45,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         category: "input",
         env: "env_backend",
         vramGb: 0,
-        status: "done",
+        status: "idle",
         inputs: [],
         outputs: [{ id: "out-video", label: "原音视频", type: "MEDIA" }],
         summary: "导入视频或音频",
@@ -59,7 +61,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         category: "parse",
         env: "env_parse",
         vramGb: 1.8,
-        status: "done",
+        status: "idle",
         inputs: [{ id: "in-media", label: "媒体流", type: "MEDIA" }],
         outputs: [
           { id: "out-vocals", label: "对白轨", type: "AUDIO" },
@@ -74,15 +76,15 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
       type: "stageNode",
       position: { x: 500, y: 18 },
       data: {
-        title: "语音识别与聚类",
+        title: "MOSS 语音识别与角色",
         category: "parse",
         env: "env_parse",
-        vramGb: parseVram,
-        status: "done",
+        vramGb: 2.0,
+        status: "idle",
         inputs: [{ id: "in-vocals", label: "对白轨", type: "AUDIO" }],
         outputs: [{ id: "out-turns", label: "角色时间段", type: "SEGMENTS" }],
-        summary: `${config.computeType === "int8" ? "省显存 INT8" : "标准 FP16"} · ${parseVram} GB`,
-        params: { compute_type: config.computeType },
+        summary: "MOSS BF16 · 实测峰值约 2.0 GB（最长 60 秒样例）",
+        params: { model: "OpenMOSS-Team/MOSS-Transcribe-Diarize", precision: "bfloat16", max_audio_seconds: 60 },
       },
     },
     {
@@ -94,7 +96,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         category: "parse",
         env: "env_parse",
         vramGb: 1.1,
-        status: "done",
+        status: "idle",
         inputs: [{ id: "in-turns", label: "角色时间段", type: "SEGMENTS" }],
         outputs: [{ id: "out-script-draft", label: "剧本初稿", type: "JSON" }],
         summary: `目标语言: ${config.targetLang === "zh" ? "中文" : config.targetLang === "en" ? "英文" : "日语"}`,
@@ -110,7 +112,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         category: "hub",
         env: "env_backend",
         vramGb: 0,
-        status: "done",
+        status: "idle",
         inputs: [
           { id: "in-draft", label: "剧本初稿", type: "JSON" },
           { id: "in-bgm", label: "背景轨", type: "AUDIO" },
@@ -282,10 +284,42 @@ function makeLog(
 }
 
 const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
-  computeType: "int8",
   targetLang: "zh",
   burnWatermark: false,
 };
+
+export function workflowPreflight(script: ProjectScript, config: PipelineConfig & { startStep: PipelineStartStep }, parseOnly: boolean): string | null {
+  if (parseOnly && config.startStep !== "parse" && config.startStep !== "translate") {
+    return "仅生成剧本支持从媒体解析或翻译开始；合成/导出请使用「运行后续管线」。";
+  }
+  if (config.startStep === "parse") {
+    if (!script.media.source_video && !script.media.vocals_wav) return "项目缺少输入媒体，请先导入音视频。";
+    return null;
+  }
+  if (!script.segments.length) return "项目没有对白片段，请先从媒体解析开始。";
+  if (config.startStep === "translate" && script.segments.some((seg) => !seg.orig_text.trim())) {
+    return "存在空白源台词，请补齐原文后翻译已有对白。";
+  }
+  if (config.startStep === "synthesize") {
+    const empty = script.segments.filter((seg) => !seg.keep_original && !seg.target_text.trim());
+    if (empty.length) return `片段 ${empty.map((seg) => seg.id).join("、")} 缺少译文，请先翻译或填写目标台词。`;
+    const unchanged = script.segments.filter((seg) => !seg.keep_original && seg.target_text.trim() === seg.orig_text.trim()
+      && (!script.source_lang || seg.target_lang !== script.source_lang));
+    if (unchanged.length) return `片段 ${unchanged.map((seg) => seg.id).join("、")} 仍为源台词，无法确认已翻译；请先从翻译开始。`;
+    if (!parseOnly && script.mode === "video_dubbing" && !script.media.source_video) return "缺少源视频，无法执行后续成片导出。";
+  }
+  if (config.startStep === "render") return renderPreflight(script);
+  if (!parseOnly && script.mode === "video_dubbing" && !script.media.source_video) return "缺少源视频；可选择「仅生成剧本」完成翻译。";
+  return null;
+}
+
+function renderPreflight(script: ProjectScript): string | null {
+  if (script.mode === "video_dubbing" && !script.media.source_video) return "缺少源视频，无法导出成片。";
+  if (script.segments.some((seg) => seg.keep_original) && !script.media.vocals_wav) return "保留原声片段缺少对白音轨，无法导出。";
+  const missing = script.segments.filter((seg) => !seg.keep_original && (seg.status !== "ready" || !seg.tts_wav));
+  if (missing.length) return `片段 ${missing.map((seg) => seg.id).join("、")} 配音尚未就绪，已阻止导出；请先完成语音合成。`;
+  return null;
+}
 
 interface WorkflowState {
   workspacePreset: WorkspacePreset;
@@ -297,6 +331,12 @@ interface WorkflowState {
   edges: Edge[];
   pipelineConfig: PipelineConfig;
   isPipelineRunning: boolean;
+  isPauseRequested: boolean;
+  isPipelinePaused: boolean;
+  isStopRequested: boolean;
+  pausePipeline: () => void;
+  resumePipeline: () => void;
+  stopPipeline: () => void;
   pipelineLogs: PipelineLogEntry[];
 
   setWorkspacePreset: (preset: WorkspacePreset) => void;
@@ -319,16 +359,41 @@ interface WorkflowState {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// A suspended run keeps its local script/config snapshot and waits for a user
+// action without polling. Only one real workflow may own this continuation.
+let releasePipelinePause: (() => void) | null = null;
+
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   workspacePreset: "editing",
   centerTab: "video",
   rightTab: "inspector",
   leftDrawer: "none",
-  selectedNodeId: "agent_tts",
+  selectedNodeId: null,
   nodes: createInitialNodes(DEFAULT_PIPELINE_CONFIG),
   edges: INITIAL_EDGES,
   pipelineConfig: DEFAULT_PIPELINE_CONFIG,
   isPipelineRunning: false,
+  isPauseRequested: false,
+  isPipelinePaused: false,
+  isStopRequested: false,
+  pausePipeline: () => {
+    if (!get().isPipelineRunning || get().isStopRequested || get().isPauseRequested) return;
+    set({ isPauseRequested: true });
+    get().appendLog("system", "已请求暂停：等待当前步骤完成并保存后暂停，不再启动下一步骤。", "info");
+  },
+  resumePipeline: () => {
+    if (!get().isPipelineRunning || !get().isPauseRequested || get().isStopRequested) return;
+    const wasPaused = get().isPipelinePaused;
+    set({ isPauseRequested: false, isPipelinePaused: false });
+    get().appendLog("system", wasPaused ? "继续执行剩余步骤。" : "已取消暂停请求，继续执行。", "info");
+    releasePipelinePause?.();
+  },
+  stopPipeline: () => {
+    if (!get().isPipelineRunning || get().isStopRequested) return;
+    set({ isStopRequested: true, isPauseRequested: false, isPipelinePaused: false });
+    get().appendLog("system", "已请求结束本次流程：保留已完成结果，当前请求结束后不再执行后续步骤。", "warn");
+    releasePipelinePause?.();
+  },
   pipelineLogs: [makeLog("system", "RTX 5060 8GB 串行显存接力策略已就绪", "info")],
 
   setWorkspacePreset: (preset) => {
@@ -368,13 +433,16 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   selectNode: (nodeId) =>
     set((state) => ({
       selectedNodeId: nodeId,
+      nodes: state.nodes.map((node) => ({ ...node, selected: node.id === nodeId })),
       rightTab: nodeId ? "node" : state.rightTab,
     })),
 
   onNodesChange: (changes) =>
-    set((state) => ({
-      nodes: applyNodeChanges(changes, state.nodes),
-    })),
+    set((state) => {
+      const nodes = applyNodeChanges(changes, state.nodes);
+      const selectionChanged = changes.some((change) => change.type === "select" || change.type === "remove");
+      return { nodes, selectedNodeId: selectionChanged ? (nodes.find((node) => node.selected)?.id ?? null) : state.selectedNodeId };
+    }),
 
   onEdgesChange: (changes) =>
     set((state) => ({
@@ -383,66 +451,23 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   updatePipelineConfig: (patch) =>
     set((state) => {
+      if (state.isPipelineRunning) return state;
       const nextConfig = { ...state.pipelineConfig, ...patch };
-      const parseVram = nextConfig.computeType === "int8" ? 3.4 : 5.2;
-      const nextNodes = state.nodes.map((node) => {
-        if (node.id === "whisperx") {
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              vramGb: parseVram,
-              summary: `${nextConfig.computeType === "int8" ? "省显存 INT8" : "标准 FP16"} · ${parseVram} GB`,
-              params: {
-                ...node.data.params,
-                compute_type: nextConfig.computeType,
-              },
-            },
-          };
-        }
+      const nodes = state.nodes.map((node) => {
+        if (node.id === "whisperx") return { ...node, data: { ...node.data, vramGb: 2.0, summary: "MOSS BF16 · 实测峰值约 2.0 GB（最长 60 秒样例）" } };
         if (node.id === "llm_tagger") {
-          const langLabel =
-            nextConfig.targetLang === "zh"
-              ? "中文"
-              : nextConfig.targetLang === "en"
-                ? "英文"
-                : "日语";
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              summary: `目标语言: ${langLabel}`,
-              params: {
-                ...node.data.params,
-                target_lang: nextConfig.targetLang,
-              },
-            },
-          };
+          const lang = nextConfig.targetLang === "zh" ? "中文" : nextConfig.targetLang === "en" ? "英文" : "日语";
+          return { ...node, data: { ...node.data, summary: `目标语言: ${lang}`, params: { ...node.data.params, target_lang: nextConfig.targetLang } } };
         }
-        if (node.id === "ffmpeg_mixer") {
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              summary: nextConfig.burnWatermark ? "重编码烧录合规水印" : "无损流快速封装",
-              params: {
-                ...node.data.params,
-                burn_watermark: nextConfig.burnWatermark,
-              },
-            },
-          };
-        }
+        if (node.id === "ffmpeg_mixer") return { ...node, data: { ...node.data, summary: nextConfig.burnWatermark ? "重编码烧录合规水印" : "无损流快速封装", params: { ...node.data.params, burn_watermark: nextConfig.burnWatermark } } };
         return node;
       });
-      return {
-        pipelineConfig: nextConfig,
-        nodes: nextNodes,
-      };
+      return { pipelineConfig: nextConfig, nodes };
     }),
 
   resetGraphLayout: () =>
-    set((state) => ({
-      nodes: createInitialNodes(state.pipelineConfig),
+    set((state) => state.isPipelineRunning ? state : ({
+      nodes: createInitialNodes(state.pipelineConfig).map((node) => ({ ...node, selected: node.id === state.selectedNodeId })),
       edges: INITIAL_EDGES,
     })),
 
@@ -465,10 +490,26 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       return;
     }
 
-    if (projectState.backendStatus === "offline") {
+    if (projectState.backendStatus !== "online") {
       set({ rightTab: "logs" });
-      get().appendLog("system", "当前处于离线模式，无法调用本地算力，改走前端演示", "warn");
-      await get().runPipelineSimulation();
+      get().appendLog("system", "后端未连接，真实管线已阻止；请连接后端后重试。", "error");
+      return;
+    }
+    if (projectState.isLoading || projectState.isSynthesizing) {
+      get().appendLog("system", "项目正在加载、保存或合成，请等待当前操作完成。", "warn");
+      return;
+    }
+    const startStep = pipelineStartForNode(get().selectedNodeId);
+    if (!startStep) {
+      set({ rightTab: "logs" });
+      get().appendLog("system", pipelineNodeHint(get().selectedNodeId), "warn");
+      return;
+    }
+    const cfg = { ...get().pipelineConfig, startStep };
+    const preflight = workflowPreflight(currentScript, cfg, parseOnly);
+    if (preflight) {
+      set({ rightTab: "logs" });
+      get().appendLog("system", `管线已阻止：${preflight}`, "error");
       return;
     }
 
@@ -492,38 +533,65 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
     const targetProjectId = currentScript.project_id;
     const isSameProject = () => useProjectStore.getState().script?.project_id === targetProjectId;
-    const cfg = get().pipelineConfig;
-    const needsParse =
-      parseOnly || currentScript.segments.length === 0 || !currentScript.media.vocals_wav;
-
+    const needsParse = cfg.startStep === "parse";
+    const needsTranslate = cfg.startStep === "translate";
+    const needsSynthesize = !parseOnly && cfg.startStep !== "render";
+    const queued = new Set<string>([
+      ...(needsParse ? ["media_input", "banquet", "whisperx", "llm_tagger", "script_hub"] : []),
+      ...(needsTranslate ? ["llm_tagger", "script_hub"] : []),
+      ...(!parseOnly ? ["ffmpeg_mixer"] : []),
+      ...(needsSynthesize ? ["agent_tts"] : []),
+    ]);
     set((state) => ({
       isPipelineRunning: true,
+      isPauseRequested: false,
+      isPipelinePaused: false,
+      isStopRequested: false,
       rightTab: "logs",
-      nodes: state.nodes.map((n) => {
-        if (
-          !needsParse &&
-          ["media_input", "banquet", "whisperx", "llm_tagger", "script_hub"].includes(n.id)
-        ) {
-          return { ...n, data: { ...n.data, status: "done" } };
-        }
-        return { ...n, data: { ...n.data, status: "queued" } };
-      }),
+      nodes: state.nodes.map((node) => ({ ...node, data: { ...node.data, status: queued.has(node.id) ? "queued" : "idle" } })),
     }));
-
     let activeScript = currentScript;
-    let activeNode = needsParse ? "media_input" : "agent_tts";
+    let activeNode = needsParse ? "media_input" : needsTranslate ? "llm_tagger" : needsSynthesize ? "agent_tts" : "ffmpeg_mixer";
+    if (!needsParse) {
+      get().appendLog("system", `从${needsTranslate ? "翻译" : needsSynthesize ? "语音合成" : "导出"}开始，使用已存源台词与设置；前序分离/识别未运行（节点保持待机）。`, "info");
+    }
+
+    // Pause only between requests: every completed backend step has already
+    // persisted its result. Never abort fetch and pretend the worker stopped.
+    const beforeNextStep = async (label: string): Promise<boolean> => {
+      if (get().isPauseRequested && !get().isStopRequested) {
+        setActiveEdges([]);
+        const continuation = new Promise<void>((resolve) => { releasePipelinePause = resolve; });
+        set({ isPipelinePaused: true });
+        get().appendLog("system", `已暂停，下一步：${label}。可继续或结束本次流程。`, "info");
+        await continuation;
+        releasePipelinePause = null;
+      }
+      if (get().isStopRequested) {
+        get().appendLog("system", "本次流程已结束，已完成的结果已保留。", "info");
+        return false;
+      }
+      return true;
+    };
 
     try {
+      // Persist the current source text, glossary and character settings before
+      // invoking any resume endpoint; never replace it with stale disk content.
+      activeScript = await saveProjectScript(activeScript);
+      if (isSameProject() && useProjectStore.getState().script === currentScript) {
+        useProjectStore.getState().setScript(activeScript);
+      }
       // -------------------------------------------------------------------
       // 阶段 A：调用真实后端 POST /api/projects/{id}/parse（env_parse 子进程）
       // -------------------------------------------------------------------
       if (needsParse) {
+        if (!await beforeNextStep("媒体解析")) return;
         activeNode = "media_input";
         setNodeStatus("media_input", "running");
         setActiveEdges(["e-input-banquet"]);
         get().appendLog(
           "env_parse",
-          `启动真实 4 阶段解析：项目 ${activeScript.project_id}（目标语种=${cfg.targetLang}，精度=${cfg.computeType}）`,
+          `启动真实 4 阶段解析：项目 ${activeScript.project_id}（目标语种=${cfg.targetLang}，MOSS BF16/SDPA）`,
           "info",
         );
 
@@ -601,15 +669,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         );
 
         try {
-          if (projectState.isDirty) {
-            activeScript = await saveProjectScript(activeScript);
-            if (isSameProject()) {
-              useProjectStore.setState({ isDirty: false });
-            }
-          }
           activeScript = await parseProjectMedia(activeScript.project_id, {
             target_lang: cfg.targetLang,
-            compute_type: cfg.computeType,
+            source_lang: activeScript.source_lang,
           });
         } finally {
           unsubscribeSse();
@@ -648,6 +710,30 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         }
       }
 
+      if (needsTranslate) {
+        if (!await beforeNextStep("翻译已有对白")) return;
+        activeNode = "llm_tagger";
+        setNodeStatus("llm_tagger", "running");
+        setActiveEdges(["e-llm-hub"]);
+        get().appendLog("env_backend", `翻译已有 ${activeScript.segments.length} 条源台词，目标语言=${cfg.targetLang}；不会调用媒体解析。`, "info");
+        const translated = await translateProject(targetProjectId, { target_lang: cfg.targetLang });
+        activeScript = translated.script;
+        if (isSameProject()) useProjectStore.getState().setScript(activeScript);
+        for (const error of translated.errors ?? []) get().appendLog("env_backend", error, "warn");
+        const partial = translated.skipped_count > 0 || Boolean(translated.errors?.length);
+        setNodeStatus("llm_tagger", partial ? "error" : "done");
+        setNodeStatus("script_hub", "done");
+        get().appendLog("env_backend", `翻译已保存：成功 ${translated.translated_ids.length} 条，保留 ${translated.skipped_count} 条；时间轴已更新。`, partial ? "warn" : "success");
+        if (partial) {
+          get().appendLog("system", "部分台词翻译未完成，成功译文已保存；请检查日志后重试，未启动合成或导出。", "warn");
+          return;
+        }
+      }
+      if (parseOnly) {
+        get().appendLog("system", "仅生成剧本已完成，未启动语音合成或成片导出。", "success");
+        return;
+      }
+
       if (activeScript.segments.length === 0) {
         setActiveEdges([]);
         set({ isPipelineRunning: false });
@@ -658,81 +744,73 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       // -------------------------------------------------------------------
       // 阶段 B：调用真实后端 POST /api/projects/{id}/synthesize（GPT-SoVITS）
       // -------------------------------------------------------------------
-      if (!needsParse && projectState.isDirty) {
-        activeScript = await saveProjectScript(activeScript);
-        if (isSameProject()) {
-          useProjectStore.setState({ script: activeScript, isDirty: false });
+      if (needsSynthesize) {
+        if (!await beforeNextStep("语音合成")) return;
+        activeNode = "agent_tts";
+        const synthesisBlocked = workflowPreflight(activeScript, { ...cfg, startStep: "synthesize" }, false);
+        if (synthesisBlocked) throw new Error(synthesisBlocked);
+        const pendingIds = activeScript.segments
+          .filter((s) => !s.keep_original && (s.status !== "ready" || !s.tts_wav))
+          .map((s) => s.id);
+
+        setNodeStatus("agent_tts", "running");
+        setActiveEdges(["e-hub-tts", "e-tts-mixer", "e-tts-stage"]);
+
+        if (pendingIds.length > 0) {
+          get().appendLog(
+            "env_tts",
+            `开始调用 GPT-SoVITS 合成 ${pendingIds.length} 条待合成片段...`,
+            "info",
+          );
+          const synthRes = await synthesizeSegments(activeScript.project_id, pendingIds);
+          activeScript = synthRes.script;
+          if (isSameProject()) {
+            useProjectStore.getState().setScript(activeScript);
+            useProjectStore.getState().bumpAudioVersion(synthRes.synthesized_ids);
+          }
+
+          for (const issue of synthesisIssues(synthRes)) {
+            get().appendLog("env_tts", issue, "warn");
+          }
+          const incomplete = activeScript.segments.some((s) => !s.keep_original && (s.status !== "ready" || !s.tts_wav));
+          setNodeStatus("agent_tts", incomplete ? "error" : "done");
+          get().appendLog(
+            "env_tts",
+            `语音合成结束：成功 ${synthRes.synthesized_ids.length} 条`,
+            incomplete ? "warn" : "success",
+          );
+        } else {
+          get().appendLog("env_tts", "所有片段均为已就绪状态，跳过重复合成", "info");
+          setNodeStatus("agent_tts", "done");
         }
       }
-      const pendingIds = activeScript.segments
-        .filter((s) => !s.keep_original && s.status !== "ready")
-        .map((s) => s.id);
 
-      activeNode = "agent_tts";
-      setNodeStatus("agent_tts", "running");
-      setActiveEdges(["e-hub-tts", "e-tts-mixer", "e-tts-stage"]);
-
-      if (pendingIds.length > 0) {
-        get().appendLog(
-          "env_tts",
-          `开始调用 GPT-SoVITS 合成 ${pendingIds.length} 条待合成片段...`,
-          "info",
-        );
-        const synthRes = await synthesizeSegments(activeScript.project_id, pendingIds);
-        activeScript = synthRes.script;
-        if (isSameProject()) {
-          useProjectStore.getState().setScript(activeScript);
-          useProjectStore.getState().bumpAudioVersion(synthRes.synthesized_ids);
-        }
-
-        for (const issue of synthesisIssues(synthRes)) {
-          get().appendLog("env_tts", issue, "warn");
-        }
-        get().appendLog(
-          "env_tts",
-          `语音合成完成：成功 ${synthRes.synthesized_ids.length} 条`,
-          "success",
-        );
-      } else {
-        get().appendLog("env_tts", "所有片段均为已就绪状态，跳过重复合成", "info");
+      if (!await beforeNextStep("成片导出")) return;
+      const renderBlocked = renderPreflight(activeScript);
+      if (renderBlocked) {
+        activeNode = "ffmpeg_mixer";
+        throw new Error(renderBlocked);
       }
-      setNodeStatus("agent_tts", "done");
 
       // -------------------------------------------------------------------
       // 阶段 C：调用真实后端 POST /api/projects/{id}/render（FFmpeg 混音封装）
       // -------------------------------------------------------------------
-      const hasReadyOrOrig = activeScript.segments.some(
-        (s) => s.status === "ready" || s.keep_original,
-      );
-      if (hasReadyOrOrig) {
-        activeNode = "ffmpeg_mixer";
-        setNodeStatus("ffmpeg_mixer", "running");
-        setNodeStatus("virtual_stage_out", "running");
-        get().appendLog("env_backend", "正在执行 pydub 毫秒拼轨与 FFmpeg 混音封装...", "info");
+      activeNode = "ffmpeg_mixer";
+      setNodeStatus("ffmpeg_mixer", "running");
+      setNodeStatus("virtual_stage_out", "running");
+      get().appendLog("env_backend", "正在执行毫秒拼轨与 FFmpeg 混音封装...", "info");
 
-        const renderRes = await renderVideo(activeScript.project_id, cfg.burnWatermark);
-        activeScript = {
-          ...activeScript,
-          media: {
-            ...activeScript.media,
-            output_video: renderRes.output_video,
-          },
-        };
-        if (isSameProject()) {
-          useProjectStore.getState().setScript(activeScript);
-        }
-        setNodeStatus("ffmpeg_mixer", "done");
-        setNodeStatus("virtual_stage_out", "done");
-        get().appendLog(
-          "env_backend",
-          `全管线执行完毕，成片已输出：${renderRes.output_video}`,
-          "success",
-        );
-      } else {
-        setNodeStatus("ffmpeg_mixer", "idle");
-        setNodeStatus("virtual_stage_out", "idle");
-        get().appendLog("env_backend", "暂无已就绪配音轨，已跳过成片封装", "warn");
+      const renderRes = await renderVideo(activeScript.project_id, cfg.burnWatermark);
+      activeScript = {
+        ...activeScript,
+        media: { ...activeScript.media, output_video: renderRes.output_video },
+      };
+      if (isSameProject()) {
+        useProjectStore.getState().setScript(activeScript);
       }
+      setNodeStatus("ffmpeg_mixer", "done");
+      setNodeStatus("virtual_stage_out", "done");
+      get().appendLog("env_backend", `后续管线执行完毕，成片已输出：${renderRes.output_video}`, "success");
 
       setActiveEdges([]);
       set({ isPipelineRunning: false });
@@ -742,6 +820,21 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       setActiveEdges([]);
       set({ isPipelineRunning: false });
       get().appendLog("system", `管线执行失败：${msg}`, "error");
+      get().appendLog("system", "再次运行前请查看日志中的失败步骤。", "warn");
+    } finally {
+      releasePipelinePause = null;
+      setActiveEdges([]);
+      set((state) => ({
+        isPipelineRunning: false,
+        isPauseRequested: false,
+        isPipelinePaused: false,
+        isStopRequested: false,
+        nodes: state.nodes.map((node) => {
+          const status = node.data.status;
+          if (status !== "queued" && status !== "running") return node;
+          return { ...node, data: { ...node.data, status: status === "queued" ? "idle" : "error" } };
+        }),
+      }));
     }
   },
 
@@ -768,9 +861,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       }));
     };
 
-    const cfg = get().pipelineConfig;
-    const whisperVram = cfg.computeType === "int8" ? 3.4 : 5.2;
-
     set((state) => ({
       isPipelineRunning: true,
       nodes: state.nodes.map((n) => ({
@@ -793,7 +883,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
     setNodeStatus("whisperx", "running");
     setActiveEdges(["e-whisper-llm"]);
-    get().appendLog("env_parse", `语音识别与说话人聚类（显存 ${whisperVram} GB）`, "info");
+    get().appendLog("env_parse", `MOSS BF16/SDPA 语音识别与窗口内匿名说话人分类`, "info");
     await sleep(600);
     setNodeStatus("whisperx", "done");
 

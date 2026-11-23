@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+import hashlib
 import math
 import re
 from typing import Any
+
+from workers.semantic_boundaries import (
+    BoundaryCandidate, BoundarySelector, TokenizerAdapter,
+    generate_boundary_plan, rank_candidate_ids,
+)
 
 MAX_SECONDS = 14.0
 # When no natural pause exists before MAX_SECONDS, allow a controlled overflow so
@@ -14,10 +21,9 @@ PREFERRED_SECONDS = 8.0
 MIN_FRAGMENT_SECONDS = 2.5
 MERGE_GAP_SECONDS = 0.65
 PAUSE_SECONDS = 0.65
-PUNCTUATION = re.compile(r"""[.!?;,:。！？；，、：…]["'”’）)\]]*$""")
 TERMINAL_PUNCTUATION = re.compile(r"""[.!?。！？…]["'”’）)\]]*$""")
-LATIN_CHAR = re.compile(r"[A-Za-z0-9]")
 DEFAULT_SPEAKER = "SPEAKER_00"
+UNKNOWN_SPEAKER = "UNKNOWN"
 
 
 def _time(value: Any) -> float | None:
@@ -42,7 +48,11 @@ def _word_offsets(text: str, words: list[dict]) -> list[int] | None:
     return offsets if cursor == len(compact) else None
 
 
-def _split_segment(raw: dict, diarized: bool) -> list[dict]:
+def _split_segment(
+    raw: dict, diarized: bool, *, language: str | None = None,
+    tokenizer: TokenizerAdapter | None = None,
+    boundary_selector: BoundarySelector | None = None,
+) -> list[dict]:
     text = str(raw.get("text") or "").strip()
     if not text:
         return []
@@ -66,6 +76,21 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
         and words[i - 1]["end"] <= words[i]["start"]
     ] if offsets else []
 
+    plan = generate_boundary_plan(
+        text, words, language=language, tokenizer=tokenizer, pause_seconds=PAUSE_SECONDS,
+    )
+    review_reasons = list(plan.review_reasons)
+    semantic = {candidate.word_index: candidate for candidate in plan.candidates}
+    chosen: dict[int, dict] = {}
+    source_text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def record(candidate: BoundaryCandidate) -> dict:
+        value = asdict(candidate)
+        value["candidate_id"] = value.pop("id")
+        value["reasons"] = list(candidate.reasons)
+        value["source_text_sha256"] = source_text_sha256
+        return value
+
     def speaker_at(index: int) -> str | None:
         return words[index]["speaker"] or rank_speaker
 
@@ -74,62 +99,68 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
         part_end = words[right - 1]["end"] if right < len(words) else end
         left_offset = offsets[left] if left and offsets else 0
         right_offset = offsets[right] if right < len(words) and offsets else len(text)
-        speakers = {speaker_at(i) for i in range(left, right)}
-        if not speakers:
-            speakers = {rank_speaker}
-        speaker = next((speaker_at(i) for i in range(left, right) if speaker_at(i)), rank_speaker)
         part_words = words[left:right]
-        ordered_starts = [word["start"] for word in part_words if word["start"] is not None]
+        alignment, speaker_review = _review_flags(dict(
+            start=part_start,
+            end=part_end,
+            words=part_words,
+        ), diarized, alignment_extra=(not offsets or raw_start is None or raw_end != end))
         return dict(
             start=part_start,
             end=part_end,
-            speaker=speaker or DEFAULT_SPEAKER,
+            speaker=DEFAULT_SPEAKER if not diarized else (
+                next((speaker_at(i) for i in range(left, right) if speaker_at(i)), None)
+                or rank_speaker or DEFAULT_SPEAKER
+            ),
             orig_text=text[left_offset:right_offset].strip(),
             words=part_words,
-            alignment_needs_review=(
-                not offsets or raw_start is None or raw_end != end
-                or len(ordered_starts) != len(part_words) or ordered_starts != sorted(ordered_starts)
-                or part_end - part_start > HARD_MAX_SECONDS
-            ),
-            speaker_needs_review=(
-                diarized and (
-                    len(speakers) != 1 or None in speakers
-                    or any(word["start"] is not None and not word["speaker"] for word in part_words)
-                )
-            ),
+            alignment_needs_review=alignment or bool(review_reasons),
+            speaker_needs_review=speaker_review,
+            boundary_provenance=[chosen[index] for index in (left, right) if index in chosen],
+            boundary_review_reasons=list(review_reasons),
         )
 
     forced = [i for i in cuts if speaker_at(i - 1) and speaker_at(i) and speaker_at(i - 1) != speaker_at(i)]
+    for index in forced:
+        candidate = semantic.get(index) or BoundaryCandidate(
+            id=f"boundary:{source_text_sha256[:16]}:{offsets[index]}:{words[index - 1]['end']:.6f}:{words[index]['start']:.6f}",
+            word_index=index, char_offset=offsets[index],
+            left_end=words[index - 1]["end"], right_start=words[index]["start"],
+            reasons=("speaker_change",),
+        )
+        chosen[index] = record(candidate)
+        if "speaker_change" not in chosen[index]["reasons"]:
+            chosen[index]["reasons"].append("speaker_change")
     segments = []
     left = 0
     for right in [*forced, len(words)]:
         part_start = words[left]["start"] if left else start
         part_end = words[right - 1]["end"] if right < len(words) else end
         while part_end - part_start > MAX_SECONDS:
-            available = [i for i in cuts if left < i < right]
-            if not available:
-                break
-            fitting = [i for i in available if words[i - 1]["end"] - part_start <= MAX_SECONDS]
-            natural = [
-                i for i in fitting
-                if words[i - 1]["end"] - part_start >= PREFERRED_SECONDS
-                and (PUNCTUATION.search(text[offsets[i - 1]:offsets[i]].rstrip())
-                     or words[i]["start"] - words[i - 1]["end"] >= PAUSE_SECONDS)
+            available = [
+                candidate for candidate in plan.candidates
+                if left < candidate.word_index < right
+                and candidate.left_end - part_start <= HARD_MAX_SECONDS
             ]
-            if natural:
-                cut = natural[-1]
-            elif fitting:
-                pauses = [i for i in fitting if words[i]["start"] - words[i - 1]["end"] >= PAUSE_SECONDS]
-                cut = pauses[-1] if pauses else fitting[-1]
-            else:
-                # No cut fits within MAX_SECONDS: extend to the first real pause before
-                # HARD_MAX_SECONDS instead of slicing a CJK compound in half.
-                extended = [
-                    i for i in available
-                    if words[i - 1]["end"] - part_start <= HARD_MAX_SECONDS
-                    and words[i]["start"] - words[i - 1]["end"] >= PAUSE_SECONDS
-                ]
-                cut = extended[0] if extended else available[0]
+            preferred = [
+                candidate for candidate in available
+                if PREFERRED_SECONDS <= candidate.left_end - part_start <= MAX_SECONDS
+            ]
+            extended = [candidate for candidate in available if candidate.left_end - part_start > MAX_SECONDS]
+            early = [candidate for candidate in available if candidate.left_end - part_start < PREFERRED_SECONDS]
+            pool = preferred or extended or early
+            if not pool:
+                if "no_reliable_boundary" not in review_reasons:
+                    review_reasons.append("no_reliable_boundary")
+                break
+            # Prefer the latest natural boundary in the normal window; when
+            # extending, stop at the first valid boundary rather than hard-cutting.
+            ordered = tuple(sorted(pool, key=lambda item: item.left_end, reverse=bool(preferred or early)))
+            ranked, selector_issues = rank_candidate_ids(ordered, boundary_selector)
+            review_reasons.extend(reason for reason in selector_issues if reason not in review_reasons)
+            candidate = ranked[0]
+            cut = candidate.word_index
+            chosen[cut] = record(candidate)
             segments.append(part(left, cut))
             left = cut
             part_start = words[left]["start"]
@@ -145,20 +176,29 @@ def _join_text(left: str, right: str) -> str:
         return right
     if not right:
         return left
-    if bool(LATIN_CHAR.search(left[-1])) and bool(LATIN_CHAR.search(right[0])):
+    if bool(re.search(r"[A-Za-z0-9]$", left)) and bool(re.match(r"[A-Za-z0-9]", right)):
+        return f"{left} {right}"
+    if left[-1] in ",;:" and bool(re.match(r"[A-Za-z0-9]", right)):
         return f"{left} {right}"
     return f"{left}{right}"
 
 
-def _review_flags(seg: dict, diarized: bool) -> tuple[bool, bool]:
+def _review_flags(seg: dict, diarized: bool, *, alignment_extra: bool = False) -> tuple[bool, bool]:
     words = seg.get("words") or []
     starts = [word["start"] for word in words if word["start"] is not None]
     alignment = (
-        not words or len(starts) != len(words) or starts != sorted(starts)
-        or seg["end"] - seg["start"] > HARD_MAX_SECONDS
+        alignment_extra
+        or not words or len(starts) != len(words) or starts != sorted(starts)
+        or seg["end"] - seg["start"] > MAX_SECONDS
     )
     speakers = {word.get("speaker") for word in words if word.get("start") is not None}
-    speaker_review = diarized and (len(speakers) != 1 or None in speakers)
+    speaker_review = (
+        not diarized
+        or len(speakers) != 1
+        or None in speakers
+        or speakers == {UNKNOWN_SPEAKER}
+        or any(word.get("start") is not None and not word.get("speaker") for word in words)
+    )
     return alignment, speaker_review
 
 
@@ -175,9 +215,13 @@ def _merge_short_segments(segments: list[dict], *, diarized: bool) -> list[dict]
             prev["end"] - prev["start"] < MIN_FRAGMENT_SECONDS
             or seg["end"] - seg["start"] < MIN_FRAGMENT_SECONDS
         )
-        review_ok = not diarized or (
-            not prev["alignment_needs_review"] and not prev["speaker_needs_review"]
-            and not seg["alignment_needs_review"] and not seg["speaker_needs_review"]
+        review_ok = (
+            (not diarized and not prev["alignment_needs_review"] and not seg["alignment_needs_review"])
+            or (
+                diarized
+                and not prev["alignment_needs_review"] and not prev["speaker_needs_review"]
+                and not seg["alignment_needs_review"] and not seg["speaker_needs_review"]
+            )
         )
         can_merge = (
             prev["speaker"] == seg["speaker"]
@@ -194,13 +238,25 @@ def _merge_short_segments(segments: list[dict], *, diarized: bool) -> list[dict]
         combined["end"] = seg["end"]
         combined["orig_text"] = _join_text(prev["orig_text"], seg["orig_text"])
         combined["words"] = [*prev.get("words", []), *seg.get("words", [])]
-        combined["alignment_needs_review"], combined["speaker_needs_review"] = _review_flags(combined, diarized)
+        alignment, speaker = _review_flags(combined, diarized)
+        combined["alignment_needs_review"] = alignment or prev["alignment_needs_review"] or seg["alignment_needs_review"]
+        combined["speaker_needs_review"] = speaker or prev["speaker_needs_review"] or seg["speaker_needs_review"]
+        combined["boundary_provenance"] = [*prev.get("boundary_provenance", []), *seg.get("boundary_provenance", [])]
+        combined["boundary_review_reasons"] = list(dict.fromkeys(
+            [*prev.get("boundary_review_reasons", []), *seg.get("boundary_review_reasons", [])]
+        ))
         merged[-1] = combined
     return merged
 
 
-def normalize_segments(raw_segments: list[dict], *, diarized: bool = False) -> list[dict]:
-    segments = [part for raw in raw_segments for part in _split_segment(raw, diarized)]
+def normalize_segments(
+    raw_segments: list[dict], *, diarized: bool = False,
+    language: str | None = None, tokenizer: TokenizerAdapter | None = None,
+    boundary_selector: BoundarySelector | None = None,
+) -> list[dict]:
+    segments = [part for raw in raw_segments for part in _split_segment(
+        raw, diarized, language=language, tokenizer=tokenizer, boundary_selector=boundary_selector,
+    )]
     segments.sort(key=lambda item: (item["start"], item["end"]))
     segments = _merge_short_segments(segments, diarized=diarized)
     segments.sort(key=lambda item: (item["start"], item["end"]))

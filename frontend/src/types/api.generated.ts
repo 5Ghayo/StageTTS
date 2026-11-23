@@ -4,6 +4,24 @@
  */
 
 export interface paths {
+    "/api/settings/llm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Llm Settings */
+        get: operations["read_llm_settings_api_settings_llm_get"];
+        /** Update Llm Settings */
+        put: operations["update_llm_settings_api_settings_llm_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -128,7 +146,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Retranslate Project */
+        /**
+         * Retranslate Project
+         * @description Resume from saved source text; never invoke the media parsing worker.
+         */
         post: operations["retranslate_project_api_projects__project_id__translate_post"];
         delete?: never;
         options?: never;
@@ -210,6 +231,26 @@ export interface paths {
          * @description 启动 env_parse 子进程执行离线解析并生成 script.json（受 GPU 单任务锁保护）。
          */
         post: operations["parse_project_media_api_projects__project_id__parse_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/analyze-performance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Analyze Project Source
+         * @description Explicit local source analysis; no downloads or inferred neutral defaults.
+         */
+        post: operations["analyze_project_source_api_projects__project_id__analyze_performance_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -316,7 +357,7 @@ export interface components {
              * @default []
              */
             synthesized_ids: number[];
-            script: components["schemas"]["ProjectScript"];
+            script: components["schemas"]["ProjectScript-Output"];
         };
         /** AlignedWord */
         AlignedWord: {
@@ -348,7 +389,10 @@ export interface components {
         };
         /** Body_upload_project_media_api_projects_upload_post */
         Body_upload_project_media_api_projects_upload_post: {
-            /** File */
+            /**
+             * File
+             * Format: binary
+             */
             file: string;
             /**
              * Mode
@@ -364,8 +408,32 @@ export interface components {
         };
         /** Body_upload_project_reference_api_projects__project_id__references_post */
         Body_upload_project_reference_api_projects__project_id__references_post: {
-            /** File */
+            /**
+             * File
+             * Format: binary
+             */
             file: string;
+        };
+        /** BoundaryEvidence */
+        BoundaryEvidence: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Source Text Sha256 */
+            source_text_sha256: string;
+            /** Char Offset */
+            char_offset: number;
+            /** Word Index */
+            word_index: number;
+            /** Left End */
+            left_end: number;
+            /** Right Start */
+            right_start: number;
+            /** Reasons */
+            reasons?: string[];
+            /** Tokenizer */
+            tokenizer?: string | null;
+            /** Tokenizer Version */
+            tokenizer_version?: string | null;
         };
         /**
          * CharacterConfig
@@ -420,6 +488,30 @@ export interface components {
             /** Effects */
             effects: string;
         };
+        /** DiarizationSpan */
+        "DiarizationSpan-Input": {
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Id */
+            id: string;
+            /** Speaker */
+            speaker: string;
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** DiarizationSpan */
+        "DiarizationSpan-Output": {
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Id */
+            id: string;
+            /** Speaker */
+            speaker: string;
+            review?: components["schemas"]["EvidenceReview"];
+        };
         /**
          * EmotionRef
          * @description 单种情绪对应的 GPT-SoVITS 参考音频元数据。
@@ -441,6 +533,45 @@ export interface components {
              * @default zh
              */
             lang: string;
+        };
+        /** EvidenceLabel */
+        EvidenceLabel: {
+            /** Label */
+            label: string;
+            /** Score */
+            score?: number | null;
+            /** Score Kind */
+            score_kind?: string | null;
+        };
+        /** EvidenceProvenance */
+        EvidenceProvenance: {
+            /** Stage */
+            stage: string;
+            /** Model */
+            model?: string | null;
+            /** Model Version */
+            model_version?: string | null;
+            /** Source Id */
+            source_id?: string | null;
+            /** Parameters */
+            parameters?: {
+                [key: string]: string | number | boolean | null;
+            };
+        };
+        /** EvidenceReview */
+        EvidenceReview: {
+            /**
+             * Needs Review
+             * @default true
+             */
+            needs_review: boolean;
+            /** Reasons */
+            reasons?: string[];
+            /** Score */
+            score?: number | null;
+            /** Score Kind */
+            score_kind?: string | null;
+            provenance?: components["schemas"]["EvidenceProvenance"] | null;
         };
         /**
          * GpuDevice
@@ -484,6 +615,31 @@ export interface components {
             /** Assets Dir */
             assets_dir: string;
             readiness: components["schemas"]["ReadinessInfo"];
+        };
+        /** LLMSettingsResponse */
+        LLMSettingsResponse: {
+            /** Base Url */
+            base_url: string;
+            /** Model */
+            model: string;
+            /** Api Key Configured */
+            api_key_configured: boolean;
+            /** Configured */
+            configured: boolean;
+        };
+        /** LLMSettingsUpdate */
+        LLMSettingsUpdate: {
+            /** Base Url */
+            base_url: string;
+            /** Model */
+            model: string;
+            /** Api Key */
+            api_key?: string | null;
+            /**
+             * Clear Api Key
+             * @default false
+             */
+            clear_api_key: boolean;
         };
         /**
          * MediaInfo
@@ -530,18 +686,16 @@ export interface components {
          */
         ParseRequest: {
             /**
+             * Source Lang
+             * @description User-declared source audio language; never inferred from target language
+             */
+            source_lang?: ("zh" | "en" | "ja" | "ko" | "yue") | null;
+            /**
              * Target Lang
              * @description 目标翻译语种
              * @default zh
              */
             target_lang: string;
-            /**
-             * Compute Type
-             * @description WhisperX 计算精度
-             * @default float16
-             * @enum {string}
-             */
-            compute_type: "float16" | "int8";
         };
         /**
          * ParseStatusResponse
@@ -569,6 +723,61 @@ export interface components {
             /** Updated At */
             updated_at: number;
         };
+        /** PerformanceAnalysisRequest */
+        PerformanceAnalysisRequest: {
+            /** Segment Ids */
+            segment_ids?: number[] | null;
+            /**
+             * Enable Emotion
+             * @default false
+             */
+            enable_emotion: boolean;
+            /**
+             * Enable Prosody
+             * @default true
+             */
+            enable_prosody: boolean;
+        };
+        /** PerformanceAnalysisResponse */
+        PerformanceAnalysisResponse: {
+            /** Project Id */
+            project_id: string;
+            /** Status */
+            status: string;
+            /** Stage Status */
+            stage_status?: {
+                [key: string]: string;
+            };
+            /** Review Reasons */
+            review_reasons?: string[];
+            /** Errors */
+            errors?: string[];
+            script: components["schemas"]["ProjectScript-Output"];
+        };
+        /** PerformanceUnit */
+        "PerformanceUnit-Input": {
+            /** Id */
+            id: string;
+            /** Translation Unit Ids */
+            translation_unit_ids?: string[];
+            /** Source Turn Ids */
+            source_turn_ids?: string[];
+            /** Segment Ids */
+            segment_ids?: number[];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** PerformanceUnit */
+        "PerformanceUnit-Output": {
+            /** Id */
+            id: string;
+            /** Translation Unit Ids */
+            translation_unit_ids?: string[];
+            /** Source Turn Ids */
+            source_turn_ids?: string[];
+            /** Segment Ids */
+            segment_ids?: number[];
+            review?: components["schemas"]["EvidenceReview"];
+        };
         /**
          * ProjectListResponse
          * @description 项目列表响应。
@@ -584,7 +793,7 @@ export interface components {
          * ProjectScript
          * @description 全链路唯一真相源：script.json 顶层契约模型。
          */
-        ProjectScript: {
+        "ProjectScript-Input": {
             /**
              * Project Id
              * @description 项目唯一标识
@@ -614,11 +823,71 @@ export interface components {
             characters: {
                 [key: string]: components["schemas"]["CharacterConfig"];
             };
+            evidence?: components["schemas"]["SourceEvidence-Input"] | null;
             /**
              * Segments
              * @default []
              */
             segments: components["schemas"]["Segment"][];
+        };
+        /**
+         * ProjectScript
+         * @description 全链路唯一真相源：script.json 顶层契约模型。
+         */
+        "ProjectScript-Output": {
+            /**
+             * Project Id
+             * @description 项目唯一标识
+             */
+            project_id: string;
+            /**
+             * Mode
+             * @description 工作模式
+             * @default video_dubbing
+             * @enum {string}
+             */
+            mode: "video_dubbing" | "virtual_stage";
+            media: components["schemas"]["MediaInfo"];
+            /** Source Lang */
+            source_lang?: string | null;
+            /**
+             * Glossary
+             * @default {}
+             */
+            glossary: {
+                [key: string]: string;
+            };
+            /**
+             * Characters
+             * @default {}
+             */
+            characters: {
+                [key: string]: components["schemas"]["CharacterConfig"];
+            };
+            evidence?: components["schemas"]["SourceEvidence-Output"] | null;
+            /**
+             * Segments
+             * @default []
+             */
+            segments: components["schemas"]["Segment"][];
+        };
+        /** ProsodyMeasurement */
+        ProsodyMeasurement: {
+            /** Name */
+            name: string;
+            /** Status */
+            status?: ("ok" | "not_available") | null;
+            /** Reason */
+            reason?: string | null;
+            provenance?: components["schemas"]["EvidenceProvenance"] | null;
+            /** Value */
+            value?: number | null;
+            /** Unit */
+            unit?: string | null;
+            /** Score */
+            score?: number | null;
+            /** Score Kind */
+            score_kind?: string | null;
         };
         /**
          * ReadinessInfo
@@ -733,6 +1002,35 @@ export interface components {
              * @default []
              */
             words: components["schemas"]["AlignedWord"][];
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            /** Source Turn Ids */
+            source_turn_ids?: string[];
+            /** Translation Unit Ids */
+            translation_unit_ids?: string[];
+            /** Performance Unit Ids */
+            performance_unit_ids?: string[];
+            /** Boundary Provenance */
+            boundary_provenance?: components["schemas"]["BoundaryEvidence"][];
+            /** Boundary Review Reasons */
+            boundary_review_reasons?: string[];
+            /**
+             * Alignment Granularity
+             * @default unknown
+             * @enum {string}
+             */
+            alignment_granularity: "unknown" | "segment" | "word";
+            /**
+             * Timing Source
+             * @default unknown
+             * @enum {string}
+             */
+            timing_source: "unknown" | "moss_joint_generated" | "forced_alignment" | "manual";
+            /**
+             * Segment Timing Needs Review
+             * @default true
+             */
+            segment_timing_needs_review: boolean;
             /**
              * Alignment Needs Review
              * @default true
@@ -743,6 +1041,11 @@ export interface components {
              * @default true
              */
             speaker_needs_review: boolean;
+            /**
+             * Speaker Fallback Reason
+             * @description 说话人证据缺失或聚类回退原因；UNKNOWN 仅为待确认占位，不代表同一人
+             */
+            speaker_fallback_reason?: string | null;
             /**
              * Target Text
              * @description 目标配音文本
@@ -827,6 +1130,251 @@ export interface components {
             /** Needs Reflection */
             needs_reflection: boolean;
         };
+        /** SourceAnnotation */
+        "SourceAnnotation-Input": {
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Id */
+            id: string;
+            /** Status */
+            status?: ("ok" | "partial" | "not_run" | "not_configured" | "blocked" | "error") | null;
+            /** Model */
+            model?: {
+                [key: string]: string;
+            } | null;
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            /** Source Turn Ids */
+            source_turn_ids?: string[];
+            /** Emotions */
+            emotions?: components["schemas"]["EvidenceLabel"][];
+            /** Delivery */
+            delivery?: components["schemas"]["EvidenceLabel"][];
+            /** Events */
+            events?: components["schemas"]["EvidenceLabel"][];
+            /** Prosody */
+            prosody?: components["schemas"]["ProsodyMeasurement"][];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** SourceAnnotation */
+        "SourceAnnotation-Output": {
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Id */
+            id: string;
+            /** Status */
+            status?: ("ok" | "partial" | "not_run" | "not_configured" | "blocked" | "error") | null;
+            /** Model */
+            model?: {
+                [key: string]: string;
+            } | null;
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            /** Source Turn Ids */
+            source_turn_ids?: string[];
+            /** Emotions */
+            emotions?: components["schemas"]["EvidenceLabel"][];
+            /** Delivery */
+            delivery?: components["schemas"]["EvidenceLabel"][];
+            /** Events */
+            events?: components["schemas"]["EvidenceLabel"][];
+            /** Prosody */
+            prosody?: components["schemas"]["ProsodyMeasurement"][];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /**
+         * SourceEvidence
+         * @description Versioned source evidence, independent of translated or synthesized performance.
+         */
+        "SourceEvidence-Input": {
+            /**
+             * Version
+             * @default 1.0
+             * @constant
+             */
+            version: "1.0";
+            /** Source Id */
+            source_id: string;
+            /** Raw Generation */
+            raw_generation?: string | null;
+            /** Speaker Scope */
+            speaker_scope?: string | null;
+            /** Provenance */
+            provenance?: components["schemas"]["EvidenceProvenance"][];
+            /** Source Utterances */
+            source_utterances?: components["schemas"]["SourceUtterance-Input"][];
+            /** Source Tokens */
+            source_tokens?: components["schemas"]["SourceToken-Input"][];
+            /** Diarization Spans */
+            diarization_spans?: components["schemas"]["DiarizationSpan-Input"][];
+            /**
+             * Exclusive Spans
+             * @description Derived exclusive convenience track; never replaces original activity spans
+             */
+            exclusive_spans?: components["schemas"]["DiarizationSpan-Input"][];
+            /** Source Turns */
+            source_turns?: components["schemas"]["SourceTurn-Input"][];
+            /** Translation Units */
+            translation_units?: components["schemas"]["TranslationUnit-Input"][];
+            /** Performance Units */
+            performance_units?: components["schemas"]["PerformanceUnit-Input"][];
+            /** Annotations */
+            annotations?: components["schemas"]["SourceAnnotation-Input"][];
+            /** Review Reasons */
+            review_reasons?: string[];
+        };
+        /**
+         * SourceEvidence
+         * @description Versioned source evidence, independent of translated or synthesized performance.
+         */
+        "SourceEvidence-Output": {
+            /**
+             * Version
+             * @default 1.0
+             * @constant
+             */
+            version: "1.0";
+            /** Source Id */
+            source_id: string;
+            /** Raw Generation */
+            raw_generation?: string | null;
+            /** Speaker Scope */
+            speaker_scope?: string | null;
+            /** Provenance */
+            provenance?: components["schemas"]["EvidenceProvenance"][];
+            /** Source Utterances */
+            source_utterances?: components["schemas"]["SourceUtterance-Output"][];
+            /** Source Tokens */
+            source_tokens?: components["schemas"]["SourceToken-Output"][];
+            /** Diarization Spans */
+            diarization_spans?: components["schemas"]["DiarizationSpan-Output"][];
+            /**
+             * Exclusive Spans
+             * @description Derived exclusive convenience track; never replaces original activity spans
+             */
+            exclusive_spans?: components["schemas"]["DiarizationSpan-Output"][];
+            /** Source Turns */
+            source_turns?: components["schemas"]["SourceTurn-Output"][];
+            /** Translation Units */
+            translation_units?: components["schemas"]["TranslationUnit-Output"][];
+            /** Performance Units */
+            performance_units?: components["schemas"]["PerformanceUnit-Output"][];
+            /** Annotations */
+            annotations?: components["schemas"]["SourceAnnotation-Output"][];
+            /** Review Reasons */
+            review_reasons?: string[];
+        };
+        /** SourceToken */
+        "SourceToken-Input": {
+            /** Id */
+            id: string;
+            /** Text */
+            text: string;
+            /** Start */
+            start?: number | null;
+            /** End */
+            end?: number | null;
+            /** Speaker Candidates */
+            speaker_candidates?: components["schemas"]["SpeakerCandidate"][];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** SourceToken */
+        "SourceToken-Output": {
+            /** Id */
+            id: string;
+            /** Text */
+            text: string;
+            /** Start */
+            start?: number | null;
+            /** End */
+            end?: number | null;
+            /** Speaker Candidates */
+            speaker_candidates?: components["schemas"]["SpeakerCandidate"][];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** SourceTurn */
+        "SourceTurn-Input": {
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Id */
+            id: string;
+            /** Speaker */
+            speaker?: string | null;
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            /** Diarization Span Ids */
+            diarization_span_ids?: string[];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** SourceTurn */
+        "SourceTurn-Output": {
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Id */
+            id: string;
+            /** Speaker */
+            speaker?: string | null;
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            /** Diarization Span Ids */
+            diarization_span_ids?: string[];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** SourceUtterance */
+        "SourceUtterance-Input": {
+            /** Id */
+            id: string;
+            /** Text */
+            text: string;
+            /** Generated Start */
+            generated_start?: number | null;
+            /** Generated End */
+            generated_end?: number | null;
+            /** Start */
+            start?: number | null;
+            /** End */
+            end?: number | null;
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** SourceUtterance */
+        "SourceUtterance-Output": {
+            /** Id */
+            id: string;
+            /** Text */
+            text: string;
+            /** Generated Start */
+            generated_start?: number | null;
+            /** Generated End */
+            generated_end?: number | null;
+            /** Start */
+            start?: number | null;
+            /** End */
+            end?: number | null;
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** SpeakerCandidate */
+        SpeakerCandidate: {
+            /** Speaker */
+            speaker: string;
+            /** Overlap Seconds */
+            overlap_seconds: number;
+            /** Score */
+            score?: number | null;
+            /** Score Kind */
+            score_kind?: string | null;
+        };
         /**
          * SynthesizeRequest
          * @description 批量或单句语音合成请求。
@@ -860,7 +1408,7 @@ export interface components {
              * @default []
              */
             errors: string[];
-            script: components["schemas"]["ProjectScript"];
+            script: components["schemas"]["ProjectScript-Output"];
         };
         /**
          * ToolCallLog
@@ -882,9 +1430,20 @@ export interface components {
              */
             result_summary: string;
         };
+        /**
+         * TranslationRequest
+         * @description Translate saved source dialogue without running media parsing again.
+         */
+        TranslationRequest: {
+            /**
+             * Target Lang
+             * @description Override target language for successfully translated segments only; omit to keep each segment language
+             */
+            target_lang?: string | null;
+        };
         /** TranslationResponse */
         TranslationResponse: {
-            script: components["schemas"]["ProjectScript"];
+            script: components["schemas"]["ProjectScript-Output"];
             /** Translated Ids */
             translated_ids: number[];
             /** Skipped Count */
@@ -894,6 +1453,40 @@ export interface components {
              * @default []
              */
             errors: string[];
+        };
+        /** TranslationUnit */
+        "TranslationUnit-Input": {
+            /** Id */
+            id: string;
+            /** Source Turn Ids */
+            source_turn_ids?: string[];
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            /** Segment Ids */
+            segment_ids?: number[];
+            /**
+             * Source Text
+             * @default
+             */
+            source_text: string;
+            review?: components["schemas"]["EvidenceReview"];
+        };
+        /** TranslationUnit */
+        "TranslationUnit-Output": {
+            /** Id */
+            id: string;
+            /** Source Turn Ids */
+            source_turn_ids?: string[];
+            /** Source Token Ids */
+            source_token_ids?: string[];
+            /** Segment Ids */
+            segment_ids?: number[];
+            /**
+             * Source Text
+             * @default
+             */
+            source_text: string;
+            review?: components["schemas"]["EvidenceReview"];
         };
         /**
          * UploadResponse
@@ -915,10 +1508,6 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
-            /** Input */
-            input?: unknown;
-            /** Context */
-            ctx?: Record<string, never>;
         };
     };
     responses: never;
@@ -929,6 +1518,59 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    read_llm_settings_api_settings_llm_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LLMSettingsResponse"];
+                };
+            };
+        };
+    };
+    update_llm_settings_api_settings_llm_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LLMSettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LLMSettingsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_check_api_health_get: {
         parameters: {
             query?: never;
@@ -1006,7 +1648,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectScript"];
+                    "application/json": components["schemas"]["ProjectScript-Output"];
                 };
             };
             /** @description Validation Error */
@@ -1031,7 +1673,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProjectScript"];
+                "application/json": components["schemas"]["ProjectScript-Input"];
             };
         };
         responses: {
@@ -1041,7 +1683,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectScript"];
+                    "application/json": components["schemas"]["ProjectScript-Output"];
                 };
             };
             /** @description Validation Error */
@@ -1131,7 +1773,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TranslationRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -1269,7 +1915,42 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectScript"];
+                    "application/json": components["schemas"]["ProjectScript-Output"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    analyze_project_source_api_projects__project_id__analyze_performance_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PerformanceAnalysisRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PerformanceAnalysisResponse"];
                 };
             };
             /** @description Validation Error */

@@ -12,7 +12,7 @@ export type AvatarConfig = components["schemas"]["AvatarConfig"];
 export type CharacterConfig = components["schemas"]["CharacterConfig"];
 export type AlignedWord = components["schemas"]["AlignedWord"];
 export type Segment = components["schemas"]["Segment"];
-export type ProjectScript = components["schemas"]["ProjectScript"];
+export type ProjectScript = components["schemas"]["ProjectScript-Output"];
 
 export type ProjectMode = ProjectScript["mode"];
 export type EmotionType = Segment["emotion"];
@@ -25,6 +25,7 @@ export type SegmentPatch = { id: Segment["id"] } & Partial<
     | "speaker"
     | "orig_text"
     | "alignment_needs_review"
+    | "segment_timing_needs_review"
     | "speaker_needs_review"
     | "target_text"
     | "target_lang"

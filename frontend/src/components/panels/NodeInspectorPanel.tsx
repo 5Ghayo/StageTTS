@@ -14,7 +14,6 @@ export const NodeInspectorPanel: React.FC = () => {
   const selectedNodeId = useWorkflowStore((s) => s.selectedNodeId);
   const nodes = useWorkflowStore((s) => s.nodes);
   const pipelineConfig = useWorkflowStore((s) => s.pipelineConfig);
-  const updatePipelineConfig = useWorkflowStore((s) => s.updatePipelineConfig);
   const setWorkspacePreset = useWorkflowStore((s) => s.setWorkspacePreset);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? nodes[0] ?? null;
@@ -51,59 +50,21 @@ export const NodeInspectorPanel: React.FC = () => {
         </div>
       </div>
 
-      {/* 识别精度控制 */}
-      {selectedNode.id === "whisperx" && (
-        <div className="space-y-2 border-b border-dashed border-white/[0.08] pb-3">
-          <div className="whitespace-nowrap text-[11px] text-secondary">识别精度</div>
-          <div className="grid grid-cols-2 gap-1.5">
-            {(
-              [
-                { id: "float16", title: "标准 FP16", desc: "峰值约 5.2 GB" },
-                { id: "int8", title: "省显存 INT8", desc: "峰值约 3.4 GB" },
-              ] as const
-            ).map((opt) => {
-              const active = pipelineConfig.computeType === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => updatePipelineConfig({ computeType: opt.id })}
-                  className={`rounded-[4px] px-2.5 py-2 text-left transition-colors ${
-                    active
-                      ? "bg-[#333333] text-[#FFFFFF]"
-                      : "bg-[#2A2A2A] text-secondary hover:bg-[#363636] hover:text-primary"
-                  }`}
-                >
-                  <div className="font-medium">{opt.title}</div>
-                  <div className="mt-0.5 font-mono tabular-nums text-[10px] text-muted">
-                    {opt.desc}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+      {selectedNode.id === "llm_tagger" && (
+        <label className="flex items-center gap-2 border-b border-dashed border-white/[0.08] pb-3 text-[11px] text-secondary">
+          目标配音语言
+          <select value={pipelineConfig.targetLang} onChange={(event) => useWorkflowStore.getState().updatePipelineConfig({ targetLang: event.target.value as "zh" | "en" | "ja" })} className="h-7 flex-1 rounded border border-white/[0.07] bg-[#181818] px-2 text-primary">
+            <option value="zh">中文配音</option><option value="en">英文配音</option><option value="ja">日语配音</option>
+          </select>
+        </label>
       )}
 
-      {/* 目标翻译语种 */}
-      {selectedNode.id === "llm_tagger" && (
-        <div className="flex items-center gap-2 border-b border-dashed border-white/[0.08] pb-3">
-          <label className="w-20 shrink-0 whitespace-nowrap text-[11px] text-secondary">
-            目标配音语言
-          </label>
-          <select
-            value={pipelineConfig.targetLang}
-            onChange={(e) =>
-              updatePipelineConfig({
-                targetLang: e.target.value as "zh" | "en" | "ja",
-              })
-            }
-            className="h-7 flex-1 rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary transition-colors focus:border-white/25 focus:outline-none"
-          >
-            <option value="zh">中文配音</option>
-            <option value="en">英文配音</option>
-            <option value="ja">日语配音</option>
-          </select>
+      {/* MOSS runtime information */}
+      {selectedNode.id === "whisperx" && (
+        <div className="space-y-1 border-b border-dashed border-white/[0.08] pb-3 text-[11px]">
+          <div className="text-secondary">主识别模型</div>
+          <div className="text-primary">MOSS-Transcribe-Diarize · BF16 / SDPA</div>
+          <p className="text-secondary">8GB 显卡已测 10–60 秒样例，峰值约 2 GB。当前应用时长上限为 60 秒；MOSS 输出句段时间，不提供词级强制对齐。</p>
         </div>
       )}
 
@@ -132,7 +93,8 @@ export const NodeInspectorPanel: React.FC = () => {
             <input
               type="checkbox"
               checked={pipelineConfig.burnWatermark}
-              onChange={(e) => updatePipelineConfig({ burnWatermark: e.target.checked })}
+              disabled={false}
+              onChange={(event) => useWorkflowStore.getState().updatePipelineConfig({ burnWatermark: event.target.checked })}
               className="mt-0.5 h-3.5 w-3.5"
             />
             <div>

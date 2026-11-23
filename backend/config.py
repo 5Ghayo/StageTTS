@@ -61,10 +61,25 @@ class _StageTTSSettingsFields(BaseModel):
     tts_startup_timeout_sec: float = Field(default=90.0, alias="TTS_STARTUP_TIMEOUT_SEC")
 
     env_parse_python: str = Field(default="python", alias="ENV_PARSE_PYTHON")
+    parse_backend: str = Field(default="moss", alias="PARSE_BACKEND")
+    moss_model_path_raw: str = Field(default="", alias="MOSS_MODEL_PATH")
+    moss_revision: str = Field(default="", alias="MOSS_REVISION")
+    moss_torch_version: str = Field(default="2.8.0+cu128", alias="MOSS_TORCH_VERSION")
+    moss_transformers_version: str = Field(default="5.6.0", alias="MOSS_TRANSFORMERS_VERSION")
+    moss_custom_code_approved: bool = Field(default=False, alias="MOSS_CUSTOM_CODE_APPROVED")
+    moss_max_audio_seconds: float = Field(default=60, gt=0, alias="MOSS_MAX_AUDIO_SECONDS")
+    moss_max_new_tokens: int = Field(default=4096, gt=0, alias="MOSS_MAX_NEW_TOKENS")
     banquet_root_raw: str = Field(default="", alias="BANQUET_ROOT")
     banquet_checkpoint_raw: str = Field(default="", alias="BANQUET_CHECKPOINT")
-    whisper_model: str = Field(default="large-v3", alias="WHISPER_MODEL")
-    whisper_compute_type: str = Field(default="float16", alias="WHISPER_COMPUTE_TYPE")
+    hf_token: str = Field(default="", alias="HF_TOKEN")
+    env_analysis_python: str = Field(default="", alias="ENV_ANALYSIS_PYTHON")
+    emotion_model_path_raw: str = Field(default="", alias="EMOTION_MODEL_PATH")
+    emotion_model_id: str = Field(default="", alias="EMOTION_MODEL_ID")
+    emotion_revision: str = Field(default="", alias="EMOTION_REVISION")
+    emotion_funasr_version: str = Field(default="", alias="EMOTION_FUNASR_VERSION")
+    emotion_user_authorized: bool = Field(default=False, alias="EMOTION_USER_AUTHORIZED")
+    emotion_device: str = Field(default="cuda:0", alias="EMOTION_DEVICE")
+    analysis_enable_f0: bool = Field(default=True, alias="ANALYSIS_ENABLE_F0")
     tts_api_url: str = Field(default="http://127.0.0.1:9880", alias="TTS_API_URL")
     tts_default_gpt_weights: str = Field(default="", alias="TTS_DEFAULT_GPT_WEIGHTS")
     tts_default_sovits_weights: str = Field(default="", alias="TTS_DEFAULT_SOVITS_WEIGHTS")
@@ -162,10 +177,27 @@ TTS_STARTUP_TIMEOUT_SEC: float = settings.tts_startup_timeout_sec
 
 # 外部算力服务与子进程 Python 路径
 ENV_PARSE_PYTHON: str = settings.env_parse_python.strip() or "python"
+PARSE_BACKEND: str = settings.parse_backend.strip().lower() or "moss"
+if PARSE_BACKEND not in {"moss", "legacy"}:
+    raise ValueError("PARSE_BACKEND must be moss or legacy; automatic fallback is disabled")
+MOSS_MODEL_PATH: Optional[Path] = _resolve_optional_path(settings.moss_model_path_raw)
+MOSS_REVISION: str = settings.moss_revision.strip()
+MOSS_TORCH_VERSION: str = settings.moss_torch_version.strip()
+MOSS_TRANSFORMERS_VERSION: str = settings.moss_transformers_version.strip()
+MOSS_CUSTOM_CODE_APPROVED: bool = settings.moss_custom_code_approved
+MOSS_MAX_AUDIO_SECONDS: float = settings.moss_max_audio_seconds
+MOSS_MAX_NEW_TOKENS: int = settings.moss_max_new_tokens
 BANQUET_ROOT: Optional[Path] = _resolve_optional_path(settings.banquet_root_raw)
 BANQUET_CHECKPOINT: Optional[Path] = _resolve_optional_path(settings.banquet_checkpoint_raw)
-WHISPER_MODEL: str = settings.whisper_model.strip() or "large-v3"
-WHISPER_COMPUTE_TYPE: str = settings.whisper_compute_type.strip() or "float16"
+# Optional isolated analysis runtime. Empty values never trigger downloads or installs.
+ENV_ANALYSIS_PYTHON: str = settings.env_analysis_python.strip()
+EMOTION_MODEL_PATH: Optional[Path] = _resolve_optional_path(settings.emotion_model_path_raw)
+EMOTION_MODEL_ID: str = settings.emotion_model_id.strip()
+EMOTION_REVISION: str = settings.emotion_revision.strip()
+EMOTION_FUNASR_VERSION: str = settings.emotion_funasr_version.strip()
+EMOTION_USER_AUTHORIZED: bool = settings.emotion_user_authorized
+EMOTION_DEVICE: str = settings.emotion_device.strip() or "cuda:0"
+ANALYSIS_ENABLE_F0: bool = settings.analysis_enable_f0
 TRANSLATION_CHUNK_SIZE: int = 25
 TTS_API_URL: str = settings.tts_api_url.rstrip("/")
 TTS_DEFAULT_GPT_WEIGHTS: str = settings.tts_default_gpt_weights.strip()
@@ -254,21 +286,9 @@ def resolve_weights_path(weights_path: str) -> str:
 
 
 def is_llm_configured() -> bool:
-    """判断大模型 API Key 是否已有效配置（非空且非示例占位值）。"""
-    if not LLM_API_KEY:
-        return False
-    placeholders = {
-        "your_llm_api_key_here",
-        "sk-xxx",
-        "changeme",
-        "local-gateway-no-key",
-    }
-    if LLM_API_KEY in placeholders:
-        # 本地网关常常不校验 Key；若 base_url 指向本机，则视为可用配置。
-        return LLM_BASE_URL.startswith("http://127.0.0.1:") or LLM_BASE_URL.startswith(
-            "http://localhost:"
-        )
-    return not LLM_API_KEY.startswith("your_")
+    """Resolve UI preferences as well as environment defaults."""
+    from backend.services.llm_settings import get_llm_snapshot
+    return get_llm_snapshot().configured()
 
 
 def is_hf_token_configured() -> bool:

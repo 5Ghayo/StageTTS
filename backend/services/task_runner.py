@@ -404,14 +404,12 @@ def run_parse_worker(
     project_id: str,
     input_path: Path,
     target_lang: str = "zh",
-    compute_type: Optional[str] = None,
     mode: str = "video_dubbing",
+    source_lang: str | None = None,
 ) -> Path:
-    """以独立子进程启动 workers/parse_worker.py（运行在 env_parse）。
+    """启动独立 MOSS / Banquet 解析 worker（legacy 模式须显式配置；GPU 在子进程退出时回收）。
 
-    注意：
-    - 子进程运行结束后由操作系统 100% 回收 CUDA 显存，严禁在 env_backend 中直接导入 torch/whisperx。
-    - 全过程受 gpu_task_guard 保护，防止并发触发 RTX 5060 8GB OOM。
+    GPU 推理框架不在 env_backend 中导入；全过程由 gpu_task_guard 串行化。
     """
     if not input_path.is_file():
         raise FileNotFoundError(f"待解析输入媒体文件不存在: {input_path}")
@@ -431,7 +429,6 @@ def run_parse_worker(
 
     output_dir = config.WORKSPACE_DIR / project_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    effective_compute = compute_type or config.WHISPER_COMPUTE_TYPE
 
     cmd = [
         python_bin,
@@ -444,13 +441,12 @@ def run_parse_worker(
         str(output_dir),
         "--target-lang",
         target_lang,
-        "--whisper-model",
-        config.WHISPER_MODEL,
-        "--compute-type",
-        effective_compute,
         "--mode",
         mode,
     ]
+
+    if source_lang:
+        cmd.extend(["--source-lang", source_lang])
 
     sub_env = os.environ.copy()
     sub_env["PYTHONUTF8"] = "1"
@@ -464,12 +460,10 @@ def run_parse_worker(
         sub_env["TORCH_HOME"] = config.TORCH_HOME
     if config.HF_TOKEN:
         sub_env["HF_TOKEN"] = config.HF_TOKEN
-    if config.LLM_API_KEY:
-        sub_env["LLM_API_KEY"] = config.LLM_API_KEY
-    if config.LLM_BASE_URL:
-        sub_env["LLM_BASE_URL"] = config.LLM_BASE_URL
-    if config.LLM_MODEL:
-        sub_env["LLM_MODEL"] = config.LLM_MODEL
+    from backend.services.llm_settings import get_llm_snapshot
+    llm = get_llm_snapshot()
+    sub_env.update(LLM_API_KEY=llm.api_key, LLM_BASE_URL=llm.base_url,
+                   LLM_MODEL=llm.model, STAGETTS_LLM_SNAPSHOT="1")
 
     with gpu_task_guard():
         _reset_parse_progress(project_id)

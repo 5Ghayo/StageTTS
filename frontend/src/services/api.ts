@@ -58,6 +58,17 @@ async function unwrap<T>(
   return result.data;
 }
 
+export type LLMSettings = components["schemas"]["LLMSettingsResponse"];
+export type LLMSettingsUpdate = components["schemas"]["LLMSettingsUpdate"];
+
+export function fetchLLMSettings(): Promise<LLMSettings> {
+  return unwrap(apiClient.GET("/api/settings/llm", { cache: "no-store" }));
+}
+
+export function saveLLMSettings(settings: LLMSettingsUpdate): Promise<LLMSettings> {
+  return unwrap(apiClient.PUT("/api/settings/llm", { body: settings }));
+}
+
 export function checkHealth(): Promise<HealthResponse> {
   return unwrap(apiClient.GET("/api/health"));
 }
@@ -128,24 +139,30 @@ export function previewAutomaticReference(
   );
 }
 
-export function translateProject(projectId: string): Promise<TranslationResponse> {
+export function translateProject(
+  projectId: string,
+  options?: { target_lang?: string | null },
+): Promise<TranslationResponse> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/translate", {
       params: { path: { project_id: projectId } },
+      body: options,
     }),
   );
 }
 
 export function parseProjectMedia(
   projectId: string,
-  options: { target_lang: string; compute_type: "float16" | "int8" },
+  options: { target_lang: string; source_lang?: string | null },
 ): Promise<ProjectScript> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/parse", {
       params: { path: { project_id: projectId } },
       body: {
         target_lang: options.target_lang,
-        compute_type: options.compute_type,
+        source_lang: options.source_lang && ["zh", "en", "ja", "ko", "yue"].includes(options.source_lang)
+          ? options.source_lang as "zh" | "en" | "ja" | "ko" | "yue"
+          : undefined,
       },
     }),
   );
@@ -220,6 +237,19 @@ export function renderVideo(projectId: string, burnWatermark = false): Promise<R
     apiClient.POST("/api/projects/{project_id}/render", {
       params: { path: { project_id: projectId } },
       body: { burn_watermark: burnWatermark },
+    }),
+  );
+}
+
+export function analyzePerformance(
+  projectId: string,
+  segmentIds: number[],
+  enableEmotion = false,
+): Promise<components["schemas"]["PerformanceAnalysisResponse"]> {
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/analyze-performance", {
+      params: { path: { project_id: projectId } },
+      body: { segment_ids: segmentIds, enable_emotion: enableEmotion, enable_prosody: true },
     }),
   );
 }

@@ -38,7 +38,8 @@ class DialogueWorkflowTest(unittest.TestCase):
         self.assertFalse(any(part["alignment_needs_review"] for part in parts))
         unaligned, = normalize_segments([{**raw, "words": []}])
         self.assertTrue(unaligned["alignment_needs_review"])
-        self.assertFalse(unaligned["speaker_needs_review"])
+        # No diarization evidence is not confirmation of a single speaker.
+        self.assertTrue(unaligned["speaker_needs_review"])
         self.assertEqual(unaligned["orig_text"], transcript)
 
         with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
@@ -59,21 +60,48 @@ class DialogueWorkflowTest(unittest.TestCase):
                 self.assertEqual(data["source_lang"], "en")
                 for item in data["segments"][:2]:
                     item["orig_text"] = f"Corrected line {item['id']}."
-                self.assertEqual(client.put(script_url, json=data).status_code, 200)
+                edited = client.put(script_url, json=data)
+                self.assertEqual(edited.status_code, 200)
+                data = edited.json()
+                self.assertTrue(all(item["alignment_needs_review"] for item in data["segments"][:2]))
+                self.assertTrue(all(item["segment_timing_needs_review"] for item in data["segments"][:2]))
                 self.assertEqual(client.get(script_url).json(), data)
 
                 preview_url = f"{project_url}/characters/A/reference-preview"
+                # Correcting text invalidates the old word transcript as crop evidence.
+                # A short crop must not advertise the newly edited full sentence.
+                self.assertEqual(client.post(preview_url).status_code, 400)
+                for item, part in zip(data["segments"][:2], parts[:2]):
+                    item["orig_text"] = part["orig_text"]
+                restored = client.put(script_url, json=data)
+                self.assertEqual(restored.status_code, 200)
+                data = restored.json()
+                # Restored text still needs a fresh explicit review of its words.
+                for item in data["segments"][:2]:
+                    item["alignment_needs_review"] = False
+                confirmed = client.put(script_url, json=data)
+                self.assertEqual(confirmed.status_code, 200)
+                data = confirmed.json()
                 preview = client.post(preview_url)
                 self.assertEqual(preview.status_code, 200, preview.text)
                 result = preview.json()
                 source, = (item for item in data["segments"] if item["id"] in result["segment_ids"])
-                self.assertEqual(result["text"], source["orig_text"])
                 self.assertEqual(result["lang"], "en")
                 self.assertEqual(source["speaker"], "A")
                 with wave.open(str(config.resolve_media_path(result["wav"])), "rb") as clip:
-                    expected_seconds = min(5.0, source["end"] - source["start"])
                     self.assertEqual(clip.getframerate(), 32000)
-                    self.assertEqual(clip.getnframes(), round(expected_seconds * 32000))
+                    self.assertEqual(clip.getnchannels(), 1)
+                    clip_seconds = clip.getnframes() / clip.getframerate()
+                    self.assertGreaterEqual(clip_seconds, references.MIN_REFERENCE_SECONDS)
+                    self.assertLessEqual(clip_seconds, references.MAX_REFERENCE_SECONDS)
+                    window_start = source["start"]
+                    window_end = window_start + clip_seconds
+                    expected_words = [word["word"] for word in source["words"]
+                                      if word["start"] >= window_start - 0.001
+                                      and word["end"] <= window_end + 0.001]
+                    self.assertTrue(expected_words)
+                    self.assertEqual(result["text"], " ".join(expected_words))
+                    self.assertNotEqual(result["text"], source["orig_text"])
 
                 with config.resolve_media_path(result["wav"]).open("rb") as clip_file:
                     upload = client.post(f"{project_url}/references", files={"file": ("clip.wav", clip_file)})
@@ -86,6 +114,38 @@ class DialogueWorkflowTest(unittest.TestCase):
                 self.assertEqual(client.put(script_url, json=data).status_code, 200)
                 self.assertEqual(client.post(preview_url).status_code, 400)
                 self.assertEqual(client.get(script_url).json(), data)
+
+    def test_unknown_speaker_cannot_be_confirmed_by_put_or_agent_patch(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            project_dir = Path(temp) / "unknown-review"
+            project_dir.mkdir()
+            script = ProjectScript(
+                project_id="unknown-review", media=MediaInfo(duration=5),
+                characters={"UNKNOWN": CharacterConfig(display_name="待确认说话人"),
+                            "A": CharacterConfig(display_name="角色 A")},
+                segments=[Segment(id=0, start=0, end=4, speaker="UNKNOWN", orig_text="Hello.",
+                                  speaker_fallback_reason="hf_token_missing")],
+            )
+            (project_dir / "script.json").write_text(script.model_dump_json(), encoding="utf-8")
+            with TestClient(app) as client:
+                url = "/api/projects/unknown-review/script"
+                data = client.get(url).json()
+                data["segments"][0]["speaker_needs_review"] = False
+                response = client.put(url, json=data)
+                self.assertEqual(response.status_code, 200, response.text)
+                saved = client.get(url).json()
+                self.assertTrue(saved["segments"][0]["speaker_needs_review"])
+                self.assertEqual(saved["segments"][0]["speaker_fallback_reason"], "hf_token_missing")
+                self.assertEqual(client.post("/api/projects/unknown-review/characters/UNKNOWN/reference-preview").status_code, 400)
+                from backend.agent.tools import batch_update_segments
+                batch_update_segments("unknown-review", [{"id": 0, "orig_text": "Hello there."}])
+                saved = client.get(url).json()
+                self.assertTrue(saved["segments"][0]["speaker_needs_review"])
+                self.assertEqual(saved["segments"][0]["speaker_fallback_reason"], "hf_token_missing")
+                batch_update_segments("unknown-review", [{"id": 0, "speaker": "A"}])
+                saved = client.get(url).json()
+                self.assertFalse(saved["segments"][0]["speaker_needs_review"])
+                self.assertIsNone(saved["segments"][0]["speaker_fallback_reason"])
 
     def test_translation_and_rewrite_share_cross_batch_context(self):
         script = ProjectScript(

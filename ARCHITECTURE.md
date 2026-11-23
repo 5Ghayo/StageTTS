@@ -18,11 +18,10 @@
 ```text
 [输入层] 原始视频 / 动漫切片 / 播客音频 / 脚本文本
    │
-   ▼  (独立子进程 env_parse，运行结束由 OS 100% 释放显存)
-[感知解析层] workers/parse_worker.py
-   ├── Banquet 四轨分离       ──▶ 对白供识别，歌声、伴奏和音效合成为背景轨
-   ├── WhisperX + pyannote 3.1 ──▶ 提取词级精准时间戳与说话人聚类 (SPEAKER_XX)
-   └── Emotion2Vec / LLM       ──▶ 口语化翻译、原声叹词标记、情绪与动作标签
+   ▼  (独立子进程 `env_parse`；退出后由 OS 回收显存)
+[感知解析层] `workers/parse_worker.py`
+   ├── Banquet 四轨分离  ──▶ 分离对白 / 歌声 / 伴奏 / 音效
+   └── MOSS-Transcribe-Diarize ──▶ 联合 ASR、窗口内匿名角色与句段时间（无词级强制对齐）
    │
    ▼  输出全链路唯一真相源：workspace/{project_id}/script.json
 [交互精修与 Agent 协同层] backend/ (env_backend, 纯 CPU) + frontend/ (Node.js)
@@ -45,16 +44,16 @@
 所有开发人员与 AI Coding 助手编写代码时，**严禁违背以下 9 条铁律**：
 
 1. **四环境物理隔离，严禁混装依赖**
-   - `env_parse`（Conda Python 3.10）：PyTorch (`cu128`)、Banquet、`whisperx`、`pyannote.audio 3.1`。
-   - `env_tts`（Conda Python 3.10）：GPT-SoVITS CUDA 12.8 适配版整合环境（`is_half: true`，监听 `127.0.0.1:9880`）。
-   - `env_backend`（Conda / venv Python 3.10+，**纯 CPU 0 显存**）：`fastapi>=0.136.0`、`uvicorn`、`pydantic>=2.7`、`pydantic-settings`、`openai`、`httpx`、`pydub`、`PyYAML`。
-   - `frontend`（Node.js 20 LTS + `pnpm`）：Vite + React 18 + TypeScript + TailwindCSS v4 + Zustand + `@tanstack/react-query` + `openapi-fetch` + `wavesurfer.js v7` + `pixi-live2d-display` + Biome。
-   - 严禁在 `env_backend` 中直接 `import torch` / `whisperx`；Banquet 也须独立运行。
+   - `env_parse`（独立 Python 3.12 / torch + torchaudio 2.8.0+cu128 / Transformers 5.6.0）：Banquet、固定版本 MOSS 联合转录。
+   - `env_tts`（GPT-SoVITS CUDA 12.8 整合环境）：服务 `127.0.0.1:9880`。
+   - `env_backend`（Python 3.10+、CPU 协调器）：FastAPI、Pydantic、LLM 客户端、文件/API 和任务调度。
+   - `frontend`（Node.js 20 LTS + pnpm）：React、TypeScript、Vite。
+   - WhisperX / pyannote 仅为 legacy worker 源码 / 实验，不列入 MOSS 依赖，不自动 fallback。
 
 2. **RTX 5060 8GB（Blackwell `sm_120`）串行显存接力与单任务防 OOM**
-   - `env_parse` 必须由后端通过 `subprocess.run` 启动独立进程 `workers/parse_worker.py` 执行，进程退出后由操作系统 100% 回收显存。
-   - 若 `env_parse` 显存紧张，允许通过配置 `WHISPER_COMPUTE_TYPE=int8` 将 WhisperX 显存峰值从 ~5.2 GB 降至 ~3.4 GB。
-   - 后端必须在进程内维护单任务锁/队列（见 `backend/services/task_runner.py`），禁止并发启动多个解析或批量合成任务导致 8GB 显存 OOM。
+   - `env_parse` 必须通过 `subprocess.run` 单独运行 `workers/parse_worker.py`，进程退出后由操作系统回收其 CUDA 显存。
+   - MOSS 使用 BF16 / SDPA；在 RTX 5060 8GB 上已经测试最长 60 秒样例（峰值保留约 1.965 GiB），这不是 90 分钟资源保证。应用默认 fail-fast 限制为 60 秒；长视频分块、跨块 speaker linking 尚未支持。
+   - 主后端必须使用 GPU 单任务锁，防止并发启动多个解析 / 合成任务。
 
 3. **按说话人（`speaker`）分组批量合成**
    - 调用 GPT-SoVITS 合成多个片段时，必须先按 `segment.speaker` 分组，在切换到下一个角色前完成该角色名下全部待合成片段，**每个角色最多触发一次权重切换**，严禁按时间顺序逐句来回切换 `gpt_weights` / `sovits_weights`。
@@ -238,7 +237,7 @@
 
 | 成员 | 目录与文件所有权 | 核心职责 |
 | :--- | :--- | :--- |
-| **成员 A** | `workers/parse_worker.py`、`experiments/` | 维护 `env_parse` 环境、完成 Banquet/WhisperX/pyannote/标注流水线，产出消融实验脚本与图表 |
+| **成员 A** | `workers/parse_worker.py`, `workers/moss_worker.py`, `workers/aligned_segments.py`, `experiments/` | 维护固定 revision 的 MOSS / Banquet 主解析、MOSS 证据与离线评测；WhisperX / pyannote 只作为显式 legacy 研究代码 |
 | **成员 B** | `backend/`（`main.py`, `config.py`, `schemas.py`, `agent/`, `services/`） | 维护 `env_backend` 与 `env_tts` 联调、GPT-SoVITS 分组合成、Agent 5 工具与反思闭环、FFmpeg 混音 |
 | **成员 C** | `frontend/`（除 `VirtualStage.tsx` 外的全量组件、Store 与样式） | 类 PR 三栏工作台、`wavesurfer.js` 波形色块轨道、`Inspector` 单句精修、`AgentChat` 对话交互 |
 | **成员 D** | `frontend/src/components/VirtualStage.tsx`、`assets/`、`README.md` | Live2D/Three-VRM 虚拟演播室嘴型与动作驱动、授权情绪参考音库、合规提示与演示交付 |
@@ -254,6 +253,6 @@
 | **前端核心** | Node.js 20 LTS, `pnpm`, Vite `^5.4.0`, React `^18.3.1`, TypeScript `^5.5.0`, TailwindCSS `^4.0.0`, Zustand `^4.5.0`, `@tanstack/react-query` `^5.62.0`, `openapi-fetch` `^0.13.4`, `@xyflow/react` `^12.3.6`, `lucide-react` `^0.469.0`, `@biomejs/biome` `^1.9.4` |
 | **波形与舞台** | `wavesurfer.js` `^7.8.0` (含 `@wavesurfer/react` 或 `regions` 插件), `pixi.js` `^7.4.0`, `pixi-live2d-display-lipsyncpatch` `^0.5.0-ls-8`（可选进阶 `three` + `@pixiv/three-vrm` v3） |
 | **主后端** | Python 3.10+, `fastapi>=0.136.0`, `starlette>=1.3.1`, `uvicorn[standard]>=0.30.0`, `pydantic>=2.7.0`, `pydantic-settings>=2.4.0`, `openai>=3.57.0`, `httpx>=0.27.0`, `pydub>=0.25.1`, `PyYAML>=6.0.1` |
-| **感知解析** | Python 3.10, PyTorch (`cu128`), Banquet, `whisperx` (`large-v3`), `pyannote.audio 3.1` |
+| **感知解析** | 独立 Python 3.12、PyTorch / torchaudio 2.8.0+cu128、Transformers 5.6.0、BF16 / SDPA、Banquet 与 pin revision 的 MOSS-Transcribe-Diarize |
 | **语音合成** | GPT-SoVITS (`api_v2.py`, CUDA 12.8 适配版, `is_half: true`) |
 | **音视频工具** | FFmpeg `6.x+` (含 `nvenc` / `libx264` 与 `amix` 滤镜) |

@@ -105,6 +105,13 @@ class SynthesisTest(unittest.TestCase):
                 for _ in range(2):
                     response = self.client.post(f"/api/projects/{project_id}/render", json={})
                     self.assertEqual(response.status_code, 200, response.text)
+            # The overflow is allowed into the empty scene gap, not silently cut
+            # at the original 3.0-second slot end during the API export route.
+            with wave.open(str(self.root / project_id / "dubbed_vocals.wav"), "rb") as rendered:
+                rendered.setpos(round(3.05 * rendered.getframerate()))
+                tail = array("h", rendered.readframes(round(0.05 * rendered.getframerate())))
+                self.assertTrue(tail)
+                self.assertGreater(max(abs(sample) for sample in tail), 0)
 
     def test_missing_llm_and_failed_rewrite_keep_usable_audio(self):
         self._create_project("test")
@@ -362,12 +369,11 @@ class ParseTest(unittest.TestCase):
                 input=input_file,
                 output_dir=output_dir,
                 target_lang="zh",
-                whisper_model="small",
-                compute_type="int8",
                 mode="video_dubbing",
                 device="cpu",
                 skip_diarization=True,
                 skip_llm=True,
+                parse_backend="legacy",
             )
 
             with (
@@ -470,7 +476,8 @@ class ParseTest(unittest.TestCase):
                 ),
                 segments=[
                     Segment(id=0, start=0, end=4, speaker="A", orig_text="大丈夫。",
-                            alignment_needs_review=False, speaker_needs_review=False),
+                            alignment_needs_review=True, speaker_needs_review=False,
+                            alignment_granularity="segment", segment_timing_needs_review=False),
                 ],
             )
             preview = references.automatic_reference(script, "A")

@@ -7,6 +7,7 @@ import {
   Mic,
   Play,
   Save,
+  Settings,
   Sparkles,
   Workflow,
 } from "lucide-react";
@@ -15,7 +16,9 @@ import { useState } from "react";
 import { ApiError, type GpuDevice, fetchGpuStatus, renderVideo } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
-import type { WorkspacePreset } from "../../types/workflow";
+import { SettingsPage } from "../SettingsPage";
+import { PipelineRunControls } from "../workflow/PipelineRunControls";
+import { pipelineStartForNode, pipelineNodeHint, type WorkspacePreset } from "../../types/workflow";
 
 const PRESET_OPTIONS: Array<{
   id: WorkspacePreset;
@@ -60,8 +63,12 @@ export const TopMenuBar: React.FC = () => {
   const pipelineConfig = useWorkflowStore((s) => s.pipelineConfig);
   const isPipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
   const runPipeline = useWorkflowStore((s) => s.runPipeline);
+  const selectedNodeId = useWorkflowStore((s) => s.selectedNodeId);
+  const selectedTitle = useWorkflowStore((s) => s.nodes.find((node) => node.id === s.selectedNodeId)?.data.title);
+  const startStep = pipelineStartForNode(selectedNodeId);
   const appendLog = useWorkflowStore((s) => s.appendLog);
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [actionToast, setActionToast] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const { data: gpuData } = useQuery({
@@ -263,15 +270,22 @@ export const TopMenuBar: React.FC = () => {
           </span>
         </div>
 
+        <button type="button" onClick={() => setSettingsOpen(true)} title="翻译模型与接口设置" className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] px-2 text-secondary hover:bg-white/5 hover:text-primary">
+          <Settings className="h-3.5 w-3.5" strokeWidth={1.5} />
+          <span>设置</span>
+        </button>
+        {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
+        <PipelineRunControls />
         {workspacePreset === "workflow" ? (
           <button
             type="button"
-            disabled={isPipelineRunning}
+            disabled={isPipelineRunning || !startStep}
+            title={startStep ? `从「${selectedTitle}」开始运行后续管线` : pipelineNodeHint(selectedNodeId)}
             onClick={() => void runPipeline({ parseOnly: false })}
             className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-[#3A6EA5] px-3 py-1 text-[12px] font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8] disabled:opacity-50"
           >
             <Play className="h-3.5 w-3.5" strokeWidth={1.5} />
-            <span>{isPipelineRunning ? "运行中..." : "运行全管线"}</span>
+            <span>{isPipelineRunning ? "运行中..." : startStep ? `从${selectedTitle}运行` : "请先选择节点"}</span>
           </button>
         ) : (
           script && (
@@ -279,7 +293,7 @@ export const TopMenuBar: React.FC = () => {
               {script.segments.length > 0 && (
                 <button
                   type="button"
-                  disabled={isSynthesizing || isLoading}
+                  disabled={isSynthesizing || isLoading || isPipelineRunning}
                   onClick={() => void handleBatchSynthesize()}
                   title="自动按需启动 GPT-SoVITS 并批量合成所有待配音片段"
                   className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] border border-white/[0.1] bg-[#2C2C2C] px-3 py-1 text-[12px] font-medium text-primary transition-colors hover:bg-[#363636] disabled:opacity-50"

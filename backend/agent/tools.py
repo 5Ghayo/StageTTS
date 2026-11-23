@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from weakref import WeakValueDictionary
 
 from backend import config
-from backend.schemas import ProjectScript, SegmentPatch, SynthesizeResponse
+from backend.schemas import ProjectScript, Segment, SegmentPatch, SynthesizeResponse
 from backend.services.media_mixer import mix_and_render
 from backend.services.synthesis import synthesize_with_duration_check
 from backend.services.task_runner import GpuBusyError, gpu_task_guard
@@ -58,10 +58,12 @@ def save_project_script(script: ProjectScript) -> Path:
     """将校验后的 ProjectScript 持久化至 script.json。"""
     path = _script_path(script.project_id)
     with project_task_guard(script.project_id):
+        # Revalidate mutated models as well as request payloads before persistence.
+        validated = ProjectScript.model_validate(script.model_dump())
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=path.parent) as temp:
             draft = Path(temp) / path.name
-            draft.write_text(script.model_dump_json(indent=2), encoding="utf-8")
+            draft.write_text(validated.model_dump_json(indent=2), encoding="utf-8")
             draft.replace(path)
     return path
 
@@ -113,7 +115,17 @@ def batch_update_segments(
             if "speaker" in patch_data:
                 if patch_data["speaker"] not in script.characters:
                     raise ValueError("请先新建要指派的角色")
-                patch_data.setdefault("speaker_needs_review", False)
+                if patch_data["speaker"] == "UNKNOWN":
+                    patch_data["speaker_needs_review"] = True
+                else:
+                    patch_data.setdefault("speaker_needs_review", False)
+                    if not patch_data["speaker_needs_review"]:
+                        patch_data["speaker_fallback_reason"] = None
+            if seg.speaker == "UNKNOWN" and "speaker" not in patch_data:
+                patch_data["speaker_needs_review"] = True
+            if any(field in patch_data and patch_data[field] != getattr(seg, field)
+                   for field in ("orig_text", "start", "end", "speaker")):
+                patch_data["segment_timing_needs_review"] = True
             if "orig_text" in patch_data and patch_data["orig_text"] != seg.orig_text:
                 patch_data.setdefault("alignment_needs_review", True)
             needs_resynth = False
@@ -122,6 +134,9 @@ def batch_update_segments(
                     setattr(seg, field_name, value)
                     if field_name in resynth_fields:
                         needs_resynth = True
+            validated = Segment.model_validate(seg.model_dump())
+            seg.speaker_needs_review = validated.speaker_needs_review
+            seg.speaker_fallback_reason = validated.speaker_fallback_reason
             updated_ids.append(seg.id)
             if needs_resynth:
                 seg.invalidate_audio()

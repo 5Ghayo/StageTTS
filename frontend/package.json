@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "test:workflow": "node ../tests/verify_workflow_store.mjs",
     "preview": "vite preview",
     "lint": "biome check src",
     "format": "biome format --write src",

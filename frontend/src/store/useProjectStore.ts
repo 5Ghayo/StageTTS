@@ -143,10 +143,17 @@ function applyPatchToSegments(
     ) as Partial<Segment>;
     if (cleanFields.speaker !== undefined) {
       if (!Object.prototype.hasOwnProperty.call(script.characters, cleanFields.speaker)) return seg;
-      cleanFields.speaker_needs_review ??= false;
+      cleanFields.speaker_needs_review = cleanFields.speaker === "UNKNOWN"
+        ? true
+        : cleanFields.speaker_needs_review ?? false;
+      if (cleanFields.speaker !== "UNKNOWN") cleanFields.speaker_fallback_reason = null;
     }
     if (cleanFields.orig_text !== undefined && cleanFields.orig_text !== seg.orig_text) {
       cleanFields.alignment_needs_review ??= true;
+      cleanFields.segment_timing_needs_review = true;
+    }
+    if (cleanFields.speaker !== undefined && cleanFields.speaker !== seg.speaker) {
+      cleanFields.segment_timing_needs_review = true;
     }
     const updated = { ...seg, ...cleanFields };
     const affectsAudio = resynthFields.some((key) => updated[key] !== seg[key]);
@@ -324,6 +331,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             orig_text: "",
             words: [],
             alignment_needs_review: true,
+      alignment_granularity: "unknown",
+      timing_source: "unknown",
+      segment_timing_needs_review: true,
             speaker_needs_review: true,
             target_text: "请点击“精修”编辑本句台词，或连接后端自动识别分轨。",
             target_lang: "zh",

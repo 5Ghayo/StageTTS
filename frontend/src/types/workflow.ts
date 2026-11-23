@@ -34,8 +34,27 @@ export interface StageNodeData extends Record<string, unknown> {
   params: Record<string, string | number | boolean>;
 }
 
+export type PipelineStartStep = "parse" | "translate" | "synthesize" | "render";
+
+export function pipelineStartForNode(nodeId: string | null): PipelineStartStep | null {
+  switch (nodeId) {
+    case "media_input":
+    case "banquet": return "parse";
+    case "llm_tagger": return "translate";
+    case "script_hub":
+    case "agent_tts": return "synthesize";
+    case "ffmpeg_mixer": return "render";
+    default: return null;
+  }
+}
+
+export function pipelineNodeHint(nodeId: string | null): string {
+  if (nodeId === "whisperx") return "MOSS 识别节点不能单独启动；请从音轨分离节点运行完整解析，或选择翻译节点处理已有对白。";
+  if (nodeId === "virtual_stage_out") return "舞台节点请使用右侧「进入虚拟舞台」。";
+  return "请先在画布中选中一个可运行节点。";
+}
+
 export interface PipelineConfig {
-  computeType: "float16" | "int8";
   targetLang: "zh" | "en" | "ja";
   burnWatermark: boolean;
 }

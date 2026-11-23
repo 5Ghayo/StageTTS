@@ -22,7 +22,7 @@ from backend.schemas import (
     Segment,
 )
 from backend.services.media_mixer import apply_gentle_tempo
-from backend.services.references import automatic_reference
+from backend.services.references import automatic_reference, reference_unavailable_reason
 from backend.services.task_runner import ensure_tts_running, gpu_task_guard
 from backend.services.text_normalization import (
     deterministic_seed,
@@ -239,6 +239,31 @@ def synthesize_segments_grouped(
     synthesized_ids: List[int] = []
     errors: List[str] = []
 
+    # Validate references before loading GPU models. Missing references are
+    # actionable project errors, not failures of the inference service.
+    resolved_refs = {}
+    eligible_groups = defaultdict(list)
+    for speaker, segments in grouped.items():
+        character = script.characters.get(speaker)
+        for seg in segments:
+            if not seg.target_text.strip():
+                seg.status = "error"
+                errors.append(f"片段 #{seg.id} 目标台词为空，跳过合成")
+                continue
+            key = (speaker, seg.emotion)
+            try:
+                if key not in resolved_refs:
+                    resolved_refs[key] = _resolve_ref_for_segment(script, character, seg)
+                if resolved_refs[key] is None:
+                    raise ValueError(reference_unavailable_reason(script, speaker))
+            except Exception as exc:
+                seg.status = "error"
+                errors.append(f"片段 #{seg.id} 合成前检查失败：{exc}")
+                continue
+            eligible_groups[speaker].append(seg)
+    if not eligible_groups:
+        return [], errors
+
     with gpu_task_guard():
         try:
             ensure_tts_running()
@@ -250,7 +275,7 @@ def synthesize_segments_grouped(
             _weight_scope(session, errors) as default_weights,
         ):
             tmp_dir = Path(tmp_name)
-            for speaker, segs in grouped.items():
+            for speaker, segs in eligible_groups.items():
                 character = script.characters.get(speaker)
                 try:
                     _switch_weights(
@@ -268,7 +293,6 @@ def synthesize_segments_grouped(
                         errors.append(f"片段 #{seg.id} 加载角色权重失败：{exc}")
                     continue
 
-                references = {}
                 for seg in segs:
                     if not seg.target_text.strip():
                         seg.status = "error"
@@ -277,12 +301,7 @@ def synthesize_segments_grouped(
 
                     out_name = f"seg_{seg.id:04d}.wav"
                     try:
-                        if seg.emotion not in references:
-                            references[seg.emotion] = _resolve_ref_for_segment(script, character, seg)
-                        resolved = references[seg.emotion]
-                        if resolved is None:
-                            raise RuntimeError("请配置角色参考音及逐字稿，或确认同角色的原文、说话人和源语种")
-                        ref_obj, ref_path = resolved
+                        ref_obj, ref_path = resolved_refs[(speaker, seg.emotion)]
                         raw_wav = tmp_dir / out_name
                         _synthesize_single_line(session, seg, ref_obj, ref_path, raw_wav, script.glossary)
                         finished_wav = apply_gentle_tempo(raw_wav, seg.speed_factor, tmp_dir)

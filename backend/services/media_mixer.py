@@ -68,10 +68,17 @@ def _find_watermark_font() -> Optional[str]:
     return None
 
 
-def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
-    """使用 pydub 按毫秒 overlay 拼接完整人声轨（含原声笑声/叹息保留）。"""
-    max_seg_end = max((seg.end for seg in script.segments), default=0.0)
-    total_ms = max(1000, int(max(script.media.duration, max_seg_end) * 1000))
+def _build_vocal_track(
+    script: ProjectScript, project_dir: Path, *, timeline_duration: float | None = None,
+) -> Path:
+    """Mix complete clips, blocking any overflow that cannot use empty timeline space."""
+    timeline_duration = script.media.duration if timeline_duration is None else timeline_duration
+    if timeline_duration <= 0:
+        raise RuntimeError("导出待审核：项目时长无效，无法安全安排配音。")
+    total_ms = round(timeline_duration * 1000)
+    for seg in script.segments:
+        if seg.end > timeline_duration + 0.000001:
+            raise RuntimeError(f"片段 #{seg.id} 导出待审核：原始时间范围超过媒体结尾。")
 
     vocals_audio: Optional[AudioSegment] = None
     if script.media.vocals_wav:
@@ -89,7 +96,7 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
     with tempfile.TemporaryDirectory(prefix="stagetts_mix_") as tmp_name:
         tmp_dir = Path(tmp_name)
         for seg in sorted(script.segments, key=lambda item: item.start):
-            pos_ms = max(0, int(seg.start * 1000))
+            pos_ms = max(0, round(seg.start * 1000))
             if seg.keep_original:
                 if vocals_audio is None:
                     continue
@@ -112,9 +119,6 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
             with tts_path.open("rb") as source:
                 raw_clip = AudioSegment.from_wav(source)
             clip = raw_clip
-            slot_ms = max(1, int((seg.end - seg.start) * 1000))
-            if len(clip) > slot_ms:
-                clip = clip[:slot_ms]
             if seg.applied_speed_factor is None:
                 # 旧项目的 WAV 仍沿用导出时变速。
                 speed = seg.speed_factor
@@ -127,6 +131,26 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
                     with adjusted_path.open("rb") as source:
                         clip = AudioSegment.from_wav(source)
 
+            clip_end = seg.start + clip.frame_count() / clip.frame_rate
+            if clip_end > timeline_duration + 0.000001:
+                raise RuntimeError(
+                    f"片段 #{seg.id} 导出待审核：完整配音超过媒体结尾 "
+                    f"{clip_end - timeline_duration:.3f} 秒，不能截尾。"
+                )
+            if clip_end > seg.end:
+                collision = next((
+                    other for other in script.segments
+                    if other.id != seg.id and other.start < clip_end and other.end > seg.end
+                ), None)
+                if collision is not None:
+                    raise RuntimeError(
+                        f"片段 #{seg.id} 导出待审核：完整配音侵入片段 #{collision.id}，"
+                        "请调整配音或审核排程后导出。"
+                    )
+            placed_frames = round(pos_ms * vocal_track.frame_rate / 1000)
+            clip_frames = clip.frame_count() * vocal_track.frame_rate / clip.frame_rate
+            if placed_frames + clip_frames > vocal_track.frame_count():
+                raise RuntimeError(f"片段 #{seg.id} 导出待审核：配音超出混音画布，不能截尾。")
             vocal_track = vocal_track.overlay(clip, position=pos_ms)
 
     dubbed_path = project_dir / "dubbed_vocals.wav"
@@ -194,7 +218,19 @@ def mix_and_render(
 
     project_dir: Path = config.WORKSPACE_DIR / script.project_id
     project_dir.mkdir(parents=True, exist_ok=True)
-    dubbed_vocals_path = _build_vocal_track(script, project_dir)
+    source_video_path: Optional[Path] = None
+    timeline_duration = script.media.duration
+    if script.media.source_video:
+        candidate_video = config.resolve_media_path(script.media.source_video)
+        if candidate_video.is_file():
+            source_video_path = candidate_video
+            source_duration = probe_media_duration(candidate_video)
+            if source_duration <= 0:
+                raise RuntimeError("导出待审核：无法确认源视频时长，不能安全安排配音。")
+            timeline_duration = min(timeline_duration, source_duration)
+    dubbed_vocals_path = _build_vocal_track(
+        script, project_dir, timeline_duration=timeline_duration,
+    )
 
     bgm_path: Optional[Path] = None
     if script.media.bgm_wav:
@@ -206,12 +242,6 @@ def mix_and_render(
             bgm_path = None
     if script.media.cinematic_stems is not None and bgm_path is None:
         raise FileNotFoundError("影视四轨的混合背景轨缺失，请重新分离后导出。")
-
-    source_video_path: Optional[Path] = None
-    if script.media.source_video:
-        candidate_video = config.resolve_media_path(script.media.source_video)
-        if candidate_video.is_file():
-            source_video_path = candidate_video
 
     bgm_vol = max(0.0, min(2.0, float(script.media.bgm_volume)))
     amix_gain = _amix_normalize_option()
@@ -265,7 +295,7 @@ def mix_and_render(
         if audio_filter:
             cmd.extend(["-filter_complex", audio_filter])
         cmd.extend(audio_map)
-        cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output_mp4)])
+        cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(output_mp4)])
         proc = _run_ffmpeg_cmd(cmd)
         if proc.returncode != 0:
             raise RuntimeError(f"FFmpeg 无损封装失败: {proc.stderr[-600:]}")
@@ -281,7 +311,7 @@ def mix_and_render(
             cmd.extend(audio_map)
             cmd.extend(["-vf", drawtext])
             cmd.extend(video_codec_args)
-            cmd.extend(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output_mp4)])
+            cmd.extend(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(output_mp4)])
             proc = _run_ffmpeg_cmd(cmd)
             if proc.returncode == 0:
                 break

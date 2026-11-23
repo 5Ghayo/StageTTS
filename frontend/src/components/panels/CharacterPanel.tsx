@@ -208,6 +208,14 @@ function SpeakerEditor({
       </label>
       <details className="space-y-2 border-t border-white/10 pt-2" open>
         <summary className="cursor-pointer text-primary">参考音与权重</summary>
+        {!Object.values(character.emotion_refs).some((ref) => ref?.wav && ref.text?.trim() && ref.lang?.trim()) && (
+          <p className="text-[11px] leading-relaxed text-status-warning">
+            尚未配置手动参考音，合成时会自动选取。MOSS 句段将自动裁剪并重新识别参考音逐字稿，首次生成可能较慢，成功后会缓存。
+            {segments.some((seg) => seg.timing_source === "moss_joint_generated")
+              ? " 自动选取失败时，可在此上传参考音与对应原文逐字稿。"
+              : " 其他来源需要已确认原文、时间和说话人的 3–10 秒句段，或上传手动参考音。"}
+          </p>
+        )}
         <select
           className={field}
           aria-label="参考音情绪"

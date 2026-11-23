@@ -18,7 +18,7 @@ from backend.schemas import (
     SegmentDurationCheck,
     ToolCallLog,
 )
-from backend.services.translation import create_openai_client
+from backend.services.translation import create_openai_client, client_model
 from backend.services.tts_client import TTSServiceUnavailableError
 
 
@@ -98,7 +98,7 @@ def run_agent_chat(
 
     for _ in range(6):
         completion = client.chat.completions.create(
-            model=config.LLM_MODEL,
+            model=client_model(client),
             messages=messages,  # type: ignore[arg-type]
             tools=TOOLS_SCHEMA,  # type: ignore[arg-type]
             tool_choice="auto",
