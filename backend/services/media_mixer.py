@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import functools
+import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -60,21 +63,42 @@ def apply_gentle_tempo(wav_path: Path, speed_factor: float, tmp_dir: Path) -> Pa
 
 def _find_watermark_font() -> Optional[str]:
     """定位系统中文字体文件并转义为 FFmpeg drawtext fontfile 参数格式。"""
-    candidates = [
-        Path("C:/Windows/Fonts/msyh.ttc"),
-        Path("C:/Windows/Fonts/simhei.ttf"),
-        Path("C:/Windows/Fonts/msyhbd.ttc"),
-        Path("C:/Windows/Fonts/arial.ttf"),
-        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-    ]
+    if os.name == "nt":
+        win_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+        candidates = [
+            win_fonts / "msyh.ttc",
+            win_fonts / "simhei.ttf",
+            win_fonts / "msyhbd.ttc",
+            win_fonts / "arial.ttf",
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            Path("/System/Library/Fonts/PingFang.ttc"),
+            Path("/System/Library/Fonts/STHeiti Light.ttc"),
+            Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+            Path("/Library/Fonts/Arial Unicode.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+        ]
+    else:
+        candidates = [
+            Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc"),
+            Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ]
     for font_path in candidates:
         if font_path.is_file():
-            # FFmpeg filtergraph 中 Windows 盘符冒号需转义为 \:
-            posix = font_path.as_posix()
-            return posix.replace(":", "\\:")
+            return _escape_ffmpeg_filter_path(font_path)
     return None
+
+
+def _video_encoder_candidates() -> Tuple[List[str], ...]:
+    """按平台返回优先硬件加速与 libx264 兜底视频编码参数。"""
+    fallback = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+    if sys.platform == "darwin":
+        return (["-c:v", "h264_videotoolbox", "-q:v", "65"], fallback)
+    return (["-c:v", "h264_nvenc", "-preset", "p4"], fallback)
 
 
 def _normalize_clip_loudness(
@@ -396,8 +420,11 @@ def _build_drawtext_filter() -> str:
     )
 
 
+_WINDOWS_RESERVED_STEM_RE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE)
+
+
 def _sanitize_output_filename(raw_name: Optional[str], expected_ext: str) -> str:
-    """校验并规范化导出文件名，防止路径穿越或非法字符。"""
+    """校验并规范化导出文件名，防止路径穿越、非法字符或 Windows 保留设备名。"""
     cleaned = (raw_name or "").strip()
     if not cleaned:
         return f"output{expected_ext}"
@@ -405,9 +432,12 @@ def _sanitize_output_filename(raw_name: Optional[str], expected_ext: str) -> str
         raise ValueError("输出文件名不能包含路径分隔符或非法字符")
     suffix = Path(cleaned).suffix.lower()
     if not suffix:
-        return f"{cleaned}{expected_ext}"
-    if suffix != expected_ext:
+        cleaned = f"{cleaned}{expected_ext}"
+    elif suffix != expected_ext:
         raise ValueError(f"当前模式导出文件后缀必须为 {expected_ext}")
+    stem = Path(cleaned).stem
+    if not stem or stem.endswith((" ", ".")) or _WINDOWS_RESERVED_STEM_RE.match(stem):
+        raise ValueError("输出文件名不能使用系统保留名称或以空格/点结尾")
     return cleaned
 
 
@@ -421,7 +451,10 @@ def _resolve_export_dir(raw_dir: Optional[str]) -> Optional[Path]:
         raise ValueError("保存目录请填写绝对路径（支持 ~ 开头）")
     if candidate.exists() and not candidate.is_dir():
         raise ValueError(f"保存路径不是目录：{candidate}")
-    candidate.mkdir(parents=True, exist_ok=True)
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"无法创建保存目录 {candidate}：{exc}") from exc
     return candidate.resolve()
 
 
@@ -552,10 +585,7 @@ def mix_and_render(
                 raise RuntimeError(f"FFmpeg 无损封装失败: {proc.stderr[-600:]}")
         else:
             vf_expr = ",".join(video_filters)
-            for video_codec_args in (
-                ["-c:v", "h264_nvenc", "-preset", "p4"],
-                ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"],
-            ):
+            for video_codec_args in _video_encoder_candidates():
                 cmd = list(base_inputs)
                 if audio_filter:
                     cmd.extend(["-filter_complex", audio_filter])

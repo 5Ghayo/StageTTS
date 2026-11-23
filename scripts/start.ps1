@@ -317,7 +317,8 @@ function Start-LoggedProcess {
         [string]$Executable,
         [string[]]$Arguments,
         [string]$WorkingDirectory,
-        [string]$LogFile
+        [string]$LogFile,
+        [hashtable]$ExtraEnv = @{}
     )
 
     $pyRunner = "import subprocess, sys; f = open(sys.argv[1], 'wb'); sys.exit(subprocess.call(sys.argv[2:], stdout=f, stderr=subprocess.STDOUT))"
@@ -343,6 +344,9 @@ function Start-LoggedProcess {
     $psi.CreateNoWindow = $true
     $psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
     $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
+    foreach ($k in $ExtraEnv.Keys) {
+        $psi.EnvironmentVariables[$k] = [string]$ExtraEnv[$k]
+    }
 
     if ($psi.PSObject.Properties["ArgumentList"]) {
         foreach ($item in $fullArgs) {
@@ -664,21 +668,26 @@ print(
         exit 1
     }
 
-    # 7. 启动前端 Vite
+    # 7. 启动前端 Vite（同步注入动态后端代理目标）
     Write-Info "正在启动前端界面 (http://${FrontendHost}:${FrontendPort})..."
+    $ViteExtraEnv = @{
+        VITE_BACKEND_URL = "http://${BackendProbeHost}:${BackendPort}"
+    }
     $ViteBin = Join-Path (Join-Path (Join-Path $NodeModulesDir "vite") "bin") "vite.js"
     if (Test-Path $ViteBin -PathType Leaf) {
         $script:FrontendProc = Start-LoggedProcess `
             -Executable $NodeCmd.Source `
             -Arguments @($ViteBin, "--host", $FrontendHost, "--port", [string]$FrontendPort, "--strictPort") `
             -WorkingDirectory $FrontendDir `
-            -LogFile $FrontendLog
+            -LogFile $FrontendLog `
+            -ExtraEnv $ViteExtraEnv
     } else {
         $script:FrontendProc = Start-LoggedProcess `
             -Executable $PnpmCmd.Source `
             -Arguments @("--dir", $FrontendDir, "exec", "vite", "--host", $FrontendHost, "--port", [string]$FrontendPort, "--strictPort") `
             -WorkingDirectory $RootDir `
-            -LogFile $FrontendLog
+            -LogFile $FrontendLog `
+            -ExtraEnv $ViteExtraEnv
     }
 
     $FrontendProbeHost = if ($FrontendHost -in @("0.0.0.0", "::", "")) { "127.0.0.1" } else { $FrontendHost }

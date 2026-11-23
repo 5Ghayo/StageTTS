@@ -74,8 +74,15 @@ log_err() {
   printf '[StageTTS][ERROR] %s\n' "$*" >&2
 }
 
-# 1. 加载 Node / pnpm（兼容非交互式 Shell 下的 nvm）
+# 1. 加载 Node / pnpm（兼容非交互式 Shell 下的 nvm 与 macOS Homebrew）
 ensure_node_path() {
+  local extra_dir
+  for extra_dir in /opt/homebrew/bin /usr/local/bin; do
+    if [[ -d "$extra_dir" ]] && [[ ":$PATH:" != *":$extra_dir:"* ]]; then
+      export PATH="$extra_dir:$PATH"
+    fi
+  done
+
   if command -v pnpm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     return 0
   fi
@@ -90,7 +97,13 @@ ensure_node_path() {
 
   if ! command -v pnpm >/dev/null 2>&1 && [[ -d "$nvm_dir/versions/node" ]]; then
     local latest_bin
-    latest_bin="$(find "$nvm_dir/versions/node" -maxdepth 2 -type d -name bin 2>/dev/null | sort -V | tail -n 1 || true)"
+    latest_bin="$(
+      find "$nvm_dir/versions/node" -maxdepth 2 -type d -name bin 2>/dev/null \
+        | awk -F/ '{v=$(NF-1); gsub(/^v/,"",v); split(v,a,"."); printf "%05d.%05d.%05d %s\n", a[1]+0, a[2]+0, a[3]+0, $0}' \
+        | sort \
+        | tail -n 1 \
+        | cut -d' ' -f2- || true
+    )"
     if [[ -n "$latest_bin" ]]; then
       export PATH="$latest_bin:$PATH"
     fi
@@ -111,10 +124,21 @@ fi
 
 # 2. 选择后端 Python 虚拟环境
 BACKEND_PYTHON=""
-for candidate in \
-  "$ROOT_DIR/workspace/env_backend/bin/python" \
+PYTHON_CANDIDATES=(
+  "$ROOT_DIR/workspace/env_backend/bin/python"
+  "$ROOT_DIR/.venv_backend/bin/python"
   "$ROOT_DIR/.venv/bin/python"
-do
+)
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  PYTHON_CANDIDATES+=("$VIRTUAL_ENV/bin/python")
+fi
+for cmd_name in python3 python; do
+  if command -v "$cmd_name" >/dev/null 2>&1; then
+    PYTHON_CANDIDATES+=("$(command -v "$cmd_name")")
+  fi
+done
+
+for candidate in "${PYTHON_CANDIDATES[@]}"; do
   if [[ -x "$candidate" ]] && "$candidate" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
     BACKEND_PYTHON="$candidate"
     break
@@ -122,7 +146,7 @@ do
 done
 
 if [[ -z "$BACKEND_PYTHON" ]]; then
-  log_err "未找到可用的后端 Python 环境（已检查 workspace/env_backend 与 .venv）。"
+  log_err "未找到可用的后端 Python 环境（已检查 workspace/env_backend、.venv_backend、.venv 及当前 PATH）。"
   exit 1
 fi
 
@@ -141,8 +165,12 @@ fi
 if [[ -z "${BANQUET_ROOT:-}" ]]; then
   env_banquet_root="$("$BACKEND_PYTHON" -c '
 from pathlib import Path
-from dotenv import dotenv_values
-vals = dotenv_values(Path("backend/.env"))
+try:
+    from dotenv import dotenv_values
+    vals = dotenv_values(Path("backend/.env"))
+except ImportError:
+    from backend.config import _read_dotenv_fallback
+    vals = _read_dotenv_fallback(Path("backend/.env"))
 print((vals.get("BANQUET_ROOT") or "").strip())
 ')"
   if [[ -z "$env_banquet_root" && -f "$ROOT_DIR/workspace/model-cache/bandit-v2/src/models/bandit/bandit.py" ]]; then
@@ -153,8 +181,12 @@ fi
 if [[ -z "${BANQUET_CHECKPOINT:-}" ]]; then
   env_banquet_ckpt="$("$BACKEND_PYTHON" -c '
 from pathlib import Path
-from dotenv import dotenv_values
-vals = dotenv_values(Path("backend/.env"))
+try:
+    from dotenv import dotenv_values
+    vals = dotenv_values(Path("backend/.env"))
+except ImportError:
+    from backend.config import _read_dotenv_fallback
+    vals = _read_dotenv_fallback(Path("backend/.env"))
 print((vals.get("BANQUET_CHECKPOINT") or "").strip())
 ')"
   if [[ -z "$env_banquet_ckpt" && -f "$ROOT_DIR/workspace/model-cache/banquet-split.ckpt" ]]; then
@@ -359,11 +391,13 @@ BACKEND_PID=$!
 
 BACKEND_PROBE_HOST="$BACKEND_HOST"
 [[ "$BACKEND_PROBE_HOST" == "0.0.0.0" || "$BACKEND_PROBE_HOST" == "::" ]] && BACKEND_PROBE_HOST="127.0.0.1"
+[[ "$BACKEND_PROBE_HOST" == *:* && "$BACKEND_PROBE_HOST" != \[*\*\] ]] && BACKEND_PROBE_HOST="[$BACKEND_PROBE_HOST]"
 wait_for_http "http://$BACKEND_PROBE_HOST:$BACKEND_PORT/api/health" 25 "$BACKEND_PID" "后端 FastAPI" "$BACKEND_LOG"
 
-# 7. 启动前端 Vite
+# 7. 启动前端 Vite（同步注入动态后端代理目标）
 log_info "正在启动前端界面 (http://$FRONTEND_HOST:$FRONTEND_PORT)..."
-pnpm --dir "$ROOT_DIR/frontend" exec vite \
+VITE_BACKEND_URL="http://$BACKEND_PROBE_HOST:$BACKEND_PORT" \
+  pnpm --dir "$ROOT_DIR/frontend" exec vite \
   --host "$FRONTEND_HOST" \
   --port "$FRONTEND_PORT" \
   --strictPort \
@@ -372,6 +406,7 @@ FRONTEND_PID=$!
 
 FRONTEND_PROBE_HOST="$FRONTEND_HOST"
 [[ "$FRONTEND_PROBE_HOST" == "0.0.0.0" || "$FRONTEND_PROBE_HOST" == "::" ]] && FRONTEND_PROBE_HOST="127.0.0.1"
+[[ "$FRONTEND_PROBE_HOST" == *:* && "$FRONTEND_PROBE_HOST" != \[*\*\] ]] && FRONTEND_PROBE_HOST="[$FRONTEND_PROBE_HOST]"
 wait_for_http "http://$FRONTEND_PROBE_HOST:$FRONTEND_PORT/" 25 "$FRONTEND_PID" "前端 Vite" "$FRONTEND_LOG"
 
 # 8. 输出就绪摘要
@@ -405,11 +440,15 @@ log_info "按 Ctrl+C 可一键停止所有服务"
 log_info "=================================================="
 echo ""
 
-if [[ "$OPEN_BROWSER" -eq 1 ]] && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v xdg-open >/dev/null 2>&1; then
-  if command -v setsid >/dev/null 2>&1; then
-    setsid -f xdg-open "$FRONTEND_URL" </dev/null >/dev/null 2>&1 || true
-  else
-    nohup xdg-open "$FRONTEND_URL" </dev/null >/dev/null 2>&1 &
+if [[ "$OPEN_BROWSER" -eq 1 ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v open >/dev/null 2>&1; then
+    open "$FRONTEND_URL" </dev/null >/dev/null 2>&1 || true
+  elif [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v xdg-open >/dev/null 2>&1; then
+    if command -v setsid >/dev/null 2>&1; then
+      setsid -f xdg-open "$FRONTEND_URL" </dev/null >/dev/null 2>&1 || true
+    else
+      nohup xdg-open "$FRONTEND_URL" </dev/null >/dev/null 2>&1 &
+    fi
   fi
 fi
 

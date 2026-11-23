@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from backend.schemas import ProjectScript, SubtitleLayout
@@ -39,6 +40,8 @@ def _pick_ass_font_name() -> str:
     """按跨平台优先顺序探测清晰无衬线 CJK 字体。"""
     if os.name == "nt":
         return "Microsoft YaHei"
+    if sys.platform == "darwin":
+        return "PingFang SC"
 
     preferred = (
         "Noto Sans CJK SC",

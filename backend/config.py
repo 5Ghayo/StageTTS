@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,16 +30,16 @@ def _resolve_dir_path(raw: str, default_path: Path) -> Path:
     cleaned = raw.strip()
     if not cleaned:
         return default_path
-    p = Path(cleaned)
-    return p if p.is_absolute() else (ROOT_DIR / p).resolve()
+    p = Path(cleaned).expanduser()
+    return p.resolve() if p.is_absolute() else (ROOT_DIR / p).resolve()
 
 
 def _resolve_optional_dir_path(raw: str) -> Optional[Path]:
     cleaned = raw.strip()
     if not cleaned:
         return None
-    p = Path(cleaned)
-    return p if p.is_absolute() else (ROOT_DIR / p).resolve()
+    p = Path(cleaned).expanduser()
+    return p.resolve() if p.is_absolute() else (ROOT_DIR / p).resolve()
 
 
 def _resolve_optional_path(raw: str) -> Optional[Path]:
@@ -47,6 +48,57 @@ def _resolve_optional_path(raw: str) -> Optional[Path]:
         return None
     p = Path(cleaned).expanduser()
     return p.resolve() if p.is_absolute() else (ROOT_DIR / p).resolve()
+
+
+def _resolve_optional_str_path(raw: str) -> str:
+    cleaned = raw.strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("~"):
+        return str(Path(cleaned).expanduser())
+    return cleaned
+
+
+def _resolve_gpt_sovits_python(raw: str, root: Optional[Path]) -> str:
+    cleaned = raw.strip()
+    if cleaned:
+        if cleaned.startswith("~") or "/" in cleaned or "\\" in cleaned:
+            p = Path(cleaned).expanduser()
+            return str(p.resolve() if p.is_absolute() else (ROOT_DIR / p).resolve())
+        return cleaned
+    if root is None:
+        return ""
+    if os.name == "nt":
+        candidates = (
+            root / "runtime" / "python.exe",
+            root / ".venv" / "Scripts" / "python.exe",
+            root / "venv" / "Scripts" / "python.exe",
+        )
+    else:
+        candidates = (
+            root / "runtime" / "bin" / "python",
+            root / "runtime" / "python",
+            root / ".venv" / "bin" / "python",
+            root / "venv" / "bin" / "python",
+            root / "runtime" / "python.exe",
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return str(candidates[0])
+
+
+def _resolve_env_parse_python(raw: str) -> str:
+    cleaned = raw.strip()
+    if cleaned:
+        if cleaned.startswith("~"):
+            return str(Path(cleaned).expanduser())
+        return cleaned
+    if shutil.which("python") is not None:
+        return "python"
+    if shutil.which("python3") is not None:
+        return "python3"
+    return "python"
 
 
 class _StageTTSSettingsFields(BaseModel):
@@ -149,19 +201,16 @@ WORKSPACE_DIR: Path = _resolve_dir_path(settings.workspace_dir_raw, ROOT_DIR / "
 ASSETS_DIR: Path = _resolve_dir_path(settings.assets_dir_raw, ROOT_DIR / "assets")
 PARSE_WORKER_SCRIPT: Path = WORKERS_DIR / "parse_worker.py"
 GPT_SOVITS_ROOT: Optional[Path] = _resolve_optional_dir_path(settings.gpt_sovits_root_raw)
-GPT_SOVITS_PYTHON: str = (
-    settings.gpt_sovits_python_raw.strip()
-    or (str(GPT_SOVITS_ROOT / "runtime" / "python.exe") if GPT_SOVITS_ROOT else "")
-)
+GPT_SOVITS_PYTHON: str = _resolve_gpt_sovits_python(settings.gpt_sovits_python_raw, GPT_SOVITS_ROOT)
 GPT_SOVITS_CONFIG: str = (
-    settings.gpt_sovits_config_raw.strip()
+    _resolve_optional_str_path(settings.gpt_sovits_config_raw)
     or (str(BACKEND_DIR / "tts_v2.yaml") if (BACKEND_DIR / "tts_v2.yaml").is_file() else "")
 )
 TTS_AUTO_MANAGE: bool = settings.tts_auto_manage
 TTS_STARTUP_TIMEOUT_SEC: float = settings.tts_startup_timeout_sec
 
 # 外部算力服务与子进程 Python 路径
-ENV_PARSE_PYTHON: str = settings.env_parse_python.strip() or "python"
+ENV_PARSE_PYTHON: str = _resolve_env_parse_python(settings.env_parse_python)
 BANQUET_ROOT: Optional[Path] = _resolve_optional_path(settings.banquet_root_raw)
 BANQUET_CHECKPOINT: Optional[Path] = _resolve_optional_path(settings.banquet_checkpoint_raw)
 WHISPER_MODEL: str = settings.whisper_model.strip() or "large-v3"
@@ -172,9 +221,9 @@ TTS_DEFAULT_GPT_WEIGHTS: str = settings.tts_default_gpt_weights.strip()
 TTS_DEFAULT_SOVITS_WEIGHTS: str = settings.tts_default_sovits_weights.strip()
 
 # 可选模型缓存路径（用于重定向至非 C 盘目录）
-HF_HOME: str = settings.hf_home.strip()
-HUGGINGFACE_HUB_CACHE: str = settings.huggingface_hub_cache.strip()
-TORCH_HOME: str = settings.torch_home.strip()
+HF_HOME: str = _resolve_optional_str_path(settings.hf_home)
+HUGGINGFACE_HUB_CACHE: str = _resolve_optional_str_path(settings.huggingface_hub_cache)
+TORCH_HOME: str = _resolve_optional_str_path(settings.torch_home)
 
 # 超时控制（秒）
 TTS_TIMEOUT_SEC: float = settings.tts_timeout_sec

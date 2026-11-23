@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import AsyncIterator, Dict, List
@@ -423,22 +426,84 @@ def download_project_subtitles(
     )
 
 
+def _xdg_user_dir(kind: str, home: Path) -> Path | None:
+    cmd = shutil.which("xdg-user-dir")
+    if not cmd:
+        return None
+    try:
+        proc = subprocess.run(
+            [cmd, kind],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        return None
+    try:
+        resolved = candidate.resolve()
+        if resolved == home.resolve():
+            return None
+    except OSError:
+        return None
+    return resolved
+
+
+def _discover_user_export_dirs() -> List[ExportDirOption]:
+    """按操作系统与本地化习惯探测可用的常用导出目录。"""
+    home = Path.home()
+    candidates: List[tuple[str, Path]] = []
+
+    if sys.platform == "darwin":
+        candidates.extend([
+            ("影片目录", home / "Movies"),
+            ("下载目录", home / "Downloads"),
+            ("桌面", home / "Desktop"),
+        ])
+    elif os.name == "nt":
+        candidates.extend([
+            ("视频目录", home / "Videos"),
+            ("下载目录", home / "Downloads"),
+            ("桌面", home / "Desktop"),
+        ])
+    else:
+        for label, xdg_key, fallbacks in (
+            ("视频目录", "VIDEOS", ("Videos", "视频")),
+            ("下载目录", "DOWNLOAD", ("Downloads", "下载")),
+            ("桌面", "DESKTOP", ("Desktop", "桌面")),
+        ):
+            xdg_dir = _xdg_user_dir(xdg_key, home)
+            if xdg_dir is not None:
+                candidates.append((label, xdg_dir))
+            for rel in fallbacks:
+                candidates.append((label, home / rel))
+
+    suggested: List[ExportDirOption] = []
+    seen: set[Path] = set()
+    for label, path in candidates:
+        if not path.is_dir():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        suggested.append(ExportDirOption(label=label, path=str(resolved)))
+    return suggested
+
+
 @app.get("/api/export/dirs", response_model=ExportDirsResponse)
 def get_export_dirs() -> ExportDirsResponse:
     """返回项目工作区及本机常用推荐导出目录。"""
-    candidates = [
-        ("视频目录", Path.home() / "Videos"),
-        ("下载目录", Path.home() / "Downloads"),
-        ("桌面", Path.home() / "Desktop"),
-    ]
-    suggested = [
-        ExportDirOption(label=label, path=str(path.resolve()))
-        for label, path in candidates
-        if path.is_dir()
-    ]
     return ExportDirsResponse(
         workspace_dir=str(config.WORKSPACE_DIR.resolve()),
-        suggested_dirs=suggested,
+        suggested_dirs=_discover_user_export_dirs(),
     )
 
 

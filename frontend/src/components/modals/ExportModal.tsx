@@ -277,8 +277,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
                   onChange={(e) => setOutputDir(e.target.value)}
                   placeholder={
                     dirOptions
-                      ? `${dirOptions.workspace_dir}/${script.project_id}`
-                      : "留空使用项目工作区，或填 ~/Videos"
+                      ? `${dirOptions.workspace_dir}${dirOptions.workspace_dir.includes("\\") ? "\\" : "/"}${script.project_id}`
+                      : "留空使用项目工作区，或点下方快捷目录 / 输入本机绝对路径"
                   }
                   className="h-7 min-w-0 flex-1 rounded-[4px] border border-white/[0.08] bg-[#181818] px-2.5 font-mono text-[11px] text-primary placeholder:text-muted focus:border-white/25 focus:outline-none disabled:opacity-50"
                 />
@@ -389,7 +389,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
               {isAudioOnly
                 ? "当前为纯音频舞台模式，将混音导出立体声 WAV。"
                 : needsReencode
-                  ? "编码策略：单次重编码（优先 h264_nvenc 硬件加速），同时烧录已选滤镜。"
+                  ? "编码策略：单次重编码（自动启用硬件加速或 libx264），同时烧录已选滤镜。"
                   : "编码策略：视频流直拷贝 (-c:v copy)，秒级无损封装。"}
             </p>
           </section>

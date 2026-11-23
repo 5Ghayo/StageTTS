@@ -18,6 +18,7 @@ import gc
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -274,6 +275,31 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             target_device,
             *hop_args,
         ]
+        def _kill_banquet_tree(proc_obj: subprocess.Popen[str]) -> None:
+            pid = getattr(proc_obj, "pid", None)
+            real_pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+            if real_pid is None:
+                proc_obj.kill()
+                proc_obj.wait()
+                return
+            if os.name == "nt":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(real_pid)],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                if proc_obj.poll() is None:
+                    proc_obj.kill()
+            else:
+                try:
+                    os.killpg(real_pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc_obj.kill()
+            proc_obj.wait()
+
         output_lines: deque[str] = deque(maxlen=200)
         proc = subprocess.Popen(
             cmd,
@@ -284,6 +310,7 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            start_new_session=os.name != "nt",
         )
         reader = threading.Thread(target=_drain_banquet, args=(proc.stdout, output_lines), daemon=True)
         reader.start()
@@ -291,14 +318,12 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             try:
                 returncode = proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired as exc:
-                proc.kill()
-                proc.wait()
+                _kill_banquet_tree(proc)
                 reader.join(timeout=3)
                 raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。") from exc
             except BaseException:
                 if proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
+                    _kill_banquet_tree(proc)
                 reader.join(timeout=3)
                 raise
             reader.join(timeout=5)
