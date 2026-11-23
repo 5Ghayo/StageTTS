@@ -133,7 +133,14 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
     try:
         source = config.resolve_media_path(script.media.vocals_wav)
         project_dir = (config.WORKSPACE_DIR / script.project_id).resolve()
-        if source != project_dir / "vocals.wav":
+        is_banquet_dialogue = (
+            script.media.cinematic_stems is not None
+            and script.media.vocals_wav == script.media.cinematic_stems.dialogue
+            and source.name == "dialogue.wav"
+            and source.parent.name.startswith("cinematic-")
+            and source.parent.parent == project_dir
+        )
+        if source != project_dir / "vocals.wav" and not is_banquet_dialogue:
             return None
         with wave.open(str(source), "rb") as vocals:
             rate, channels, width = vocals.getframerate(), vocals.getnchannels(), vocals.getsampwidth()

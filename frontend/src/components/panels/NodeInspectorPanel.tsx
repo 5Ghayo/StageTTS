@@ -37,7 +37,11 @@ export const NodeInspectorPanel: React.FC = () => {
             <span>{selectedNode.data.title}</span>
           </span>
           <span className="shrink-0 whitespace-nowrap rounded-[4px] bg-white/[0.04] px-2 py-0.5 font-mono tabular-nums text-[11px] text-secondary">
-            {selectedNode.data.vramGb > 0 ? `${selectedNode.data.vramGb.toFixed(1)} GB` : "纯 CPU"}
+            {selectedNode.data.vramGb === null
+              ? "—"
+              : selectedNode.data.vramGb > 0
+                ? `${selectedNode.data.vramGb.toFixed(1)} GB`
+                : "纯 CPU"}
           </span>
         </div>
         <p className="mt-1.5 text-secondary">{selectedNode.data.summary}</p>
@@ -46,17 +50,6 @@ export const NodeInspectorPanel: React.FC = () => {
           <span>当前状态：{selectedNode.data.status}</span>
         </div>
       </div>
-
-      {selectedNode.id === "demucs" && (
-        <label className="flex items-center gap-2 border-b border-dashed border-white/[0.08] pb-3 text-secondary">
-          <input
-            type="checkbox"
-            checked={pipelineConfig.allowDemucsCpu}
-            onChange={(e) => updatePipelineConfig({ allowDemucsCpu: e.target.checked })}
-          />
-          允许 CUDA 不可用或失败时用 CPU 分离（较慢）
-        </label>
-      )}
 
       {/* 识别精度控制 */}
       {selectedNode.id === "whisperx" && (

@@ -1,11 +1,11 @@
-"""独立感知解析 Worker（运行在 env_parse：PyTorch cu128 + Demucs + WhisperX + pyannote）。
+"""独立感知解析 Worker（运行在 env_parse：PyTorch cu128 + Banquet + WhisperX + pyannote）。
 
 由 backend/services/task_runner.py 通过 subprocess.run 启动，进程退出时由 OS 100% 释放显存。
 严禁在 env_backend 中直接导入本文件或依赖。
 
 四阶段流水线：
   Stage 0: FFmpeg 抽取标准 WAV 并探测媒体精确时长
-  Stage 1: Demucs (htdemucs --two-stems=vocals) 独立子进程分离纯人声 vocals.wav 与伴奏 bgm.wav
+  Stage 1: Banquet 分离对白、歌声、伴奏和音效
   Stage 2: WhisperX 语音识别 + 词级时间戳对齐（含 CUDA OOM 自动降级 int8 / cpu）
   Stage 3: pyannote 3.x 说话人聚类（缺失 Token 或失败时安全回退单说话人 SPEAKER_00）
   Stage 4: LLM 导演口语化翻译、情绪/动作/原声叹词标注，校验并落盘 script.json
@@ -21,11 +21,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
-# 阶段 0 前置：在导入任何 torch/whisperx/demucs 前加载 backend/.env，
+# 阶段 0 前置：在导入任何 torch/whisperx 前加载 backend/.env，
 # 确保 HF_HOME / HUGGINGFACE_HUB_CACHE / TORCH_HOME 严格落盘到配置的 F 盘缓存目录。
 # ---------------------------------------------------------------------------
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -42,20 +45,20 @@ except ImportError:
     pass
 
 # PyTorch 2.6+ 默认 weights_only=True 会拦截 pyannote/lightning 的 omegaconf/Task 权重反序列化。
-# 本 worker 仅在受控子进程中加载官方 Demucs/WhisperX/pyannote 检查点，显式开启兼容模式。
+# 本 worker 仅在受控子进程中加载官方 WhisperX/pyannote 检查点，显式开启兼容模式。
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 
 from backend import config  # noqa: E402
 from backend.schemas import (  # noqa: E402
     AvatarConfig,
     CharacterConfig,
+    CinematicStems,
     MediaInfo,
     ProjectScript,
     Segment,
 )
 from backend.services.translation import create_openai_client, translate_script  # noqa: E402
 from workers.aligned_segments import normalize_segments  # noqa: E402
-from workers.demucs_stage import separate_stems  # noqa: E402
 
 SPEAKER_PALETTE = [
     "#3b82f6",
@@ -185,7 +188,7 @@ def _probe_duration(media_path: Path) -> float:
 
 
 def _extract_wav_and_probe(input_path: Path, work_wav: Path) -> float:
-    """用 FFmpeg 将任意音视频统一抽取为 44.1kHz stereo WAV，规避 Demucs 直读容器失败。"""
+    """用 FFmpeg 将任意音视频统一抽取为 48kHz stereo WAV（与 Banquet 采样率一致）。"""
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("未在系统 PATH 中找到 ffmpeg，无法抽取音频。")
     cmd = [
@@ -197,7 +200,7 @@ def _extract_wav_and_probe(input_path: Path, work_wav: Path) -> float:
         "-acodec",
         "pcm_s16le",
         "-ar",
-        "44100",
+        "48000",
         "-ac",
         "2",
         str(work_wav),
@@ -219,30 +222,125 @@ def _extract_wav_and_probe(input_path: Path, work_wav: Path) -> float:
     return duration
 
 
-def _stage_demucs(
-    extracted_wav: Path,
-    output_dir: Path,
-    device: str,
-    skip_demucs: bool,
-    allow_cpu: bool,
-) -> Tuple[Path, Optional[Path]]:
-    if skip_demucs:
-        _log("Stage1", "已跳过 Demucs，使用未分离音频")
-    else:
-        separated = separate_stems(
-            extracted_wav, output_dir, device, allow_cpu, lambda message: _log("Stage1", message),
-        )
-        if separated is not None:
-            _log("Stage1", "Demucs 分离完成，已输出人声和伴奏")
-            return separated
-        if not allow_cpu:
-            _log("Stage1", "CUDA 分离未完成，使用未分离音频。可在「人声分离」节点启用 CPU 后重新解析。")
-        else:
-            _log("Stage1", "Demucs 未能分离音轨，使用未分离音频继续解析")
+def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
+    source_root, checkpoint = config.resolve_banquet_paths()
 
-    vocals_out = output_dir / "vocals.wav"
-    shutil.copyfile(extracted_wav, vocals_out)
-    return vocals_out, None
+    hop_raw = os.getenv("BANQUET_HOP_SECONDS", "").strip()
+    hop_args: List[str] = []
+    if hop_raw:
+        try:
+            hop_seconds = float(hop_raw)
+        except ValueError as exc:
+            raise RuntimeError(f"BANQUET_HOP_SECONDS 配置非法：{hop_raw}") from exc
+        if not (0 < hop_seconds <= 4.0):
+            raise RuntimeError(f"BANQUET_HOP_SECONDS 必须在 (0, 4.0] 秒范围内，当前为 {hop_raw}")
+        hop_args = ["--hop-seconds", str(hop_seconds)]
+
+    env = os.environ.copy()
+    env.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+    env["PYTHONUTF8"] = "1"
+    devices = ("cuda", "cpu") if device == "cuda" else ("cpu",)
+    deadline = time.monotonic() + 900
+
+    def _drain_banquet(stream: Any, lines: deque[str]) -> None:
+        if stream is None:
+            return
+        for raw_line in stream:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("[banquet] "):
+                _log("Stage1", line.removeprefix("[banquet] ").strip())
+            else:
+                lines.append(line)
+
+    for target_device in devices:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。")
+        _log("Stage1", f"Banquet ({target_device}) 直接分离对白、歌声、音乐与音效")
+        cmd = [
+            sys.executable,
+            str(ROOT_DIR / "workers/banquet_worker.py"),
+            "--source-root",
+            str(source_root),
+            "--checkpoint",
+            str(checkpoint),
+            "--input",
+            str(extracted_wav),
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            target_device,
+            *hop_args,
+        ]
+        output_lines: deque[str] = deque(maxlen=200)
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        reader = threading.Thread(target=_drain_banquet, args=(proc.stdout, output_lines), daemon=True)
+        reader.start()
+        try:
+            try:
+                returncode = proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired as exc:
+                proc.kill()
+                proc.wait()
+                reader.join(timeout=3)
+                raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。") from exc
+            except BaseException:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                reader.join(timeout=3)
+                raise
+            reader.join(timeout=5)
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        if returncode == 0:
+            return
+        detail = "\n".join(output_lines).strip()
+        if target_device == "cpu" or not _is_cuda_oom(RuntimeError(detail)):
+            suffix = detail[-600:] if detail else "无错误输出"
+            raise RuntimeError(f"Banquet ({target_device}) 分离失败 (code={returncode})：{suffix}")
+        _log("Stage1", "Banquet CUDA 显存不足，改用 CPU 重试")
+
+
+def _finish_four_stems(output_dir: Path, project_id: str) -> Tuple[Path, Path, CinematicStems]:
+    tracks = {stem: output_dir / f"{stem}.wav" for stem in ("dialogue", "singing", "music", "effects")}
+    if not all(path.is_file() and path.stat().st_size > 44 for path in tracks.values()):
+        raise RuntimeError("影视四轨分离未生成完整的对白、歌声、音乐、音效 WAV 文件。")
+
+    bgm_path = output_dir / "bgm.wav"
+    proc = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y",
+         "-i", str(tracks["effects"]), "-i", str(tracks["music"]), "-i", str(tracks["singing"]),
+         "-filter_complex", "amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.98:level=0:latency=1",
+         "-c:a", "pcm_s16le", str(bgm_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"影视背景轨合成失败：{proc.stderr[-600:]}")
+    if not bgm_path.is_file() or bgm_path.stat().st_size <= 44:
+        raise RuntimeError("影视背景轨合成结果为空，请检查分离音轨后重试。")
+
+    stems = CinematicStems(**{
+        stem: _project_media_url(path, output_dir.parent, project_id) for stem, path in tracks.items()
+    })
+    _log("Stage1", "四轨分离完成，交接对白轨至 WhisperX")
+    return tracks["dialogue"], bgm_path, stems
 
 
 def _stage_whisperx_asr_align(
@@ -377,6 +475,10 @@ def _stage_diarize(
     return normalize_segments(segments)
 
 
+def _project_media_url(path: Path, project_dir: Path, project_id: str) -> str:
+    return f"/workspace/{project_id}/{path.relative_to(project_dir).as_posix()}"
+
+
 def _build_and_save_script(
     args: argparse.Namespace,
     duration: float,
@@ -384,6 +486,7 @@ def _build_and_save_script(
     bgm_wav: Optional[Path],
     raw_segments: List[Dict[str, Any]],
     detected_lang: str,
+    cinematic_stems: Optional[CinematicStems] = None,
 ) -> Path:
     """组装并通过 Pydantic v2 强校验后落盘 workspace/{project_id}/script.json。"""
     project_id = args.project_id
@@ -438,8 +541,9 @@ def _build_and_save_script(
         glossary=existing.glossary if existing else {},
         media=MediaInfo(
             source_video=source_video_url,
-            vocals_wav=f"/workspace/{project_id}/{vocals_wav.name}",
-            bgm_wav=f"/workspace/{project_id}/{bgm_wav.name}" if bgm_wav else None,
+            vocals_wav=_project_media_url(vocals_wav, args.output_dir, project_id),
+            bgm_wav=_project_media_url(bgm_wav, args.output_dir, project_id) if bgm_wav else None,
+            cinematic_stems=cinematic_stems,
             output_video=None,
             duration=final_duration,
             bgm_volume=0.75,
@@ -494,17 +598,23 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cuda", "cpu"],
         help="计算设备（默认 auto 自动探测 CUDA 并支持 OOM 降级）",
     )
-    parser.add_argument("--allow-demucs-cpu", action="store_true", help="允许 Demucs 在 CPU 上分离")
-    parser.add_argument("--skip-demucs", action="store_true", help="跳过 Demucs 人声分离（纯播客快速模式）")
     parser.add_argument("--skip-diarization", action="store_true", help="跳过 pyannote 说话人聚类")
     parser.add_argument("--skip-llm", action="store_true", help="跳过 LLM 翻译与情绪标注")
     return parser.parse_args()
+
+
+def _cleanup_stale_cinematic_dirs(output_dir: Path, keep: Path) -> None:
+    keep_resolved = keep.resolve()
+    for candidate in output_dir.iterdir():
+        if candidate.is_dir() and candidate.name.startswith("cinematic-") and candidate.resolve() != keep_resolved:
+            shutil.rmtree(candidate, ignore_errors=True)
 
 
 def run_pipeline(args: argparse.Namespace) -> Path:
     if not args.input.is_file():
         raise FileNotFoundError(f"输入媒体文件不存在: {args.input}")
 
+    args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     device = _resolve_device(args.device)
     _log(
@@ -513,40 +623,45 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         f"HF_HOME={os.getenv('HF_HOME', '(default)')}, TORCH_HOME={os.getenv('TORCH_HOME', '(default)')}",
     )
 
-    with tempfile.TemporaryDirectory(prefix="stagetts_work_") as work_tmp:
-        extracted_wav = Path(work_tmp) / "extracted_audio.wav"
-        duration = _extract_wav_and_probe(args.input, extracted_wav)
-        vocals_wav, bgm_wav = _stage_demucs(
-            extracted_wav=extracted_wav,
-            output_dir=args.output_dir,
-            device=device,
-            skip_demucs=args.skip_demucs,
-            allow_cpu=args.allow_demucs_cpu or args.device == "cpu",
-        )
+    # Publish new audio separately so a failed reparse preserves the previous script's tracks.
+    cinematic_dir = Path(tempfile.mkdtemp(prefix="cinematic-", dir=args.output_dir))
+    try:
+        with tempfile.TemporaryDirectory(prefix="stagetts_work_") as work_tmp:
+            extracted_wav = Path(work_tmp) / "extracted_audio.wav"
+            duration = _extract_wav_and_probe(args.input, extracted_wav)
+            _stage_banquet(extracted_wav, cinematic_dir, device)
+            vocals_wav, bgm_wav, cinematic_stems = _finish_four_stems(cinematic_dir, args.project_id)
 
-    audio, aligned_result, detected_lang = _stage_whisperx_asr_align(
-        vocals_wav=vocals_wav,
-        compute_type=args.compute_type,
-        whisper_model=args.whisper_model,
-        device=device,
-    )
-    raw_segments = _stage_diarize(
-        audio=audio,
-        aligned_result=aligned_result,
-        device=device,
-        skip_diarization=args.skip_diarization,
-    )
-    review_count = sum(seg["alignment_needs_review"] or seg["speaker_needs_review"] for seg in raw_segments)
-    if review_count:
-        _log("Stage3", f"{review_count} 条片段的原文范围或说话人待人工校对")
-    return _build_and_save_script(
-        args=args,
-        duration=duration,
-        vocals_wav=vocals_wav,
-        bgm_wav=bgm_wav,
-        raw_segments=raw_segments,
-        detected_lang=detected_lang,
-    )
+        audio, aligned_result, detected_lang = _stage_whisperx_asr_align(
+            vocals_wav=vocals_wav,
+            compute_type=args.compute_type,
+            whisper_model=args.whisper_model,
+            device=device,
+        )
+        raw_segments = _stage_diarize(
+            audio=audio,
+            aligned_result=aligned_result,
+            device=device,
+            skip_diarization=args.skip_diarization,
+        )
+        review_count = sum(seg["alignment_needs_review"] or seg["speaker_needs_review"] for seg in raw_segments)
+        if review_count:
+            _log("Stage3", f"{review_count} 条片段的原文范围或说话人待人工校对")
+        script_out = _build_and_save_script(
+            args=args,
+            duration=duration,
+            vocals_wav=vocals_wav,
+            bgm_wav=bgm_wav,
+            raw_segments=raw_segments,
+            detected_lang=detected_lang,
+            cinematic_stems=cinematic_stems,
+        )
+    except BaseException:
+        shutil.rmtree(cinematic_dir, ignore_errors=True)
+        raise
+
+    _cleanup_stale_cinematic_dirs(args.output_dir, keep=cinematic_dir)
+    return script_out
 
 
 def main() -> None:

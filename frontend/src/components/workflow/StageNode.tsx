@@ -124,7 +124,7 @@ export const StageNode: React.FC<NodeProps<StageFlowNode>> = memo(({ data, selec
           <span className="truncate text-[12px] font-medium text-primary">{data.title}</span>
         </div>
         <span className="ml-2 shrink-0 rounded-[4px] bg-black/25 px-1.5 py-0.5 font-mono tabular-nums text-[10px] text-secondary">
-          {data.vramGb > 0 ? `${data.vramGb.toFixed(1)}G` : "CPU"}
+          {data.vramGb === null ? "—" : data.vramGb > 0 ? `${data.vramGb.toFixed(1)}G` : "CPU"}
         </span>
       </div>
 

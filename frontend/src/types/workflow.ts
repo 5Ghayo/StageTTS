@@ -26,7 +26,7 @@ export interface StageNodeData extends Record<string, unknown> {
   title: string;
   category: NodeCategory;
   env: EnvBadge;
-  vramGb: number;
+  vramGb: number | null;
   status: NodeRunStatus;
   inputs: PortSpec[];
   outputs: PortSpec[];
@@ -37,7 +37,6 @@ export interface StageNodeData extends Record<string, unknown> {
 export interface PipelineConfig {
   computeType: "float16" | "int8";
   targetLang: "zh" | "en" | "ja";
-  allowDemucsCpu: boolean;
   burnWatermark: boolean;
 }
 

@@ -1,4 +1,8 @@
+import importlib.util
+import io
 import json
+import os
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -17,9 +21,9 @@ from backend import config
 from backend.agent import orchestrator
 from backend.agent.tools import save_project_script
 from backend.main import app
-from backend.schemas import MediaInfo, ProjectScript, Segment
-from backend.services import media_mixer, synthesis, task_runner, tts_client
-from workers import demucs_stage, parse_worker
+from backend.schemas import CinematicStems, MediaInfo, ProjectScript, Segment
+from backend.services import media_mixer, references, synthesis, task_runner, tts_client
+from workers import parse_worker
 
 
 def write_wav(path: Path, seconds: float, rate: int = 8000, amplitude: int = 1000) -> None:
@@ -221,51 +225,315 @@ class ParseTest(unittest.TestCase):
                 task_runner._prepare_gpu_for_parse()
             stop.assert_not_called()
 
-    def test_long_cuda_retry_preserves_samples_and_cpu_requires_opt_in(self):
+    def test_banquet_retries_cuda_oom_on_cpu_and_streams_progress(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "input.wav"
-            write_wav(source, 575, rate=800)
-            messages, devices = [], []
+            bandit_dir = root / "src" / "models" / "bandit"
+            bandit_dir.mkdir(parents=True)
+            (bandit_dir / "bandit.py").touch()
+            (bandit_dir / "film.py").touch()
+            checkpoint = root / "banquet-split.ckpt"
+            checkpoint.touch()
 
-            def fake_demucs(chunk, output, device, _timeout):
-                devices.append(device)
-                with wave.open(str(chunk), "rb") as wav:
-                    seconds = wav.getnframes() / wav.getframerate()
-                if seconds > 31:
-                    raise demucs_stage.DemucsError("CUDA out of memory")
-                stems = output / "htdemucs" / chunk.stem
-                stems.mkdir(parents=True)
-                amplitude = 1000 if len(devices) % 2 else 3000
-                for name in ("vocals.wav", "no_vocals.wav"):
-                    write_wav(stems / name, seconds, rate=800, amplitude=amplitude)
+            def fake_proc(output: str, returncode: int):
+                proc = MagicMock()
+                proc.stdout = io.StringIO(output)
+                proc.wait.return_value = returncode
+                return proc
+
+            cuda = fake_proc("[banquet] 加载 Banquet 模型 (cuda)...\nCUDA out of memory\n", 1)
+            cpu = fake_proc("[banquet] 加载 Banquet 模型 (cpu)...\n[banquet] 分离进度 1/2 窗口 (50%)\n", 0)
+            logged: list[tuple[str, str]] = []
+            with (
+                patch.dict(os.environ, BANQUET_ROOT=str(root), BANQUET_CHECKPOINT=str(checkpoint)),
+                patch.object(parse_worker.subprocess, "Popen", side_effect=[cuda, cpu]) as popen,
+                patch.object(parse_worker, "_log", side_effect=lambda stage, msg: logged.append((stage, msg))),
+            ):
+                parse_worker._stage_banquet(root / "input.wav", root, "cuda")
+            self.assertEqual([call.args[0][-1] for call in popen.call_args_list], ["cuda", "cpu"])
+            self.assertTrue(any(stage == "Stage1" and "分离进度 1/2 窗口 (50%)" in msg for stage, msg in logged))
+            self.assertTrue(cuda.stdout.closed and cpu.stdout.closed)
+
+            non_oom = fake_proc("", -9)
+            with (
+                patch.dict(os.environ, BANQUET_ROOT=str(root), BANQUET_CHECKPOINT=str(checkpoint)),
+                patch.object(parse_worker.subprocess, "Popen", return_value=non_oom) as popen_non_oom,
+            ):
+                with self.assertRaisesRegex(RuntimeError, r"code=-9"):
+                    parse_worker._stage_banquet(root / "input.wav", root, "cuda")
+            self.assertEqual(popen_non_oom.call_count, 1)
+            self.assertTrue(non_oom.stdout.closed)
+
+            timed_out = MagicMock()
+            timed_out.stdout = io.StringIO("")
+            timed_out.wait.side_effect = [subprocess.TimeoutExpired("banquet", 900), -9]
+            with (
+                patch.dict(os.environ, BANQUET_ROOT=str(root), BANQUET_CHECKPOINT=str(checkpoint)),
+                patch.object(parse_worker.subprocess, "Popen", return_value=timed_out),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "分离超时"):
+                    parse_worker._stage_banquet(root / "input.wav", root, "cpu")
+            timed_out.kill.assert_called_once()
+            self.assertTrue(timed_out.stdout.closed)
+
+            interrupted = MagicMock()
+            interrupted.stdout = io.StringIO("")
+            interrupted.poll.return_value = None
+            interrupted.wait.side_effect = [KeyboardInterrupt, -9]
+            with (
+                patch.dict(os.environ, BANQUET_ROOT=str(root), BANQUET_CHECKPOINT=str(checkpoint)),
+                patch.object(parse_worker.subprocess, "Popen", return_value=interrupted),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    parse_worker._stage_banquet(root / "input.wav", root, "cpu")
+            interrupted.kill.assert_called_once()
+            self.assertTrue(interrupted.stdout.closed)
+
+    def test_banquet_readiness_and_fail_fast(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bandit_dir = root / "src" / "models" / "bandit"
+            bandit_dir.mkdir(parents=True)
+            (bandit_dir / "bandit.py").touch()
+            checkpoint = root / "banquet-split.ckpt"
+            checkpoint.touch()
+            input_media = root / "input.mp4"
+            input_media.write_bytes(b"fake")
+
+            with patch.dict(os.environ, {"BANQUET_ROOT": "", "BANQUET_CHECKPOINT": ""}):
+                with (
+                    patch.object(config, "BANQUET_ROOT", None),
+                    patch.object(config, "BANQUET_CHECKPOINT", None),
+                ):
+                    self.assertFalse(config.is_banquet_configured())
+                    with TestClient(app) as client:
+                        health = client.get("/api/health")
+                        self.assertEqual(health.status_code, 200)
+                        self.assertFalse(health.json()["readiness"]["banquet_configured"])
+                    with (
+                        patch.object(task_runner.shutil, "which", return_value="/usr/bin/python"),
+                        patch.object(task_runner, "_prepare_gpu_for_parse") as prepare_gpu,
+                    ):
+                        with self.assertRaisesRegex(task_runner.ParseWorkerError, "BANQUET_ROOT"):
+                            task_runner.run_parse_worker("demo", input_media)
+                        prepare_gpu.assert_not_called()
+
+            # Missing film.py should still fail validation.
+            with patch.dict(os.environ, {"BANQUET_ROOT": str(root), "BANQUET_CHECKPOINT": str(checkpoint)}):
+                self.assertFalse(config.is_banquet_configured())
+                (bandit_dir / "film.py").touch()
+                self.assertTrue(config.is_banquet_configured())
+                with TestClient(app) as client:
+                    health = client.get("/api/health")
+                    self.assertEqual(health.status_code, 200)
+                    self.assertTrue(health.json()["readiness"]["banquet_configured"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
+    def test_finish_four_stems_mixes_bgm_and_validates_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project_dir = Path(directory) / "demo"
+            cinematic_dir = project_dir / "cinematic-abc"
+            cinematic_dir.mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, "未生成完整"):
+                parse_worker._finish_four_stems(cinematic_dir, "demo")
+            for stem in ("dialogue", "singing", "music", "effects"):
+                write_wav(cinematic_dir / f"{stem}.wav", 0.5, rate=48000, amplitude=25000)
+            dialogue, bgm, stems = parse_worker._finish_four_stems(cinematic_dir, "demo")
+            self.assertEqual(dialogue, cinematic_dir / "dialogue.wav")
+            self.assertTrue(bgm.is_file() and bgm.stat().st_size > 44)
+            with wave.open(str(bgm), "rb") as mixed:
+                self.assertEqual(mixed.getsampwidth(), 2)
+                self.assertEqual(mixed.getframerate(), 48000)
+                self.assertEqual(mixed.getnframes(), 24000)
+            self.assertEqual(stems.dialogue, "/workspace/demo/cinematic-abc/dialogue.wav")
+            self.assertEqual(stems.singing, "/workspace/demo/cinematic-abc/singing.wav")
+            self.assertEqual(stems.music, "/workspace/demo/cinematic-abc/music.wav")
+            self.assertEqual(stems.effects, "/workspace/demo/cinematic-abc/effects.wav")
+
+    def test_reparse_cleans_stale_cinematic_dirs_only_on_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "demo"
+            output_dir.mkdir()
+            old_dir = output_dir / "cinematic-old"
+            old_dir.mkdir()
+            (old_dir / "dialogue.wav").write_bytes(b"old")
+            input_file = output_dir / "input.wav"
+            write_wav(input_file, 1.0)
+            args = SimpleNamespace(
+                project_id="demo",
+                input=input_file,
+                output_dir=output_dir,
+                target_lang="zh",
+                whisper_model="small",
+                compute_type="int8",
+                mode="video_dubbing",
+                device="cpu",
+                skip_diarization=True,
+                skip_llm=True,
+            )
 
             with (
-                patch.object(demucs_stage, "_sample_gpu_memory"),
-                patch.object(demucs_stage, "_run_demucs", side_effect=fake_demucs),
+                patch.object(parse_worker, "_extract_wav_and_probe", return_value=1.0),
+                patch.object(parse_worker, "_stage_banquet", side_effect=RuntimeError("boom")),
             ):
-                stems = demucs_stage.separate_stems(source, root, "cuda", False, messages.append)
-            self.assertTrue(any("30s 分块重试" in message for message in messages))
-            self.assertEqual(set(devices), {"cuda"})
-            self.assertIsNotNone(stems)
-            for path in stems:
-                with wave.open(str(path), "rb") as wav:
-                    self.assertEqual(wav.getnframes(), 575 * 800)
-                    wav.setpos(30 * 800 - 1)
-                    samples = array("h", wav.readframes(802))
-                    self.assertLess(max(abs(after - before) for before, after in zip(samples, samples[1:])), 10)
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    parse_worker.run_pipeline(args)
+            self.assertEqual([p.name for p in output_dir.glob("cinematic-*")], ["cinematic-old"])
+
+            def fake_finish(cinematic_dir: Path, project_id: str):
+                stems = CinematicStems(
+                    dialogue=f"/workspace/{project_id}/{cinematic_dir.name}/dialogue.wav",
+                    singing=f"/workspace/{project_id}/{cinematic_dir.name}/singing.wav",
+                    music=f"/workspace/{project_id}/{cinematic_dir.name}/music.wav",
+                    effects=f"/workspace/{project_id}/{cinematic_dir.name}/effects.wav",
+                )
+                return cinematic_dir / "dialogue.wav", cinematic_dir / "bgm.wav", stems
 
             with (
-                patch.object(demucs_stage, "_sample_gpu_memory"),
-                patch.object(demucs_stage, "_run_demucs", side_effect=demucs_stage.DemucsError("CUDA out of memory")) as run,
+                patch.object(parse_worker, "_extract_wav_and_probe", return_value=1.0),
+                patch.object(parse_worker, "_stage_banquet"),
+                patch.object(parse_worker, "_finish_four_stems", side_effect=fake_finish),
+                patch.object(parse_worker, "_stage_whisperx_asr_align", return_value=(None, {"segments": []}, "zh")),
+                patch.object(parse_worker, "_stage_diarize", return_value=[]),
             ):
-                vocals, bgm = parse_worker._stage_demucs(source, root, "cuda", False, False)
-                self.assertIsNone(bgm)
-                self.assertEqual(vocals.read_bytes(), source.read_bytes())
-                self.assertEqual([call.args[2] for call in run.call_args_list], ["cuda", "cuda"])
-                run.reset_mock()
-                parse_worker._stage_demucs(source, root, "cuda", False, True)
-                self.assertEqual([call.args[2] for call in run.call_args_list], ["cuda", "cuda", "cpu"])
+                script_out = parse_worker.run_pipeline(args)
+            self.assertTrue(script_out.is_file())
+            remaining = [p.name for p in output_dir.glob("cinematic-*")]
+            self.assertEqual(len(remaining), 1)
+            self.assertNotEqual(remaining[0], "cinematic-old")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
+    def test_render_fails_when_cinematic_bgm_missing(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(config, "WORKSPACE_DIR", Path(directory)):
+            script = ProjectScript(
+                project_id="demo",
+                mode="virtual_stage",
+                media=MediaInfo(
+                    duration=2.0,
+                    bgm_wav="/workspace/demo/cinematic-x/bgm.wav",
+                    cinematic_stems=CinematicStems(
+                        dialogue="/workspace/demo/cinematic-x/dialogue.wav",
+                        singing="/workspace/demo/cinematic-x/singing.wav",
+                        music="/workspace/demo/cinematic-x/music.wav",
+                        effects="/workspace/demo/cinematic-x/effects.wav",
+                    ),
+                ),
+                segments=[],
+            )
+            with self.assertRaisesRegex(FileNotFoundError, "混合背景轨缺失"):
+                media_mixer.mix_and_render(script)
+
+    def test_banquet_worker_compiles(self):
+        py_compile.compile(str(Path(__file__).resolve().parent.parent / "workers" / "banquet_worker.py"), doraise=True)
+
+    def test_banquet_worker_separates_per_channel_and_normalizes_peak(self):
+        missing = [mod for mod in ("torch", "torchaudio", "soundfile") if importlib.util.find_spec(mod) is None]
+        if missing:
+            self.skipTest(f"requires {', '.join(missing)}")
+        import torch
+
+        from workers import banquet_worker
+
+        seen_batches: list[int] = []
+
+        class FakeModel:
+            def __call__(self, batch):
+                audio = batch["mixture"]["audio"]
+                seen_batches.append(audio.shape[0])
+                return {stem: audio * (idx + 1) for idx, stem in enumerate(banquet_worker.STEMS)}
+
+        messages: list[str] = []
+        tiny_wave = torch.ones((1, 400), dtype=torch.float32)
+        tiny_out = banquet_worker.separate(FakeModel(), tiny_wave, "cpu", progress=messages.append)
+        self.assertEqual(seen_batches, [1])
+        self.assertEqual(tiny_out["dialogue"].shape, (1, 400))
+
+        seen_batches.clear()
+        short_wave = torch.ones((2, 2000), dtype=torch.float32)
+        short_out = banquet_worker.separate(FakeModel(), short_wave, "cpu", progress=messages.append)
+        self.assertEqual(seen_batches, [1, 1])
+        self.assertEqual(short_out["dialogue"].shape, (2, 2000))
+        self.assertTrue(torch.allclose(short_out["music"], short_wave * 4))
+
+        seen_batches.clear()
+        long_len = int(9.3 * banquet_worker.SAMPLE_RATE)
+        long_wave = torch.stack([torch.full((long_len,), 0.25), torch.full((long_len,), 0.5)])
+        long_out = banquet_worker.separate(FakeModel(), long_wave, "cpu", progress=messages.append)
+        self.assertTrue(all(batch == 1 for batch in seen_batches))
+        self.assertEqual(long_out["dialogue"].shape, (2, long_len))
+        self.assertTrue(torch.allclose(long_out["dialogue"], long_wave, atol=1e-4))
+        self.assertTrue(any("分离进度" in msg for msg in messages))
+
+        hop4_out = banquet_worker.separate(FakeModel(), long_wave, "cpu", hop_seconds=4.0)
+        self.assertTrue(torch.allclose(hop4_out["dialogue"], long_wave, atol=1e-4))
+        with self.assertRaises(ValueError):
+            banquet_worker.separate(FakeModel(), short_wave, "cpu", hop_seconds=5.0)
+
+        clipped = banquet_worker._normalize_peak(torch.tensor([[1.5, -0.5]]))
+        self.assertAlmostEqual(float(clipped.abs().max()), 0.99, places=5)
+        unclipped = torch.tensor([[0.8, -0.5]])
+        self.assertTrue(torch.equal(banquet_worker._normalize_peak(unclipped), unclipped))
+
+    def test_vocal_track_preserves_48khz_and_defaults_to_44100(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(config, "WORKSPACE_DIR", Path(directory)):
+            project_dir = Path(directory) / "demo"
+            project_dir.mkdir()
+            vocals_path = project_dir / "cinematic-a" / "dialogue.wav"
+            vocals_path.parent.mkdir()
+            write_wav(vocals_path, 2.0, rate=48000, amplitude=500)
+            script_48k = ProjectScript(
+                project_id="demo",
+                mode="virtual_stage",
+                media=MediaInfo(duration=2.0, vocals_wav="/workspace/demo/cinematic-a/dialogue.wav"),
+                segments=[],
+            )
+            out_48k = media_mixer._build_vocal_track(script_48k, project_dir)
+            with wave.open(str(out_48k), "rb") as wav:
+                self.assertEqual(wav.getframerate(), 48000)
+
+            script_no_vocals = ProjectScript(
+                project_id="demo",
+                mode="virtual_stage",
+                media=MediaInfo(duration=2.0),
+                segments=[],
+            )
+            out_default = media_mixer._build_vocal_track(script_no_vocals, project_dir)
+            with wave.open(str(out_default), "rb") as wav:
+                self.assertEqual(wav.getframerate(), 44100)
+
+    def test_automatic_reference_accepts_only_project_banquet_dialogue(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(config, "WORKSPACE_DIR", Path(directory)):
+            dialogue = Path(directory) / "demo" / "cinematic-example" / "dialogue.wav"
+            dialogue.parent.mkdir(parents=True)
+            write_wav(dialogue, 5)
+            root = "/workspace/demo/cinematic-example"
+            script = ProjectScript(
+                project_id="demo",
+                source_lang="ja",
+                media=MediaInfo(
+                    duration=5,
+                    vocals_wav=f"{root}/dialogue.wav",
+                    cinematic_stems=CinematicStems(
+                        dialogue=f"{root}/dialogue.wav",
+                        singing=f"{root}/singing.wav",
+                        music=f"{root}/music.wav",
+                        effects=f"{root}/effects.wav",
+                    ),
+                ),
+                segments=[
+                    Segment(id=0, start=0, end=4, speaker="A", orig_text="大丈夫。",
+                            alignment_needs_review=False, speaker_needs_review=False),
+                ],
+            )
+            preview = references.automatic_reference(script, "A")
+            self.assertIsNotNone(preview)
+            self.assertTrue(config.resolve_media_path(preview.wav).is_file())
+            foreign = Path(directory) / "other" / "cinematic-example" / "dialogue.wav"
+            foreign.parent.mkdir(parents=True)
+            write_wav(foreign, 5)
+            script.media.vocals_wav = "/workspace/other/cinematic-example/dialogue.wav"
+            script.media.cinematic_stems.dialogue = script.media.vocals_wav
+            self.assertIsNone(references.automatic_reference(script, "A"))
 
     def test_config_imports_without_pydantic_settings(self):
         proc = subprocess.run(
