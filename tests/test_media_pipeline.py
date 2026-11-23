@@ -448,6 +448,7 @@ class ParseTest(unittest.TestCase):
             with wave.open(str(out_default), "rb") as wav:
                 self.assertEqual(wav.getframerate(), 44100)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
     def test_automatic_reference_accepts_only_project_banquet_dialogue(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(config, "WORKSPACE_DIR", Path(directory)):
             dialogue = Path(directory) / "demo" / "cinematic-example" / "dialogue.wav"
