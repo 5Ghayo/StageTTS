@@ -13,8 +13,11 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from workers.research_models import RELEASES
+from workers.subtitle_boundaries import detect_subtitle_boundaries
 
 MODEL_RUNNER = Path(__file__).with_name("research_models.py").resolve()
+EMILIA_RUNNER = Path(__file__).with_name("emilia_runner.py").resolve()
+MOSS_RUNNER = Path(__file__).with_name("moss_runner.py").resolve()
 EMILIA_MAIN = Path("preprocessors/Emilia/main.py")
 EMILIA_AUDIO = {".mp3", ".wav", ".flac", ".m4a", ".aac"}
 SOURCES = {
@@ -126,12 +129,25 @@ def character_for_clip(segments: list[dict], start: float, end: float) -> str | 
     return next(iter(speakers))
 
 
-def run_emilia(config: dict, inputs: Path) -> None:
+def run_emilia(config: dict, inputs: Path, filter_overrides: dict[str, float | bool | str] | None = None) -> None:
     main = file_path(Path(config["amphion_root"]) / EMILIA_MAIN)
+    command = [str(file_path(Path(config["emilia_python"])))]
+    if filter_overrides is None:
+        command.append(str(main))
+    else:
+        command.extend([
+            str(EMILIA_RUNNER), str(main),
+            "--min-clip-seconds", str(filter_overrides["min_clip_seconds"]),
+            "--min-dnsmos", str(filter_overrides["min_dnsmos"]),
+        ])
+        if filter_overrides.get("fine_turns"):
+            command.append("--fine-turns")
+            for name in ("max_turn_seconds", "min_silence_ms", "tail_ms", "turn_boundaries"):
+                if name in filter_overrides:
+                    command.extend(["--" + name.replace("_", "-"), str(filter_overrides[name])])
     subprocess.run(
-        [str(file_path(Path(config["emilia_python"]))), str(main), "--config_path",
-         str(file_path(Path(config["emilia_config"]))), "--input_folder_path", str(inputs),
-         "--whisper_arch", "medium"],
+        [*command, "--config_path", str(file_path(Path(config["emilia_config"]))),
+         "--input_folder_path", str(inputs), "--whisper_arch", "medium"],
         cwd=main.parent, check=True,
     )
 
@@ -190,18 +206,33 @@ def pack_clips(config: dict, output: Path, inputs: list[Path]) -> None:
         write_manifest(root, rows, ["kyaraembed", "emotion2vec", "facodec"])
 
 
-def write_manifest(root: Path, rows: list[dict], models: list[str]) -> None:
-    write_json(root / "manifest.json", {
+def write_manifest(
+    root: Path, rows: list[dict], models: list[str], *, emilia_filter: dict[str, float | bool | str] | None = None,
+    transcription_backend: str | None = None,
+) -> None:
+    manifest = {
         "sources": SOURCES,
         "model_releases": {name: RELEASES[name][:2] for name in models},
         "clips": rows,
-    })
+    }
+    if emilia_filter is not None:
+        manifest["emilia_filter"] = emilia_filter
+    if transcription_backend is not None:
+        manifest["transcription_backend"] = transcription_backend
+    write_json(root / "manifest.json", manifest)
 
 
 def prepare_dataset(
     config: dict, output: Path, input_audio: Path | None, script_path: Path | None, overlaps: list[Path],
+    *, emilia_filter: dict[str, float | bool | str] | None = None, subtitle_source: Path | None = None,
+    backend: str = "emilia", moss_language: str | None = None,
 ) -> None:
-    validate_emilia(config)
+    if backend not in {"emilia", "moss"}:
+        raise ValueError("Unknown transcription backend")
+    if backend == "emilia":
+        validate_emilia(config)
+    elif not moss_language or emilia_filter or subtitle_source:
+        raise ValueError("MOSS requires an explicit language and uses its own segmentation")
     segments = []
     dialogue_source = None
     duration = 0.0
@@ -229,6 +260,18 @@ def prepare_dataset(
         temp = Path(tmp_name)
         inputs = temp / "emilia"
         inputs.mkdir()
+        runtime_filter = emilia_filter
+        if emilia_filter and emilia_filter.get("fine_turns") and "turn_boundaries" not in emilia_filter:
+            subtitle_media = subtitle_source or source
+            if subtitle_source is not None or source.suffix.lower() not in EMILIA_AUDIO:
+                detected = detect_subtitle_boundaries(subtitle_media, videosubfinder_cli=config.get("videosubfinder_cli"))
+                if detected:
+                    boundary_file = root / "subtitle-boundaries.json"
+                    write_json(boundary_file, detected)
+                    emilia_filter = {**emilia_filter, "turn_boundaries": boundary_file.name}
+                    runtime_filter = {**emilia_filter, "turn_boundaries": str(boundary_file)}
+                    label = detected.get("detector") or f"subtitle stream {detected['stream']} ({detected['codec']})"
+                    print(f"Detected {len(detected['cut_seconds'])} cut points via {label}", flush=True)
         raw = inputs / ("original" + (source.suffix.lower() if source.suffix.lower() in EMILIA_AUDIO else ".wav"))
         if source.suffix.lower() in EMILIA_AUDIO:
             shutil.copyfile(source, raw)
@@ -258,7 +301,13 @@ def prepare_dataset(
                     file_path(Path(track))
             models.append("dialogue-sidon")
 
-        run_emilia(config, inputs)
+        if backend == "emilia":
+            run_emilia(config, inputs, runtime_filter)
+        else:
+            subprocess.run([
+                str(file_path(Path(config["moss_python"]))), str(MOSS_RUNNER),
+                "--inputs", str(inputs), "--language", moss_language,
+            ], check=True)
         native = inputs.with_name("emilia_processed")
         if not native.is_dir():
             raise RuntimeError("Emilia-Pipe did not write its native output directory")
@@ -275,22 +324,35 @@ def prepare_dataset(
                 audio = file_path(transcript.parent / f"{stem}_{index}.mp3")
                 rows.append({
                     **row, "provenance": provenance, "audio": audio.relative_to(root).as_posix(),
-                    "character_id": character_for_clip(segments, start, end) if origin == "original" else None,
+                    "character_id": (
+                        character_for_clip(segments, start, row.get("speech_end", end))
+                        if origin == "original" else None
+                    ),
                 })
         attach_features(config, root, rows)
-        write_manifest(root, rows, models)
+        write_manifest(root, rows, models, emilia_filter=emilia_filter, transcription_backend=backend)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--toolchain", type=Path, required=True)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    prepare = subparsers.add_parser("prepare", help="Run Emilia-Pipe and extract training features")
+    prepare = subparsers.add_parser("prepare", help="Transcribe, slice, and extract training features")
+    prepare.add_argument("--backend", choices=["emilia", "moss"], default="emilia")
+    prepare.add_argument("--moss-language", help="Language label for MOSS training clips, e.g. ja")
     source = prepare.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path)
     source.add_argument("--project", type=Path, help="Path to a StageTTS script.json")
     prepare.add_argument("--overlap", type=Path, action="append", default=[], help="Confirmed two-person audio window")
     prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument("--emilia-min-clip-seconds", type=float, help="Emilia minimum clip length (default: 3)")
+    prepare.add_argument("--emilia-min-dnsmos", type=float, help="Emilia minimum DNSMOS score (default: 3)")
+    prepare.add_argument("--emilia-fine-turns", action="store_true", help="Run VAD on every exclusive speaker turn")
+    prepare.add_argument("--emilia-max-turn-seconds", type=float, help="Maximum continuous VAD turn in fine mode")
+    prepare.add_argument("--emilia-min-silence-ms", type=int, help="Shortest silence kept as a cut in fine mode")
+    prepare.add_argument("--emilia-tail-ms", type=int, help="Maximum trailing padding in fine mode (default: 150)")
+    prepare.add_argument("--emilia-turn-boundaries", type=Path, help="Source-aligned JSON list of cut_seconds")
+    prepare.add_argument("--emilia-subtitle-source", type=Path, help="Aligned video to probe when the input is audio")
     features = subparsers.add_parser("features", help="Extract representations from reviewed speech clips")
     features.add_argument("--input", type=Path, action="append", required=True)
     features.add_argument("--output", type=Path, required=True)
@@ -305,9 +367,45 @@ def main() -> None:
     try:
         config = load_config(args.toolchain.resolve())
         if args.command == "prepare":
+            if not args.emilia_fine_turns and any(value is not None for value in (
+                args.emilia_max_turn_seconds, args.emilia_min_silence_ms,
+                args.emilia_tail_ms, args.emilia_turn_boundaries, args.emilia_subtitle_source,
+            )):
+                raise ValueError("Turn tuning options require --emilia-fine-turns")
+            if args.emilia_turn_boundaries is not None and args.emilia_subtitle_source is not None:
+                raise ValueError("Use either a cut-point JSON or a source video for subtitle detection")
+            overrides = None
+            if args.emilia_min_clip_seconds is not None or args.emilia_min_dnsmos is not None or args.emilia_fine_turns:
+                overrides = {
+                    "min_clip_seconds": (
+                        3.0 if args.emilia_min_clip_seconds is None else args.emilia_min_clip_seconds
+                    ),
+                    "min_dnsmos": 3.0 if args.emilia_min_dnsmos is None else args.emilia_min_dnsmos,
+                }
+                if not (0 < overrides["min_clip_seconds"] <= 30 and 1 <= overrides["min_dnsmos"] <= 5):
+                    raise ValueError("Emilia minimum clip length must be in (0, 30] and DNSMOS in [1, 5]")
+                if args.emilia_fine_turns:
+                    overrides["fine_turns"] = True
+                    tail_ms = 150 if args.emilia_tail_ms is None else args.emilia_tail_ms
+                    if not 0 <= tail_ms <= 1000:
+                        raise ValueError("Trailing padding must be within 0–1000 ms")
+                    overrides["tail_ms"] = tail_ms
+                    if args.emilia_max_turn_seconds is not None:
+                        if not (overrides["min_clip_seconds"] <= args.emilia_max_turn_seconds <= 30):
+                            raise ValueError("Maximum VAD turn must be between the minimum clip length and 30 s")
+                        overrides["max_turn_seconds"] = args.emilia_max_turn_seconds
+                    if args.emilia_min_silence_ms is not None:
+                        if not (20 <= args.emilia_min_silence_ms <= 1000):
+                            raise ValueError("VAD silence must be within 20–1000 ms")
+                        overrides["min_silence_ms"] = args.emilia_min_silence_ms
+                    if args.emilia_turn_boundaries is not None:
+                        overrides["turn_boundaries"] = str(file_path(args.emilia_turn_boundaries.resolve()))
             prepare_dataset(
                 config, args.output.resolve(), args.input.resolve() if args.input else None,
                 args.project.resolve() if args.project else None, [p.resolve() for p in args.overlap],
+                emilia_filter=overrides,
+                subtitle_source=file_path(args.emilia_subtitle_source.resolve()) if args.emilia_subtitle_source else None,
+                backend=args.backend, moss_language=args.moss_language,
             )
         elif args.command == "features":
             pack_clips(config, args.output.resolve(), [p.resolve() for p in args.input])
