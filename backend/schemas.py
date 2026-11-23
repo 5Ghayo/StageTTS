@@ -15,12 +15,20 @@ SegmentStatus = Literal["pending", "synthesizing", "ready", "error"]
 AvatarType = Literal["live2d", "vrm"]
 
 
+class CinematicStems(BaseModel):
+    dialogue: str
+    singing: str
+    music: str
+    effects: str
+
+
 class MediaInfo(BaseModel):
     """项目关联音视频资源与全局混音参数。"""
 
     source_video: Optional[str] = Field(default=None, description="源视频或源音频 URL")
-    vocals_wav: Optional[str] = Field(default=None, description="Demucs 分离纯人声 URL")
-    bgm_wav: Optional[str] = Field(default=None, description="Demucs 分离背景伴奏 URL")
+    vocals_wav: Optional[str] = Field(default=None, description="识别和参考音使用的对白轨 URL")
+    bgm_wav: Optional[str] = Field(default=None, description="歌声、伴奏和音效合成的背景轨 URL")
+    cinematic_stems: Optional[CinematicStems] = Field(default=None, description="影视四轨分离结果")
     output_video: Optional[str] = Field(default=None, description="最终混音成片 URL")
     duration: float = Field(ge=0.0, description="媒体总时长（秒）")
     bgm_volume: float = Field(default=0.75, ge=0.0, le=2.0, description="BGM 混音音量系数")
@@ -127,6 +135,7 @@ class ReadinessInfo(BaseModel):
     tts_url: str
     llm_configured: bool
     hf_token_configured: bool
+    banquet_configured: bool
     env_parse_python: str
 
 
@@ -191,7 +200,6 @@ class ParseRequest(BaseModel):
 
     target_lang: str = Field(default="zh", description="目标翻译语种")
     compute_type: Literal["float16", "int8"] = Field(default="float16", description="WhisperX 计算精度")
-    allow_demucs_cpu: bool = Field(default=False, description="允许使用 CPU 运行 Demucs，可能耗时较长")
 
 
 class SegmentPatch(BaseModel):

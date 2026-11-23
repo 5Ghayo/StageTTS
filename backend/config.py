@@ -41,6 +41,14 @@ def _resolve_optional_dir_path(raw: str) -> Optional[Path]:
     return p if p.is_absolute() else (ROOT_DIR / p).resolve()
 
 
+def _resolve_optional_path(raw: str) -> Optional[Path]:
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    p = Path(cleaned).expanduser()
+    return p.resolve() if p.is_absolute() else (ROOT_DIR / p).resolve()
+
+
 class _StageTTSSettingsFields(BaseModel):
     """后端共享强类型配置字段定义。"""
 
@@ -53,6 +61,8 @@ class _StageTTSSettingsFields(BaseModel):
     tts_startup_timeout_sec: float = Field(default=90.0, alias="TTS_STARTUP_TIMEOUT_SEC")
 
     env_parse_python: str = Field(default="python", alias="ENV_PARSE_PYTHON")
+    banquet_root_raw: str = Field(default="", alias="BANQUET_ROOT")
+    banquet_checkpoint_raw: str = Field(default="", alias="BANQUET_CHECKPOINT")
     whisper_model: str = Field(default="large-v3", alias="WHISPER_MODEL")
     whisper_compute_type: str = Field(default="float16", alias="WHISPER_COMPUTE_TYPE")
     tts_api_url: str = Field(default="http://127.0.0.1:9880", alias="TTS_API_URL")
@@ -152,6 +162,8 @@ TTS_STARTUP_TIMEOUT_SEC: float = settings.tts_startup_timeout_sec
 
 # 外部算力服务与子进程 Python 路径
 ENV_PARSE_PYTHON: str = settings.env_parse_python.strip() or "python"
+BANQUET_ROOT: Optional[Path] = _resolve_optional_path(settings.banquet_root_raw)
+BANQUET_CHECKPOINT: Optional[Path] = _resolve_optional_path(settings.banquet_checkpoint_raw)
 WHISPER_MODEL: str = settings.whisper_model.strip() or "large-v3"
 WHISPER_COMPUTE_TYPE: str = settings.whisper_compute_type.strip() or "float16"
 TRANSLATION_CHUNK_SIZE: int = 25
@@ -264,3 +276,37 @@ def is_hf_token_configured() -> bool:
     if not HF_TOKEN:
         return False
     return HF_TOKEN != "hf_your_token_here" and not HF_TOKEN.startswith("hf_your_")
+
+
+def _banquet_env_value(name: str, fallback: Optional[Path]) -> str:
+    if name in os.environ:
+        return os.environ[name].strip()
+    return str(fallback) if fallback is not None else ""
+
+
+def resolve_banquet_paths() -> tuple[Path, Path]:
+    """解析并校验 Banquet 源码目录与权重文件路径。"""
+    root_raw = _banquet_env_value("BANQUET_ROOT", BANQUET_ROOT)
+    if not root_raw:
+        raise RuntimeError("Banquet 四轨需要在 backend/.env 配置 BANQUET_ROOT。")
+    ckpt_raw = _banquet_env_value("BANQUET_CHECKPOINT", BANQUET_CHECKPOINT)
+    if not ckpt_raw:
+        raise RuntimeError("Banquet 四轨需要在 backend/.env 配置 BANQUET_CHECKPOINT。")
+    source_root = (ROOT_DIR / Path(root_raw).expanduser()).resolve()
+    checkpoint = (ROOT_DIR / Path(ckpt_raw).expanduser()).resolve()
+    if (
+        not (source_root / "src/models/bandit/bandit.py").is_file()
+        or not (source_root / "src/models/bandit/film.py").is_file()
+        or not checkpoint.is_file()
+    ):
+        raise RuntimeError("Banquet 源码或权重缺失，请检查 BANQUET_ROOT 和 BANQUET_CHECKPOINT。")
+    return source_root, checkpoint
+
+
+def is_banquet_configured() -> bool:
+    """判断 Banquet 源码与权重文件是否就绪。"""
+    try:
+        resolve_banquet_paths()
+        return True
+    except RuntimeError:
+        return False

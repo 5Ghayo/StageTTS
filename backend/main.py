@@ -188,6 +188,7 @@ def health_check() -> Dict[str, object]:
             "tts_url": config.TTS_API_URL,
             "llm_configured": config.is_llm_configured(),
             "hf_token_configured": config.is_hf_token_configured(),
+            "banquet_configured": config.is_banquet_configured(),
             "env_parse_python": config.ENV_PARSE_PYTHON,
         },
     }
@@ -378,7 +379,6 @@ def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
             target_lang=req.target_lang,
             compute_type=req.compute_type,
             mode=mode,
-            allow_demucs_cpu=req.allow_demucs_cpu,
         )
         return load_project_script(safe_id)
 
