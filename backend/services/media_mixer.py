@@ -132,6 +132,22 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
     return dubbed_path
 
 
+def _amix_normalize_option() -> str:
+    """Return the amix no-renormalization option supported by the local FFmpeg."""
+    try:
+        probe = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "filter=amix"],
+            capture_output=True, text=True, errors="replace", timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "normalize=0"
+    text = probe.stdout + probe.stderr
+    if "normalize" in text:
+        return "normalize=0"
+    # Older amix builds always normalize by active inputs; compensate after mixing.
+    return "weights=1 1,volume=2"
+
+
 def _run_ffmpeg_cmd(cmd: List[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
@@ -195,6 +211,7 @@ def mix_and_render(
             source_video_path = candidate_video
 
     bgm_vol = max(0.0, min(2.0, float(script.media.bgm_volume)))
+    amix_gain = _amix_normalize_option()
 
     # 模式 B 虚拟舞台若无源视频文件，导出完整混音音频 output.wav
     if script.mode == "virtual_stage" and source_video_path is None:
@@ -208,7 +225,7 @@ def mix_and_render(
                 "-i",
                 str(bgm_path),
                 "-filter_complex",
-                f"[1:a]volume={bgm_vol:.3f}[bgm];[0:a][bgm]amix=inputs=2:duration=first:normalize=0[aout]",
+                f"[1:a]volume={bgm_vol:.3f}[bgm];[0:a][bgm]amix=inputs=2:duration=first:{amix_gain}[aout]",
                 "-map",
                 "[aout]",
                 str(output_wav),
@@ -233,7 +250,7 @@ def mix_and_render(
         base_inputs.extend(["-i", str(bgm_path)])
         audio_filter = (
             f"[2:a]volume={bgm_vol:.3f}[bgm];"
-            "[1:a][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+            f"[1:a][bgm]amix=inputs=2:duration=first:{amix_gain}[aout]"
         )
         audio_map = ["-map", "0:v:0", "-map", "[aout]"]
     else:

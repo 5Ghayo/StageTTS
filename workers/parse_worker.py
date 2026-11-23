@@ -320,10 +320,20 @@ def _finish_four_stems(output_dir: Path, project_id: str) -> Tuple[Path, Path, C
         raise RuntimeError("影视四轨分离未生成完整的对白、歌声、音乐、音效 WAV 文件。")
 
     bgm_path = output_dir / "bgm.wav"
+    amix_filter = "amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.98:level=0:latency=1"
+    # Some Windows FFmpeg builds expose an older amix filter without `normalize`.
+    # In that case `weights=1 1 1` keeps unit gain without volume renormalization.
+    probe = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-h", "filter=amix"],
+        capture_output=True, text=True, errors="replace", timeout=30,
+    )
+    if "normalize" not in (probe.stdout + probe.stderr):
+        amix_filter = "amix=inputs=3:duration=first:weights=1 1 1,alimiter=limit=0.98:level=0:latency=1"
+        _log("Stage1", "当前 FFmpeg 的 amix 不支持 normalize，已改用 weights=1 1 1 保持单位增益")
     proc = subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-y",
          "-i", str(tracks["effects"]), "-i", str(tracks["music"]), "-i", str(tracks["singing"]),
-         "-filter_complex", "amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.98:level=0:latency=1",
+         "-filter_complex", amix_filter,
          "-c:a", "pcm_s16le", str(bgm_path)],
         capture_output=True,
         text=True,
