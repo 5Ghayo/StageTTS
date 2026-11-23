@@ -24,6 +24,11 @@ from backend.schemas import (
 from backend.services.media_mixer import apply_gentle_tempo
 from backend.services.references import automatic_reference
 from backend.services.task_runner import ensure_tts_running, gpu_task_guard
+from backend.services.text_normalization import (
+    deterministic_seed,
+    normalize_tts_lang,
+    prepare_tts_text,
+)
 
 
 class TTSServiceUnavailableError(RuntimeError):
@@ -159,15 +164,24 @@ def _synthesize_single_line(
     ref: EmotionRef,
     ref_path: Path,
     out_wav: Path,
+    glossary: dict[str, str] | None = None,
 ) -> None:
+    text_lang = normalize_tts_lang(seg.target_lang)
+    prompt_lang = normalize_tts_lang(ref.lang)
     payload = {
-        "text": seg.target_text,
-        "text_lang": seg.target_lang or "zh",
+        "text": prepare_tts_text(seg.target_text, text_lang, glossary),
+        "text_lang": text_lang,
         "ref_audio_path": str(ref_path),
-        "prompt_text": ref.text,
-        "prompt_lang": ref.lang or "zh",
+        "prompt_text": prepare_tts_text(ref.text, prompt_lang),
+        "prompt_lang": prompt_lang,
         "speed_factor": 1.0,
         "media_type": "wav",
+        "text_split_method": "cut0",
+        "fragment_interval": 0.0,
+        "batch_size": 1,
+        "seed": deterministic_seed(seg.id, seg.target_text, ref.text, ref_path.name),
+        "parallel_infer": True,
+        "repetition_penalty": 1.35,
     }
     try:
         resp = client.post(
@@ -222,7 +236,6 @@ def synthesize_segments_grouped(
 
     tts_dir = config.WORKSPACE_DIR / script.project_id / "tts"
     tts_dir.mkdir(parents=True, exist_ok=True)
-
     synthesized_ids: List[int] = []
     errors: List[str] = []
 
@@ -271,7 +284,7 @@ def synthesize_segments_grouped(
                             raise RuntimeError("请配置角色参考音及逐字稿，或确认同角色的原文、说话人和源语种")
                         ref_obj, ref_path = resolved
                         raw_wav = tmp_dir / out_name
-                        _synthesize_single_line(session, seg, ref_obj, ref_path, raw_wav)
+                        _synthesize_single_line(session, seg, ref_obj, ref_path, raw_wav, script.glossary)
                         finished_wav = apply_gentle_tempo(raw_wav, seg.speed_factor, tmp_dir)
                         actual_duration = measure_wav_duration(finished_wav)
                         if actual_duration <= 0:

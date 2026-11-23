@@ -8,10 +8,12 @@ from typing import Any
 
 MAX_SECONDS = 14.0
 PREFERRED_SECONDS = 8.0
-MERGE_SECONDS = 2.5
-MERGE_GAP_SECONDS = 0.45
+MIN_FRAGMENT_SECONDS = 2.5
+MERGE_GAP_SECONDS = 0.65
 PAUSE_SECONDS = 0.65
 PUNCTUATION = re.compile(r"""[.!?;,:。！？；，、：…]["'”’）)\]]*$""")
+TERMINAL_PUNCTUATION = re.compile(r"""[.!?。！？…]["'”’）)\]]*$""")
+LATIN_CHAR = re.compile(r"[A-Za-z0-9]")
 DEFAULT_SPEAKER = "SPEAKER_00"
 
 
@@ -60,7 +62,7 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
         if words[i - 1]["end"] is not None and words[i]["start"] is not None
         and words[i - 1]["end"] <= words[i]["start"]
     ] if offsets else []
-    # WhisperX's segment-level speaker can conceal a word-level transition.
+
     def speaker_at(index: int) -> str | None:
         return words[index]["speaker"] or rank_speaker
 
@@ -87,8 +89,10 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
                 or part_end - part_start > MAX_SECONDS
             ),
             speaker_needs_review=(
-                len(speakers) != 1 or None in speakers
-                or any(word["start"] is not None and not word["speaker"] for word in part_words)
+                diarized and (
+                    len(speakers) != 1 or None in speakers
+                    or any(word["start"] is not None and not word["speaker"] for word in part_words)
+                )
             ),
         )
 
@@ -118,7 +122,31 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
     return segments
 
 
-def _merge_short_segments(segments: list[dict]) -> list[dict]:
+def _join_text(left: str, right: str) -> str:
+    left = left.rstrip()
+    right = right.lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if bool(LATIN_CHAR.search(left[-1])) and bool(LATIN_CHAR.search(right[0])):
+        return f"{left} {right}"
+    return f"{left}{right}"
+
+
+def _review_flags(seg: dict, diarized: bool) -> tuple[bool, bool]:
+    words = seg.get("words") or []
+    starts = [word["start"] for word in words if word["start"] is not None]
+    alignment = (
+        not words or len(starts) != len(words) or starts != sorted(starts)
+        or seg["end"] - seg["start"] > MAX_SECONDS
+    )
+    speakers = {word.get("speaker") for word in words if word.get("start") is not None}
+    speaker_review = diarized and (len(speakers) != 1 or None in speakers)
+    return alignment, speaker_review
+
+
+def _merge_short_segments(segments: list[dict], *, diarized: bool) -> list[dict]:
     """合并过短的同角色相邻片段，避免 ASR/VAD 把一句话切成碎片。"""
     merged: list[dict] = []
     for seg in segments:
@@ -127,32 +155,37 @@ def _merge_short_segments(segments: list[dict]) -> list[dict]:
             continue
         prev = merged[-1]
         gap = round(seg["start"] - prev["end"], 3)
-        combined_text = f"{prev['orig_text']}{seg['orig_text']}".strip()
+        short_piece = (
+            prev["end"] - prev["start"] < MIN_FRAGMENT_SECONDS
+            or seg["end"] - seg["start"] < MIN_FRAGMENT_SECONDS
+        )
+        review_ok = not diarized or (
+            not prev["alignment_needs_review"] and not prev["speaker_needs_review"]
+            and not seg["alignment_needs_review"] and not seg["speaker_needs_review"]
+        )
         can_merge = (
             prev["speaker"] == seg["speaker"]
             and 0 <= gap <= MERGE_GAP_SECONDS
             and (seg["end"] - prev["start"]) <= MAX_SECONDS
-            and (prev["end"] - prev["start"]) < MERGE_SECONDS
-            and not PUNCTUATION.search(prev["orig_text"].rstrip())
-            and not prev["alignment_needs_review"]
-            and not prev["speaker_needs_review"]
-            and not seg["alignment_needs_review"]
-            and not seg["speaker_needs_review"]
-            and bool(combined_text)
+            and short_piece
+            and not TERMINAL_PUNCTUATION.search(prev["orig_text"].rstrip())
+            and review_ok
         )
         if not can_merge:
             merged.append(seg)
             continue
         combined = dict(prev)
         combined["end"] = seg["end"]
-        combined["orig_text"] = combined_text
+        combined["orig_text"] = _join_text(prev["orig_text"], seg["orig_text"])
         combined["words"] = [*prev.get("words", []), *seg.get("words", [])]
+        combined["alignment_needs_review"], combined["speaker_needs_review"] = _review_flags(combined, diarized)
         merged[-1] = combined
     return merged
 
 
 def normalize_segments(raw_segments: list[dict], *, diarized: bool = False) -> list[dict]:
     segments = [part for raw in raw_segments for part in _split_segment(raw, diarized)]
-    segments = _merge_short_segments(segments)
+    segments.sort(key=lambda item: (item["start"], item["end"]))
+    segments = _merge_short_segments(segments, diarized=diarized)
     segments.sort(key=lambda item: (item["start"], item["end"]))
     return [dict(segment, id=index) for index, segment in enumerate(segments)]

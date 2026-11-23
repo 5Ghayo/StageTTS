@@ -59,6 +59,12 @@ def _rewrite_overflow(
             "fill_ratio": check.fill_ratio,
             "actual_duration_sec": check.actual_duration,
             "overflow_seconds": check.overflow_seconds,
+            "constraints": {
+                "preserve": "实体、数字、否定、指代、术语必须保留；min_units/max_units 是软约束",
+                "too_long": "只删冗余口气词/重复衔接，不删核心信息",
+                "too_short": "只自然补足语气和衔接，不编造新事实",
+                "glossary": context.script.glossary,
+            },
         })
     entries = complete_dialogue(client, DURATION_REFLECTION_PROMPT, context.payload(payload))
     requested = {check.segment_id for check in checks}

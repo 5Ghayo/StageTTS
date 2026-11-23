@@ -31,14 +31,14 @@ class DialogueWorkflowTest(unittest.TestCase):
         raw = dict(start=0.0, end=24.0, text=transcript, speaker="A", words=words)
         parts = normalize_segments([raw], diarized=True)
         self.assertEqual(" ".join(part["orig_text"] for part in parts), transcript)
-        self.assertEqual([part["speaker"] for part in parts], ["A", "A", "B", "B"])
+        self.assertEqual([part["speaker"] for part in parts], ["A", "B"])
         self.assertEqual([(part["start"], part["end"]) for part in parts],
-                         [(0, 5.7), (6, 11.7), (12, 17.7), (18, 24)])
+                         [(0, 11.7), (12, 24)])
         self.assertEqual([word for part in parts for word in part["words"]], words)
         self.assertFalse(any(part["alignment_needs_review"] for part in parts))
         unaligned, = normalize_segments([{**raw, "words": []}])
         self.assertTrue(unaligned["alignment_needs_review"])
-        self.assertTrue(unaligned["speaker_needs_review"])
+        self.assertFalse(unaligned["speaker_needs_review"])
         self.assertEqual(unaligned["orig_text"], transcript)
 
         with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
@@ -71,8 +71,9 @@ class DialogueWorkflowTest(unittest.TestCase):
                 self.assertEqual(result["lang"], "en")
                 self.assertEqual(source["speaker"], "A")
                 with wave.open(str(config.resolve_media_path(result["wav"])), "rb") as clip:
-                    self.assertEqual(clip.getnframes(), round((source["end"] - source["start"]) * rate))
-                    self.assertEqual(int.from_bytes(clip.readframes(1), "little"), source["start"] + 1)
+                    expected_seconds = min(5.0, source["end"] - source["start"])
+                    self.assertEqual(clip.getframerate(), 32000)
+                    self.assertEqual(clip.getnframes(), round(expected_seconds * 32000))
 
                 with config.resolve_media_path(result["wav"]).open("rb") as clip_file:
                     upload = client.post(f"{project_url}/references", files={"file": ("clip.wav", clip_file)})

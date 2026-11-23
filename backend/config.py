@@ -154,6 +154,7 @@ TTS_STARTUP_TIMEOUT_SEC: float = settings.tts_startup_timeout_sec
 ENV_PARSE_PYTHON: str = settings.env_parse_python.strip() or "python"
 WHISPER_MODEL: str = settings.whisper_model.strip() or "large-v3"
 WHISPER_COMPUTE_TYPE: str = settings.whisper_compute_type.strip() or "float16"
+TRANSLATION_CHUNK_SIZE: int = 25
 TTS_API_URL: str = settings.tts_api_url.rstrip("/")
 TTS_DEFAULT_GPT_WEIGHTS: str = settings.tts_default_gpt_weights.strip()
 TTS_DEFAULT_SOVITS_WEIGHTS: str = settings.tts_default_sovits_weights.strip()

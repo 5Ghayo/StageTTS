@@ -45,7 +45,7 @@ class SynthesisTest(unittest.TestCase):
 
         durations = {"long": 1.5, "short": 0.85, "stubborn": 1.8, "retry": 1.6, "shorter": 1.45}
 
-        def fake_tts(_session, segment, _ref, _ref_path, output):
+        def fake_tts(_session, segment, _ref, _ref_path, output, _glossary=None):
             write_wav(output, durations[segment.target_text])
 
         context.enter_context(patch.object(tts_client, "_synthesize_single_line", side_effect=fake_tts))
