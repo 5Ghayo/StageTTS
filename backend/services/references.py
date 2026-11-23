@@ -145,9 +145,10 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
         with wave.open(str(source), "rb") as vocals:
             rate, channels, width = vocals.getframerate(), vocals.getnchannels(), vocals.getsampwidth()
             for window_start, window_end, transcript, segment_ids in windows:
-                start = round(window_start * rate)
-                end = round(window_end * rate)
-                if end > vocals.getnframes() or not MIN_REFERENCE_SECONDS * rate <= end - start <= MAX_REFERENCE_SECONDS * rate:
+                start = max(0, round(window_start * rate))
+                # Segment timestamps can extend a few ms past the decoded audio length.
+                end = min(round(window_end * rate), vocals.getnframes())
+                if end - start < MIN_REFERENCE_SECONDS * rate:
                     continue
                 key = (str(source), source.stat().st_mtime_ns, start, end, channels, width)
                 name = f"auto_{hashlib.sha256(repr(key).encode()).hexdigest()[:24]}.wav"
