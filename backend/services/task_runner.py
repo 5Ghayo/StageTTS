@@ -399,7 +399,6 @@ def run_parse_worker(
     target_lang: str = "zh",
     compute_type: Optional[str] = None,
     mode: str = "video_dubbing",
-    allow_demucs_cpu: bool = False,
 ) -> Path:
     """以独立子进程启动 workers/parse_worker.py（运行在 env_parse）。
 
@@ -440,8 +439,6 @@ def run_parse_worker(
         "--mode",
         mode,
     ]
-    if allow_demucs_cpu:
-        cmd.append("--allow-demucs-cpu")
 
     sub_env = os.environ.copy()
     sub_env["PYTHONUTF8"] = "1"

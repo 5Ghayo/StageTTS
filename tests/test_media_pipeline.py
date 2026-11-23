@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,8 +18,8 @@ from backend import config
 from backend.agent import orchestrator
 from backend.agent.tools import save_project_script
 from backend.main import app
-from backend.schemas import MediaInfo, ProjectScript, Segment
-from backend.services import media_mixer, synthesis, task_runner, tts_client
+from backend.schemas import CinematicStems, MediaInfo, ProjectScript, Segment
+from backend.services import media_mixer, references, synthesis, task_runner, tts_client
 from workers import demucs_stage, parse_worker
 
 
@@ -259,13 +260,62 @@ class ParseTest(unittest.TestCase):
                 patch.object(demucs_stage, "_sample_gpu_memory"),
                 patch.object(demucs_stage, "_run_demucs", side_effect=demucs_stage.DemucsError("CUDA out of memory")) as run,
             ):
-                vocals, bgm = parse_worker._stage_demucs(source, root, "cuda", False, False)
-                self.assertIsNone(bgm)
-                self.assertEqual(vocals.read_bytes(), source.read_bytes())
+                self.assertIsNone(demucs_stage.separate_stems(source, root, "cuda", False, messages.append))
                 self.assertEqual([call.args[2] for call in run.call_args_list], ["cuda", "cuda"])
                 run.reset_mock()
-                parse_worker._stage_demucs(source, root, "cuda", False, True)
+                demucs_stage.separate_stems(source, root, "cuda", True, messages.append)
                 self.assertEqual([call.args[2] for call in run.call_args_list], ["cuda", "cuda", "cpu"])
+
+    def test_banquet_retries_cuda_oom_on_cpu(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src" / "models" / "bandit" / "bandit.py"
+            source.parent.mkdir(parents=True)
+            source.touch()
+            checkpoint = root / "banquet-split.ckpt"
+            checkpoint.touch()
+            cuda = subprocess.CompletedProcess([], 1, stderr="CUDA out of memory")
+            cpu = subprocess.CompletedProcess([], 0, stderr="")
+            with (
+                patch.dict(os.environ, BANQUET_ROOT=str(root), BANQUET_CHECKPOINT=str(checkpoint)),
+                patch.object(parse_worker.subprocess, "run", side_effect=[cuda, cpu]) as run,
+            ):
+                parse_worker._stage_banquet(root / "input.wav", root, "cuda")
+            self.assertEqual([call.args[0][-1] for call in run.call_args_list], ["cuda", "cpu"])
+
+    def test_automatic_reference_accepts_only_project_banquet_dialogue(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(config, "WORKSPACE_DIR", Path(directory)):
+            dialogue = Path(directory) / "demo" / "cinematic-example" / "dialogue.wav"
+            dialogue.parent.mkdir(parents=True)
+            write_wav(dialogue, 5)
+            root = "/workspace/demo/cinematic-example"
+            script = ProjectScript(
+                project_id="demo",
+                source_lang="ja",
+                media=MediaInfo(
+                    duration=5,
+                    vocals_wav=f"{root}/dialogue.wav",
+                    cinematic_stems=CinematicStems(
+                        dialogue=f"{root}/dialogue.wav",
+                        singing=f"{root}/singing.wav",
+                        music=f"{root}/music.wav",
+                        effects=f"{root}/effects.wav",
+                    ),
+                ),
+                segments=[
+                    Segment(id=0, start=0, end=4, speaker="A", orig_text="大丈夫。",
+                            alignment_needs_review=False, speaker_needs_review=False),
+                ],
+            )
+            preview = references.automatic_reference(script, "A")
+            self.assertIsNotNone(preview)
+            self.assertTrue(config.resolve_media_path(preview.wav).is_file())
+            foreign = Path(directory) / "other" / "cinematic-example" / "dialogue.wav"
+            foreign.parent.mkdir(parents=True)
+            write_wav(foreign, 5)
+            script.media.vocals_wav = "/workspace/other/cinematic-example/dialogue.wav"
+            script.media.cinematic_stems.dialogue = script.media.vocals_wav
+            self.assertIsNone(references.automatic_reference(script, "A"))
 
     def test_config_imports_without_pydantic_settings(self):
         proc = subprocess.run(

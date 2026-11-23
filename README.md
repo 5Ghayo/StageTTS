@@ -48,7 +48,7 @@
   ↓
 Stage0 FFmpeg 抽音频
   ↓
-Stage1 Demucs 分离人声 + BGM
+Stage1 Banquet 分离对白、歌声、伴奏和音效
   ↓
 Stage2 WhisperX 识别 + 对齐
   ↓
@@ -72,7 +72,7 @@ FFmpeg 混音导出 output.mp4
 | 模块 | 当前状态 | 说明 |
 | :--- | :---: | :--- |
 | `script.json` 数据契约 | 已完成 | Pydantic v2 与 TypeScript 类型 1:1 对齐 |
-| 4 阶段解析流水线 | 已完成并实测 | FFmpeg → Demucs → WhisperX → pyannote → LLM 标注，已通过英文/日语真实视频测试；ASR 片段会在说话人边界强制切分，过长片段才按语义/停顿切开，过短同角色片段会合并，避免“切得太碎”。 |
+| 4 阶段解析流水线 | 已接入 | FFmpeg → Banquet → WhisperX → pyannote → LLM 标注。Banquet 已验证 CPU 短片分轨和导出。ASR 片段会在说话人边界强制切分，过长片段才按语义/停顿切开，过短同角色片段会合并，避免“切得太碎”。 |
 | GPT-SoVITS 分组配音 | 已完成 | 按角色切换权重、按情绪选择参考音，缺失时使用与原文对应的同角色原声片段 |
 | 8GB 显存串行接力 | 已完成 | 解析前释放 GPT-SoVITS，配音时按需拉起 |
 | 配音时长闭环 | 已完成 | 全部配音、全管线和智能体统一支持双向质检：>1.15x 自动精简，<0.8x 自动自然补足；最多两轮，最后才用 0.85–1.15x 温和变速兜底，试听与导出使用同一份调速后的音频 |
@@ -175,7 +175,7 @@ Stage4 现在是**一次性全文翻译**：
 
 1. `characters[speaker].emotion_refs[emotion]` 中人工上传/绑定的参考音优先级最高；
 2. 没有人工参考音时，按 `segment.emotion → neutral → 任意可用情绪` 回退；
-3. 仍然没有时，才调用 `automatic_reference()` 从 `vocals.wav` 生成自动候选；
+3. 仍然没有时，才调用 `automatic_reference()` 从 `media.vocals_wav` 指向的音轨 生成自动候选；
 4. 自动候选只选择**原文已校对、说话人已确认、3–10 秒、没有与其他说话人重叠**的同角色连续原句；
 5. 候选优先选一段完整连续台词，其次选接近 5 秒的片段；
 6. 自动候选的 `prompt_text` 仍来自 `orig_text`，所以如果 WhisperX 原文错得厉害，建议人工上传参考音并填写逐字稿；
@@ -193,7 +193,7 @@ Stage4 现在是**一次性全文翻译**：
 | Node.js | 前端 Vite 项目 | 必须 | Node.js 20 LTS |
 | Python backend | 跑 FastAPI 后端 | 必须 | Python 3.10+ |
 | GPT-SoVITS | 生成配音 | 完整流程必须 | RTX 50 系列请用 CUDA 12.8 适配版 |
-| env_parse | 跑 Demucs / WhisperX / pyannote | 完整解析必须 | Python 3.12 + torch cu128（开发机方案） |
+| env_parse | 跑 Banquet / WhisperX / pyannote | 完整解析必须 | Python 3.12 + torch cu128（开发机方案） |
 | HuggingFace Token | 下载 pyannote 模型 | 说话人分离需要 | 免费，但要在网页同意协议 |
 | LLM 网关 | 翻译、情绪、动作标注、Agent | 强烈建议 | OpenAI-compatible API 即可 |
 
@@ -251,7 +251,7 @@ WHISPER_COMPUTE_TYPE=float16
 
 可以启动后端和前端，但不建议跑完整流水线：
 
-- Demucs 会回退 CPU，速度非常慢；
+- Banquet 会使用 CPU，长视频分轨耗时较长；
 - WhisperX 也能 CPU，但长视频体验很差；
 - GPT-SoVITS 实时合成基本不可用。
 
@@ -503,7 +503,7 @@ cd /d C:\Project\GPT-SoVITS-v5-20261006nvidia50x0
 
 `env_parse` 专门跑：
 
-- Demucs
+- Banquet 四轨分离
 - WhisperX
 - pyannote
 - 词级对齐
@@ -537,10 +537,18 @@ F:\Download\StageTTS\env_parse\python.exe -c "import torch; print(torch.__versio
 #### 安装解析依赖
 
 ```powershell
-F:\Download\StageTTS\env_parse\python.exe -m pip install demucs whisperx pyannote.audio==3.4.0 openai pydantic python-dotenv
+F:\Download\StageTTS\env_parse\python.exe -m pip install whisperx pyannote.audio==3.4.0 openai pydantic python-dotenv pytorch-lightning librosa soundfile
 ```
 
 如果下载慢，可以配置你所在网络允许的镜像或代理。
+
+#### 配置 Banquet 四轨分离
+
+1. 获取 [bandit-v2 源码](https://github.com/kwatcharasupat/bandit-v2)，使用提交 `d5563d9031`。
+2. 下载 [Netflix 发布的官方权重](https://zenodo.org/records/13327983) `banquet-split.ckpt`，MD5 为 `4ac581d6792740f5b7be8e0a3f73c8ea`。
+3. 在 `backend/.env` 中设置 `BANQUET_ROOT` 为源码目录、`BANQUET_CHECKPOINT` 为权重文件。
+
+解析时自动运行 Banquet。「项目媒体素材」可分别试听四轨。对白送入识别和配音参考，歌声、伴奏和音效合成导出背景。
 
 #### 设置缓存路径
 
@@ -553,7 +561,8 @@ TORCH_HOME=F:/Download/StageTTS/torch_cache
 PIP_CACHE_DIR=F:/Download/StageTTS/pip_cache
 ```
 
-首次运行解析时会自动下载模型。  
+首次运行识别和对齐时会自动下载对应模型。
+
 日语词级对齐模型较大，网络不稳定时可能降级为句级时间戳，但不会阻断整个流程。
 
 ---
@@ -682,9 +691,9 @@ ffmpeg -version
 
 ---
 
-### Q4：Demucs 长素材与 CUDA 显存问题
+### Q4：Banquet 长素材与 CUDA 显存问题
 
-长素材使用 CUDA 分块分离（OOM 时自动缩小分块重试）。若手动启动的本机 GPT-SoVITS 仍在线，请先停止该服务再解析。CUDA 不可用或失败时默认继续使用未分离音轨，也可在「人声分离」节点中显式启用 CPU 分离。
+Banquet 将长音频分块处理，优先使用 CUDA，CUDA 不可用或显存不足时使用 CPU。若手动启动的本机 GPT-SoVITS 仍在线，请先停止该服务再解析。
 
 建议：
 

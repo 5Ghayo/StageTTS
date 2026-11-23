@@ -227,7 +227,7 @@ export interface paths {
         put?: never;
         /**
          * Synthesize Project Segments
-         * @description 分组配音并执行时长闭环，返回最终剧本和剩余超长。
+         * @description 分组配音并执行双向时长闭环，返回最终剧本和仍偏离时间槽的片段。
          */
         post: operations["synthesize_project_segments_api_projects__project_id__synthesize_post"];
         delete?: never;
@@ -409,6 +409,17 @@ export interface components {
             /** @description 虚拟演播室形象配置 */
             avatar?: components["schemas"]["AvatarConfig"] | null;
         };
+        /** CinematicStems */
+        CinematicStems: {
+            /** Dialogue */
+            dialogue: string;
+            /** Singing */
+            singing: string;
+            /** Music */
+            music: string;
+            /** Effects */
+            effects: string;
+        };
         /**
          * EmotionRef
          * @description 单种情绪对应的 GPT-SoVITS 参考音频元数据。
@@ -486,14 +497,16 @@ export interface components {
             source_video?: string | null;
             /**
              * Vocals Wav
-             * @description Demucs 分离纯人声 URL
+             * @description 识别和参考音使用的对白轨 URL
              */
             vocals_wav?: string | null;
             /**
              * Bgm Wav
-             * @description Demucs 分离背景伴奏 URL
+             * @description 歌声、伴奏和音效合成的背景轨 URL
              */
             bgm_wav?: string | null;
+            /** @description 影视四轨分离结果 */
+            cinematic_stems?: components["schemas"]["CinematicStems"] | null;
             /**
              * Output Video
              * @description 最终混音成片 URL
@@ -529,12 +542,6 @@ export interface components {
              * @enum {string}
              */
             compute_type: "float16" | "int8";
-            /**
-             * Allow Demucs Cpu
-             * @description 允许使用 CPU 运行 Demucs，可能耗时较长
-             * @default false
-             */
-            allow_demucs_cpu: boolean;
         };
         /**
          * ParseStatusResponse
@@ -795,7 +802,7 @@ export interface components {
         };
         /**
          * SegmentDurationCheck
-         * @description 单句时长质检报告（用于时长约束反思闭环）。
+         * @description 单句时长质检报告（用于双向时长约束反思闭环）。
          */
         SegmentDurationCheck: {
             /** Segment Id */
@@ -806,7 +813,10 @@ export interface components {
             actual_duration: number;
             /** Fill Ratio */
             fill_ratio: number;
-            /** Duration State */
+            /**
+             * Duration State
+             * @enum {string}
+             */
             duration_state: "too_short" | "normal" | "too_long";
             /** Overflow Ratio */
             overflow_ratio: number;

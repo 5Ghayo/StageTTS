@@ -378,7 +378,6 @@ def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
             target_lang=req.target_lang,
             compute_type=req.compute_type,
             mode=mode,
-            allow_demucs_cpu=req.allow_demucs_cpu,
         )
         return load_project_script(safe_id)
 

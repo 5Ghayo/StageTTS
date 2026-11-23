@@ -138,7 +138,7 @@ export function translateProject(projectId: string): Promise<TranslationResponse
 
 export function parseProjectMedia(
   projectId: string,
-  options: { target_lang: string; compute_type: "float16" | "int8"; allow_demucs_cpu?: boolean },
+  options: { target_lang: string; compute_type: "float16" | "int8" },
 ): Promise<ProjectScript> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/parse", {
@@ -146,7 +146,6 @@ export function parseProjectMedia(
       body: {
         target_lang: options.target_lang,
         compute_type: options.compute_type,
-        allow_demucs_cpu: options.allow_demucs_cpu ?? false,
       },
     }),
   );

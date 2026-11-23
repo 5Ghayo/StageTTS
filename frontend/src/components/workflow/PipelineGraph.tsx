@@ -49,7 +49,7 @@ const PipelineGraphInner: React.FC = () => {
           type="button"
           onClick={() => void runPipeline({ parseOnly: true })}
           disabled={isPipelineRunning}
-          title="执行真实 4 阶段解析（Demucs + WhisperX + pyannote + LLM），生成剧本供审校"
+          title="执行真实 4 阶段解析（Banquet + WhisperX + pyannote + LLM），生成剧本供审校"
           className="flex h-7 items-center gap-1.5 rounded-[4px] bg-[#3A6EA5] px-2.5 py-1 font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8] disabled:opacity-50"
         >
           <Play className="h-3.5 w-3.5" strokeWidth={1.5} />
