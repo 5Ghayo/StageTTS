@@ -112,6 +112,9 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
             with tts_path.open("rb") as source:
                 raw_clip = AudioSegment.from_wav(source)
             clip = raw_clip
+            slot_ms = max(1, int((seg.end - seg.start) * 1000))
+            if len(clip) > slot_ms:
+                clip = clip[:slot_ms]
             if seg.applied_speed_factor is None:
                 # 旧项目的 WAV 仍沿用导出时变速。
                 speed = seg.speed_factor

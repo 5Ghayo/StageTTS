@@ -100,7 +100,7 @@ const DEFAULT_TRACK_STATES: TrackStates = {
   videoMuted: false,
   dubMuted: false,
   dubSolo: false,
-  vocalsMuted: false,
+  vocalsMuted: true,
   bgmMuted: false,
 };
 

@@ -119,15 +119,16 @@ export function useDubClips(time: number) {
         const src = getCacheBustedUrl(segment.tts_wav, versions[segment.id]) ?? segment.tts_wav;
         const slot = segment.end - segment.start;
         const rate = segment.applied_speed_factor == null ? segment.speed_factor : 1;
+        const audibleEnd = Math.min(segment.end, segment.start + (segment.actual_duration ?? slot) / rate);
         return [
-          { segment, src, rate, end: segment.start + (segment.actual_duration ?? slot) / rate },
+          { segment, src, rate, end: audibleEnd },
         ];
       }),
     [segments, versions],
   );
   return {
     replacesSource: clips.some(
-      ({ segment, end }) => time >= segment.start && time < Math.max(end, segment.end),
+      ({ segment, end }) => time >= segment.start && time < end,
     ),
     upcomingClips: clips.filter(({ segment, end }) => time >= segment.start - 0.5 && time < end),
   };
