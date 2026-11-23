@@ -314,22 +314,60 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
         _log("Stage1", "Banquet CUDA 显存不足，改用 CPU 重试")
 
 
+def _ffmpeg_filter_help(filter_name: str) -> str:
+    """Return `ffmpeg -h filter=<name>` output, or empty text if unavailable."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", f"filter={filter_name}"],
+            capture_output=True, text=True, errors="replace", timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout + proc.stderr if proc.returncode == 0 else ""
+
+
+def _ffmpeg_filter_has_option(help_text: str, option: str) -> bool:
+    for line in help_text.splitlines():
+        name = line.strip().split("<", 1)[0].strip()
+        if name == option:
+            return True
+    return False
+
+
+def _build_bgm_filter(inputs: int = 3) -> str:
+    """Build a BGM mix filter compatible with both old and new FFmpeg builds."""
+    filters: List[str] = []
+    amix_help = _ffmpeg_filter_help("amix")
+    if _ffmpeg_filter_has_option(amix_help, "normalize"):
+        filters.append(f"amix=inputs={inputs}:duration=first:normalize=0")
+    elif _ffmpeg_filter_has_option(amix_help, "weights"):
+        filters.append(f"amix=inputs={inputs}:duration=first:weights={' '.join(['1'] * inputs)}")
+    else:
+        # Legacy amix always renormalizes; compensate approximately by input count.
+        filters.append(f"amix=inputs={inputs}:duration=first")
+        filters.append(f"volume={inputs}")
+
+    limiter_help = _ffmpeg_filter_help("alimiter")
+    if not limiter_help:
+        filters.append("volume=0.98")
+        return ",".join(filters)
+
+    limiter_options = ["limit=0.98"]
+    if _ffmpeg_filter_has_option(limiter_help, "level"):
+        limiter_options.append("level=0")
+    if _ffmpeg_filter_has_option(limiter_help, "latency"):
+        limiter_options.append("latency=1")
+    filters.append("alimiter=" + ":".join(limiter_options))
+    return ",".join(filters)
+
+
 def _finish_four_stems(output_dir: Path, project_id: str) -> Tuple[Path, Path, CinematicStems]:
     tracks = {stem: output_dir / f"{stem}.wav" for stem in ("dialogue", "singing", "music", "effects")}
     if not all(path.is_file() and path.stat().st_size > 44 for path in tracks.values()):
         raise RuntimeError("影视四轨分离未生成完整的对白、歌声、音乐、音效 WAV 文件。")
 
     bgm_path = output_dir / "bgm.wav"
-    amix_filter = "amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.98:level=0:latency=1"
-    # Some Windows FFmpeg builds expose an older amix filter without `normalize`.
-    # In that case `weights=1 1 1` keeps unit gain without volume renormalization.
-    probe = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-h", "filter=amix"],
-        capture_output=True, text=True, errors="replace", timeout=30,
-    )
-    if "normalize" not in (probe.stdout + probe.stderr):
-        amix_filter = "amix=inputs=3:duration=first:weights=1 1 1,alimiter=limit=0.98:level=0:latency=1"
-        _log("Stage1", "当前 FFmpeg 的 amix 不支持 normalize，已改用 weights=1 1 1 保持单位增益")
+    amix_filter = _build_bgm_filter(3)
     proc = subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-y",
          "-i", str(tracks["effects"]), "-i", str(tracks["music"]), "-i", str(tracks["singing"]),
