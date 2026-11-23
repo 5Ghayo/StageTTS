@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from backend import config
-from backend.schemas import ProjectScript, ReferencePreview, Segment
+from backend.schemas import AlignedWord, ProjectScript, ReferencePreview, Segment
 from backend.services.text_normalization import normalize_tts_lang, prepare_tts_text
 
 MIN_REFERENCE_SECONDS = 3
@@ -93,16 +93,79 @@ def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]
     ))
 
 
+def _word_char_spans(text: str, words: list[AlignedWord]) -> list[tuple[int, int]] | None:
+    """将 Segment.words 逐词映射回 orig_text 的字符切片范围，失败说明词级对齐缺失或已过期。"""
+    if not words or not text:
+        return None
+    letters = [(offset, char) for offset, char in enumerate(text) if not char.isspace()]
+    compact = "".join(char for _, char in letters)
+    cursor = 0
+    spans: list[tuple[int, int]] = []
+    for word in words:
+        token = "".join(word.word.split())
+        if not token or not compact.startswith(token, cursor):
+            return None
+        start_char = letters[cursor][0]
+        cursor += len(token)
+        end_char = letters[cursor - 1][0] + 1
+        spans.append((start_char, end_char))
+    return spans if cursor == len(compact) else None
+
+
 def _trimmed_transcript(seg: Segment, start: float, end: float) -> str:
     """Prefer the exact words in the trim window, but fall back to reviewed full text."""
-    words = [
-        word.word.strip()
-        for word in seg.words
+    spans = _word_char_spans(seg.orig_text, seg.words)
+    if spans is None:
+        return seg.orig_text.strip()
+    indices = [
+        idx
+        for idx, word in enumerate(seg.words)
         if word.word.strip()
-        and word.start is not None and word.end is not None
-        and word.start >= start - 0.001 and word.end <= end + 0.001
+        and word.start is not None
+        and word.end is not None
+        and word.start >= start - 0.001
+        and word.end <= end + 0.001
     ]
-    return " ".join(words).strip() or seg.orig_text.strip()
+    if not indices:
+        return seg.orig_text.strip()
+    return seg.orig_text[spans[indices[0]][0] : spans[indices[-1]][1]].strip() or seg.orig_text.strip()
+
+
+def _aligned_fallback_window(
+    seg: Segment, ordered: list[Segment], speaker: str,
+) -> tuple[float, float, str] | None:
+    """当长句包含有效词级时间戳时，按词边界截取 3–10 秒（优先 ≤5s 且接近 5s）的无重叠片段。"""
+    if _word_char_spans(seg.orig_text, seg.words) is None:
+        return None
+    words = seg.words
+    candidates: list[tuple[tuple[bool, bool, float], float, float]] = []
+    for left in range(len(words)):
+        w_start = words[left].start
+        if w_start is None or words[left].end is None:
+            continue
+        for right in range(left, len(words)):
+            w_end = words[right].end
+            if words[right].start is None or w_end is None or w_end <= w_start:
+                break
+            dur = round(w_end - w_start, 3)
+            if dur > MAX_REFERENCE_SECONDS:
+                break
+            if dur < MIN_REFERENCE_SECONDS:
+                continue
+            overlaps_other = any(
+                item.start < w_end and item.end > w_start and item.speaker != speaker
+                for item in ordered
+            )
+            if not overlaps_other:
+                candidates.append(((left > 0, dur > 5.0, abs(dur - 5.0)), w_start, w_end))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    _, best_start, best_end = candidates[0]
+    transcript = _trimmed_transcript(seg, best_start, best_end)
+    if not transcript:
+        return None
+    return best_start, best_end, transcript
 
 
 def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview | None:
@@ -119,13 +182,19 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
             [part.id for part in clip],
         ))
     if not windows:
-        for seg in sorted(script.segments, key=lambda item: (item.start, item.id)):
+        ordered = sorted(script.segments, key=lambda item: (item.start, item.id))
+        for seg in ordered:
             if seg.speaker != speaker or seg.speaker_needs_review or not seg.orig_text.strip():
                 continue
+            aligned_window = _aligned_fallback_window(seg, ordered, speaker)
+            if aligned_window is not None:
+                w_start, w_end, transcript = aligned_window
+                windows.append((w_start, w_end, transcript, [seg.id]))
+                break
             duration = min(5.0, max(0.0, seg.end - seg.start))
             if duration >= MIN_REFERENCE_SECONDS:
                 end = round(seg.start + duration, 3)
-                windows.append((seg.start, end, seg.orig_text.strip(), [seg.id]))
+                windows.append((seg.start, end, _trimmed_transcript(seg, seg.start, end), [seg.id]))
                 break
     if not windows:
         return None
