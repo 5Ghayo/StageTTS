@@ -212,9 +212,16 @@ def ensure_tts_running() -> None:
             config.WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
             log_path = config.WORKSPACE_DIR / "_tts_server.log"
             _tts_log_fp = log_path.open("w", encoding="utf-8", errors="replace")
+            # ONNX Runtime pre-allocates large contiguous buffers for mem patterns.
+            # On 15 GB laptops the 635 MB Chinese G2P model then fails with
+            # "bad allocation"; disabling mem patterns makes it load reliably.
+            tts_env = os.environ.copy()
+            tts_env.setdefault("ORT_DISABLE_MEM_PATTERN", "1")
+            tts_env.setdefault("PYTHONUTF8", "1")
             _tts_proc = subprocess.Popen(
                 cmd,
                 cwd=str(config.GPT_SOVITS_ROOT),
+                env=tts_env,
                 stdout=_tts_log_fp,
                 stderr=subprocess.STDOUT,
             )
