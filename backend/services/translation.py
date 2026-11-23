@@ -9,14 +9,15 @@ from collections.abc import Callable, Iterable
 from openai import OpenAI, OpenAIError
 
 from backend import config
-from backend.agent.prompts import DIRECTOR_TRANSLATE_PROMPT
+from backend.agent.prompts import DIRECTOR_TRANSLATE_PROMPT, TRANSLATION_REPAIR_PROMPT
 from backend.schemas import ProjectScript, Segment
 
 EMOTIONS = {"neutral", "angry", "happy", "sad", "whisper"}
 CONTEXT_INSTRUCTIONS = (
     "先通读完整对白理解剧情、角色关系和前后语气，再按原句 id 还原译文。"
     "参照相邻台词、角色语气和术语表；术语出现时使用固定译法。"
-    "每条的时长预算以 max_units 和 unit 表示。只处理 lines 中的片段 ID。"
+    "忠实优先：不得摘要、概括、省略、删词或改成名词短语；min_units/max_units 只是软预算。"
+    "只处理 lines 中的片段 ID。"
 )
 
 
@@ -98,31 +99,125 @@ class DialogueContext:
         }
 
     def payload(self, entries: Iterable[dict]) -> dict:
-        return {"source_lang": self.script.source_lang, "glossary": self.script.glossary, "lines": list(entries)}
+        return {
+            "source_lang": self.script.source_lang,
+            "glossary": self.script.glossary,
+            "constraints": {
+                "fidelity": "逐句完整翻译，不得摘要、概括、省略或改成名词短语",
+                "glossary": "术语按固定译法，不得同义改写",
+                "spoken_form": "中文输出中的英文缩写/单字母必须是可朗读形式",
+                "budget": "min_units/max_units 是软预算，语义完整优先",
+            },
+            "lines": list(entries),
+        }
 
-    def whole_dialogue_payload(self, segments: Iterable[Segment]) -> dict:
-        """构造一次性通读全文的翻译请求，并保留原句 id 供结果还原。"""
+    def whole_dialogue_payload(self, segments: Iterable[Segment], *, full_segments: Iterable[Segment] | None = None) -> dict:
+        """构造通读全文的翻译请求，并保留原句 id 供结果还原。"""
         ordered = sorted(segments, key=lambda seg: (seg.start, seg.id))
+        dialogue_source = sorted(full_segments or segments, key=lambda seg: (seg.start, seg.id))
         lines = [self.entry(seg) for seg in ordered]
         dialogue_lines = []
-        for seg in ordered:
+        for seg in dialogue_source:
             character = self.script.characters.get(seg.speaker)
             speaker_name = character.display_name if character else seg.speaker
             dialogue_lines.append(f"[{seg.id}] {speaker_name}: {seg.orig_text.strip()}")
         target_lang = next((seg.target_lang for seg in ordered if seg.target_lang), "zh")
-        return {
-            "source_lang": self.script.source_lang,
+        payload = self.payload(lines)
+        payload.update({
             "target_lang": target_lang,
-            "glossary": self.script.glossary,
             "translation_mode": "whole_dialogue_once",
             "dialogue": "\n".join(dialogue_lines),
-            "lines": lines,
             "output_requirements": (
                 "先理解整段对白，再逐条还原到 lines 中的 id；"
                 "只输出 JSON 数组，不输出完整译文正文；"
-                "每项必须包含 id、target_text、emotion、action、keep_original。"
+                "每项必须包含 id、target_text、emotion、action、keep_original、self_check。"
             ),
+        })
+        return payload
+
+
+def _self_check_flags(entry: dict) -> tuple[bool, str]:
+    check = entry.get("self_check")
+    if not isinstance(check, dict):
+        return True, ""
+    complete = check.get("semantic_complete")
+    omitted = str(check.get("omitted_info") or "").strip()
+    return complete is not False, omitted
+
+
+def _is_suspicious(seg: Segment, text: str, glossary: dict[str, str] | None = None) -> bool:
+    """启发式判断是否可能摘要化/漏译；不是硬拒绝，只触发一次 repair。"""
+    source = seg.orig_text.strip()
+    candidate = text.strip()
+    if len(source) >= 12 and len(candidate) <= max(2, int(len(source) * 0.25)):
+        return True
+    glossary = glossary or {}
+    stopwords = {"is", "are", "was", "were", "the", "a", "an", "here", "this", "that", "line", "ready"}
+    latin_words = [
+        word for word in re.findall(r"[A-Za-z][A-Za-z\-']+", source)
+        if word.casefold() not in stopwords and len(word) >= 3
+    ]
+    for word in latin_words:
+        if word.casefold() in candidate.casefold():
+            continue
+        mapped = next((target for source_term, target in glossary.items() if source_term.casefold() == word.casefold()), "")
+        if mapped and mapped.casefold() in candidate.casefold():
+            continue
+        if glossary and all(
+            (content.casefold() in candidate.casefold())
+            or any(source_term.casefold() == content.casefold() and target.casefold() in candidate.casefold()
+                   for source_term, target in glossary.items())
+            for content in latin_words
+        ):
+            return False
+        return True
+    return False
+
+
+def _repair_entries(
+    client: OpenAI,
+    context: DialogueContext,
+    suspicious: list[tuple[Segment, str]],
+) -> dict[int, str]:
+    if not suspicious:
+        return {}
+    payload = context.payload([
+        {
+            **context.entry(seg),
+            "previous_target_text": text,
+            "repair_reason": "疑似摘要化或漏译",
         }
+        for seg, text in suspicious
+    ])
+    try:
+        entries = complete_dialogue(client, TRANSLATION_REPAIR_PROMPT, payload)
+    except (OpenAIError, ValueError, IndexError, json.JSONDecodeError):
+        return {}
+    repaired: dict[int, str] = {}
+    for entry in entries:
+        seg_id, text = entry.get("id"), entry.get("target_text")
+        if type(seg_id) is int and isinstance(text, str) and text.strip():
+            repaired[seg_id] = text.strip()
+    return repaired
+
+
+def _apply_translation(seg: Segment, text: str, entry: dict) -> bool:
+    text = text.strip()
+    complete, omitted = _self_check_flags(entry)
+    if complete is False or omitted or not text:
+        return False
+    emotion = entry.get("emotion")
+    emotion = emotion if isinstance(emotion, str) and emotion in EMOTIONS else "neutral"
+    action = entry.get("action")
+    keep_original = entry.get("keep_original") is True
+    needs_resynth = (text, emotion, keep_original) != (seg.target_text, seg.emotion, seg.keep_original)
+    seg.target_text = text
+    seg.emotion = emotion
+    seg.action = action.strip() if isinstance(action, str) and action.strip() else "idle"
+    seg.keep_original = keep_original
+    if needs_resynth:
+        seg.invalidate_audio()
+    return True
 
 
 def translate_script(
@@ -140,35 +235,48 @@ def translate_script(
     if log:
         log(f"调用导演 LLM 一次性通读并翻译全部 {len(segments)} 条台词")
 
-    try:
-        entries = complete_dialogue(client, DIRECTOR_TRANSLATE_PROMPT, payload)
-    except (OpenAIError, ValueError, IndexError, json.JSONDecodeError) as exc:
-        if errors is not None:
-            errors.append(f"全文翻译失败：{exc}")
-        if log:
-            log("全文翻译失败，保留当前台词")
-        return []
-
     translated: list[int] = []
     pending = {seg.id: seg for seg in segments}
-    for entry in entries:
-        seg_id = entry.get("id")
-        text = entry.get("target_text")
-        if type(seg_id) is not int or seg_id not in pending or not isinstance(text, str) or not text.strip():
+    completed_ids: set[int] = set()
+    chunk_size = config.TRANSLATION_CHUNK_SIZE
+    for offset in range(0, len(segments), chunk_size):
+        batch = segments[offset:offset + chunk_size]
+        batch_payload = context.whole_dialogue_payload(batch, full_segments=segments)
+        if log:
+            log(f"调用导演 LLM 通读全文并翻译片段 #{batch[0].id}..#{batch[-1].id}（{len(batch)} 条）")
+        try:
+            entries = complete_dialogue(client, DIRECTOR_TRANSLATE_PROMPT, batch_payload)
+        except (OpenAIError, ValueError, IndexError, json.JSONDecodeError) as exc:
+            if errors is not None:
+                errors.append(f"片段 #{batch[0].id}..#{batch[-1].id} 翻译失败：{exc}")
+            if log:
+                log("本批翻译失败，保留当前台词")
             continue
-        seg = pending.pop(seg_id, None)
-        if seg is None:
+
+        suspicious: list[tuple[Segment, str]] = []
+        for entry in entries:
+            seg_id = entry.get("id")
+            text = entry.get("target_text")
+            if type(seg_id) is not int or seg_id not in pending or seg_id in completed_ids or not isinstance(text, str) or not text.strip():
+                continue
+            seg = pending[seg_id]
+            complete, omitted = _self_check_flags(entry)
+            if not complete or omitted or _is_suspicious(seg, text, script.glossary):
+                suspicious.append((seg, text.strip()))
+                continue
+            if _apply_translation(seg, text, entry):
+                completed_ids.add(seg.id)
+                translated.append(seg.id)
+
+        if not suspicious:
             continue
-        emotion = entry.get("emotion")
-        emotion = emotion if isinstance(emotion, str) and emotion in EMOTIONS else "neutral"
-        action = entry.get("action")
-        keep_original = entry.get("keep_original") is True
-        needs_resynth = (text.strip(), emotion, keep_original) != (seg.target_text, seg.emotion, seg.keep_original)
-        seg.target_text = text.strip()
-        seg.emotion = emotion
-        seg.action = action.strip() if isinstance(action, str) and action.strip() else "idle"
-        seg.keep_original = keep_original
-        if needs_resynth:
-            seg.invalidate_audio()
-        translated.append(seg.id)
-    return translated
+        repaired = _repair_entries(client, context, suspicious)
+        for seg, _old_text in suspicious:
+            text = repaired.get(seg.id)
+            if text and seg.id not in completed_ids and _apply_translation(seg, text, {"id": seg.id, "target_text": text}):
+                completed_ids.add(seg.id)
+                translated.append(seg.id)
+            elif errors is not None:
+                errors.append(f"片段 #{seg.id} 译文疑似摘要化，已保留上一版")
+
+    return sorted(set(translated))

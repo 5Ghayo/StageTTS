@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 import tempfile
+import unicodedata
 import uuid
 import wave
 from pathlib import Path
@@ -12,10 +14,12 @@ from typing import BinaryIO
 
 from backend import config
 from backend.schemas import ProjectScript, ReferencePreview, Segment
+from backend.services.text_normalization import normalize_tts_lang, prepare_tts_text
 
 MIN_REFERENCE_SECONDS = 3
 MAX_REFERENCE_SECONDS = 10
 MAX_REFERENCE_BYTES = 32 * 1024 * 1024
+SUPPORTED_SOURCE_LANGS = {"zh", "en", "ja", "ko", "yue"}
 
 
 def _copy_bounded(source: BinaryIO, target: BinaryIO, max_bytes: int) -> None:
@@ -61,9 +65,7 @@ def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]
     ordered = sorted(script.segments, key=lambda seg: (seg.start, seg.id))
     candidates = []
     for index, seg in enumerate(ordered):
-        if seg.speaker != speaker:
-            continue
-        if seg.alignment_needs_review or seg.speaker_needs_review or not seg.orig_text.strip():
+        if seg.speaker != speaker or seg.alignment_needs_review or seg.speaker_needs_review or not seg.orig_text.strip():
             continue
         clip = []
         for following in range(index, len(ordered)):
@@ -73,26 +75,61 @@ def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]
                     or (clip and not 0 <= round(other.start - clip[-1].end, 3) <= 0.35)):
                 break
             clip.append(other)
-            if other.end - seg.start >= MIN_REFERENCE_SECONDS:
-                # Reject clips that overlap another speaker or an unconfirmed turn.
+            duration = other.end - seg.start
+            if MIN_REFERENCE_SECONDS <= duration <= MAX_REFERENCE_SECONDS:
                 if not any(
                     item.start < other.end and item.end > seg.start
-                    and (item.speaker != speaker or item.speaker_needs_review)
+                    and item.speaker != speaker
                     for item in ordered
                 ):
-                    candidates.append(clip)
-                break
-    # Prefer an uninterrupted sentence, then a clip close to five seconds.
-    return sorted(candidates, key=lambda clip: (len(clip), abs(clip[-1].end - clip[0].start - 5)))
+                    transcript = " ".join(part.orig_text.strip() for part in clip)
+                    if len(re.sub(r"\s+", "", transcript)) <= duration * 150:
+                        candidates.append(clip)
+                    break
+    return sorted(candidates, key=lambda clip: (
+        len(clip),
+        abs(clip[-1].end - clip[0].start - 5),
+        len("".join(part.orig_text for part in clip)),
+    ))
+
+
+def _trimmed_transcript(seg: Segment, start: float, end: float) -> str:
+    """Prefer the exact words in the trim window, but fall back to reviewed full text."""
+    words = [
+        word.word.strip()
+        for word in seg.words
+        if word.word.strip()
+        and word.start is not None and word.end is not None
+        and word.start >= start - 0.001 and word.end <= end + 0.001
+    ]
+    return " ".join(words).strip() or seg.orig_text.strip()
 
 
 def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview | None:
-    lang = (script.source_lang or "").strip().lower().replace("_", "-").split("-")[0]
-    if lang not in {"zh", "en", "ja", "ko", "yue"} or not script.media.vocals_wav:
+    lang = normalize_tts_lang(script.source_lang, default="")
+    if lang not in SUPPORTED_SOURCE_LANGS or not script.media.vocals_wav:
         return None
     candidates = _candidate_clips(script, speaker)
-    if not candidates:
+    windows: list[tuple[float, float, str, list[int]]] = []
+    for clip in candidates:
+        windows.append((
+            clip[0].start,
+            clip[-1].end,
+            " ".join(part.orig_text.strip() for part in clip),
+            [part.id for part in clip],
+        ))
+    if not windows:
+        for seg in sorted(script.segments, key=lambda item: (item.start, item.id)):
+            if seg.speaker != speaker or seg.speaker_needs_review or not seg.orig_text.strip():
+                continue
+            duration = min(5.0, max(0.0, seg.end - seg.start))
+            if duration >= MIN_REFERENCE_SECONDS:
+                end = round(seg.start + duration, 3)
+                windows.append((seg.start, end, seg.orig_text.strip(), [seg.id]))
+                break
+    if not windows:
         return None
+
     try:
         source = config.resolve_media_path(script.media.vocals_wav)
         project_dir = (config.WORKSPACE_DIR / script.project_id).resolve()
@@ -106,13 +143,13 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
         if source != project_dir / "vocals.wav" and not is_banquet_dialogue:
             return None
         with wave.open(str(source), "rb") as vocals:
-            rate = vocals.getframerate()
-            for clip in candidates:
-                start = round(clip[0].start * rate)
-                end = round(clip[-1].end * rate)
+            rate, channels, width = vocals.getframerate(), vocals.getnchannels(), vocals.getsampwidth()
+            for window_start, window_end, transcript, segment_ids in windows:
+                start = round(window_start * rate)
+                end = round(window_end * rate)
                 if end > vocals.getnframes() or not MIN_REFERENCE_SECONDS * rate <= end - start <= MAX_REFERENCE_SECONDS * rate:
                     continue
-                key = (str(source), source.stat().st_mtime_ns, start, end)
+                key = (str(source), source.stat().st_mtime_ns, start, end, channels, width)
                 name = f"auto_{hashlib.sha256(repr(key).encode()).hexdigest()[:24]}.wav"
                 path = project_dir / "references" / name
                 if not path.is_file():
@@ -120,17 +157,35 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
                     with tempfile.TemporaryDirectory(dir=path.parent) as temp:
                         draft = Path(temp) / name
                         vocals.setpos(start)
-                        with wave.open(str(draft), "wb") as output:
-                            output.setparams(vocals.getparams())
-                            output.writeframes(vocals.readframes(end - start))
+                        frames = vocals.readframes(end - start)
+                        if channels == 1 and width == 2 and rate == 32000:
+                            with wave.open(str(draft), "wb") as output:
+                                output.setnchannels(1)
+                                output.setsampwidth(2)
+                                output.setframerate(32000)
+                                output.writeframes(frames)
+                        else:
+                            raw = Path(temp) / "raw.wav"
+                            with wave.open(str(raw), "wb") as source_wav:
+                                source_wav.setnchannels(channels)
+                                source_wav.setsampwidth(width)
+                                source_wav.setframerate(rate)
+                                source_wav.writeframes(frames)
+                            subprocess.run(
+                                ["ffmpeg", "-nostdin", "-v", "error", "-i", str(raw), "-ac", "1", "-ar", "32000",
+                                 "-c:a", "pcm_s16le", str(draft)],
+                                check=True, capture_output=True, timeout=30,
+                            )
                         draft.replace(path)
-                separator = "" if lang in {"zh", "ja", "yue"} else " "
+                text = prepare_tts_text(unicodedata.normalize("NFKC", transcript), lang)
+                if not text:
+                    continue
                 return ReferencePreview(
                     wav=f"/workspace/{script.project_id}/references/{name}",
-                    text=separator.join(seg.orig_text.strip() for seg in clip),
+                    text=text,
                     lang=lang,
-                    segment_ids=[seg.id for seg in clip],
+                    segment_ids=segment_ids,
                 )
-    except (ValueError, OSError, EOFError, wave.Error):
+    except (ValueError, OSError, EOFError, wave.Error, subprocess.SubprocessError):
         return None
     return None
