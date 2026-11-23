@@ -6,9 +6,11 @@ import math
 import re
 from typing import Any
 
-MAX_SECONDS = 8.0
-PREFERRED_SECONDS = 4.0
-PAUSE_SECONDS = 0.45
+MAX_SECONDS = 14.0
+PREFERRED_SECONDS = 8.0
+MERGE_SECONDS = 2.5
+MERGE_GAP_SECONDS = 0.45
+PAUSE_SECONDS = 0.65
 PUNCTUATION = re.compile(r"""[.!?;,:。！？；，、：…]["'”’）)\]]*$""")
 DEFAULT_SPEAKER = "SPEAKER_00"
 
@@ -116,7 +118,41 @@ def _split_segment(raw: dict, diarized: bool) -> list[dict]:
     return segments
 
 
+def _merge_short_segments(segments: list[dict]) -> list[dict]:
+    """合并过短的同角色相邻片段，避免 ASR/VAD 把一句话切成碎片。"""
+    merged: list[dict] = []
+    for seg in segments:
+        if not merged:
+            merged.append(seg)
+            continue
+        prev = merged[-1]
+        gap = round(seg["start"] - prev["end"], 3)
+        combined_text = f"{prev['orig_text']}{seg['orig_text']}".strip()
+        can_merge = (
+            prev["speaker"] == seg["speaker"]
+            and 0 <= gap <= MERGE_GAP_SECONDS
+            and (seg["end"] - prev["start"]) <= MAX_SECONDS
+            and (prev["end"] - prev["start"]) < MERGE_SECONDS
+            and not PUNCTUATION.search(prev["orig_text"].rstrip())
+            and not prev["alignment_needs_review"]
+            and not prev["speaker_needs_review"]
+            and not seg["alignment_needs_review"]
+            and not seg["speaker_needs_review"]
+            and bool(combined_text)
+        )
+        if not can_merge:
+            merged.append(seg)
+            continue
+        combined = dict(prev)
+        combined["end"] = seg["end"]
+        combined["orig_text"] = combined_text
+        combined["words"] = [*prev.get("words", []), *seg.get("words", [])]
+        merged[-1] = combined
+    return merged
+
+
 def normalize_segments(raw_segments: list[dict], *, diarized: bool = False) -> list[dict]:
     segments = [part for raw in raw_segments for part in _split_segment(raw, diarized)]
+    segments = _merge_short_segments(segments)
     segments.sort(key=lambda item: (item["start"], item["end"]))
     return [dict(segment, id=index) for index, segment in enumerate(segments)]

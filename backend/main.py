@@ -385,7 +385,7 @@ def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
 
 @app.post("/api/projects/{project_id}/synthesize", response_model=SynthesizeResponse)
 def synthesize_project_segments(project_id: str, req: SynthesizeRequest) -> SynthesizeResponse:
-    """分组配音并执行时长闭环，返回最终剧本和剩余超长。"""
+    """分组配音并执行双向时长闭环，返回最终剧本和仍偏离时间槽的片段。"""
     return synthesize_project(_validate_project_id(project_id), req.segment_ids)
 
 

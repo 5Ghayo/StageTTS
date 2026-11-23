@@ -31,8 +31,10 @@ def _summarize_tool_result(tool_name: str, result: Dict[str, Any]) -> str:
         return f"更新片段 {updated}（待重合成: {pending}）"
     if tool_name == "synthesize_segments":
         synth = result.get("synthesized_ids", [])
-        overflow = result.get("overflow_segments", [])
-        return f"合成片段 {synth}（仍超长: {len(overflow)} 条）"
+        durations = result.get("overflow_segments", [])
+        short = sum(1 for item in durations if item.get("duration_state") == "too_short") if durations else 0
+        long = len(durations) - short
+        return f"合成片段 {synth}（时长偏差: 超长 {long} 条 / 过短 {short} 条）"
     if tool_name == "update_mix_settings":
         return f"已更新 BGM 音量为 {result.get('bgm_volume')}"
     if tool_name == "render_final_video":

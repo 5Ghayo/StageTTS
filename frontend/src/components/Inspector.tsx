@@ -12,7 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 import type { EmotionType } from "../types/script";
-import { isSegmentOverflow } from "../utils/synthesisIssues";
+import { isSegmentOverflow, isSegmentTooShort } from "../utils/synthesisIssues";
 
 const EMOTIONS: Array<{ id: EmotionType; label: string; dotColor: string }> = [
   { id: "neutral", label: "平淡", dotColor: "#9C9C9C" },
@@ -106,6 +106,7 @@ export const Inspector: React.FC = () => {
   const actualDuration = segment.actual_duration;
   const fillRatio = actualDuration ? actualDuration / slotDuration : 0;
   const isOverflow = isSegmentOverflow(segment);
+  const isTooShort = isSegmentTooShort(segment);
   const limitRatio = segment.applied_speed_factor == null ? 1.15 : 1.0;
 
   const effectiveDuration = auditionDuration > 0 ? auditionDuration : fallbackDuration;
@@ -436,7 +437,7 @@ export const Inspector: React.FC = () => {
               <span className="whitespace-nowrap text-secondary">时长匹配</span>
               <span
                 className={`shrink-0 whitespace-nowrap font-mono tabular-nums ${
-                  isOverflow
+                  isOverflow || isTooShort
                     ? "text-status-error"
                     : actualDuration != null
                       ? "text-primary"
@@ -451,7 +452,7 @@ export const Inspector: React.FC = () => {
             <div className="relative h-1 w-full overflow-hidden rounded-[2px] bg-[#181818]">
               <div
                 className={`h-full transition-all ${
-                  isOverflow ? "bg-status-error" : "bg-[#A8A8A8]"
+                  isOverflow || isTooShort ? "bg-status-error" : "bg-[#A8A8A8]"
                 }`}
                 style={{
                   width: `${Math.min(100, Math.round((fillRatio / 1.3) * 100))}%`,

@@ -14,7 +14,8 @@ from backend.schemas import ProjectScript, Segment
 
 EMOTIONS = {"neutral", "angry", "happy", "sad", "whisper"}
 CONTEXT_INSTRUCTIONS = (
-    "参照相邻台词理解语境，遵循角色语气和术语表。术语出现时使用表中的固定译法。"
+    "先通读完整对白理解剧情、角色关系和前后语气，再按原句 id 还原译文。"
+    "参照相邻台词、角色语气和术语表；术语出现时使用固定译法。"
     "每条的时长预算以 max_units 和 unit 表示。只处理 lines 中的片段 ID。"
 )
 
@@ -90,6 +91,7 @@ class DialogueContext:
             "emotion": seg.emotion,
             "slot_sec": round(slot, 3),
             "unit": "characters" if cjk else "words",
+            "min_units": max(1, int(budget * 0.55)),
             "max_units": budget,
             "before": [self._line(other) for other in self.ordered[max(0, index - 2):index]],
             "after": [self._line(other) for other in self.ordered[index + 1:index + 3]],
@@ -97,6 +99,30 @@ class DialogueContext:
 
     def payload(self, entries: Iterable[dict]) -> dict:
         return {"source_lang": self.script.source_lang, "glossary": self.script.glossary, "lines": list(entries)}
+
+    def whole_dialogue_payload(self, segments: Iterable[Segment]) -> dict:
+        """构造一次性通读全文的翻译请求，并保留原句 id 供结果还原。"""
+        ordered = sorted(segments, key=lambda seg: (seg.start, seg.id))
+        lines = [self.entry(seg) for seg in ordered]
+        dialogue_lines = []
+        for seg in ordered:
+            character = self.script.characters.get(seg.speaker)
+            speaker_name = character.display_name if character else seg.speaker
+            dialogue_lines.append(f"[{seg.id}] {speaker_name}: {seg.orig_text.strip()}")
+        target_lang = next((seg.target_lang for seg in ordered if seg.target_lang), "zh")
+        return {
+            "source_lang": self.script.source_lang,
+            "target_lang": target_lang,
+            "glossary": self.script.glossary,
+            "translation_mode": "whole_dialogue_once",
+            "dialogue": "\n".join(dialogue_lines),
+            "lines": lines,
+            "output_requirements": (
+                "先理解整段对白，再逐条还原到 lines 中的 id；"
+                "只输出 JSON 数组，不输出完整译文正文；"
+                "每项必须包含 id、target_text、emotion、action、keep_original。"
+            ),
+        }
 
 
 def translate_script(
@@ -107,40 +133,42 @@ def translate_script(
 ) -> list[int]:
     context = DialogueContext(script)
     segments = [seg for seg in context.ordered if seg.orig_text.strip()]
-    translated = []
-    batch_size = 25
-    for offset in range(0, len(segments), batch_size):
-        batch = segments[offset:offset + batch_size]
-        pending = {seg.id: seg for seg in batch}
-        if log:
-            log(f"调用导演 LLM 标注片段 #{batch[0].id}..#{batch[-1].id}")
-        try:
-            entries = complete_dialogue(
-                client, DIRECTOR_TRANSLATE_PROMPT, context.payload(context.entry(seg) for seg in batch),
-            )
-        except (OpenAIError, ValueError, IndexError) as exc:
-            if errors is not None:
-                errors.append(f"片段 #{batch[0].id}..#{batch[-1].id}：{exc}")
-            if log:
-                log("LLM 标注批次失败，保留当前台词")
-            continue
+    if not segments:
+        return []
 
-        for entry in entries:
-            seg_id = entry.get("id")
-            text = entry.get("target_text")
-            if type(seg_id) is not int or seg_id not in pending or not isinstance(text, str) or not text.strip():
-                continue
-            seg = pending.pop(seg_id)
-            emotion = entry.get("emotion")
-            emotion = emotion if isinstance(emotion, str) and emotion in EMOTIONS else "neutral"
-            action = entry.get("action")
-            keep_original = entry.get("keep_original") is True
-            needs_resynth = (text.strip(), emotion, keep_original) != (seg.target_text, seg.emotion, seg.keep_original)
-            seg.target_text = text.strip()
-            seg.emotion = emotion
-            seg.action = action.strip() if isinstance(action, str) and action.strip() else "idle"
-            seg.keep_original = keep_original
-            if needs_resynth:
-                seg.invalidate_audio()
-            translated.append(seg_id)
+    payload = context.whole_dialogue_payload(segments)
+    if log:
+        log(f"调用导演 LLM 一次性通读并翻译全部 {len(segments)} 条台词")
+
+    try:
+        entries = complete_dialogue(client, DIRECTOR_TRANSLATE_PROMPT, payload)
+    except (OpenAIError, ValueError, IndexError, json.JSONDecodeError) as exc:
+        if errors is not None:
+            errors.append(f"全文翻译失败：{exc}")
+        if log:
+            log("全文翻译失败，保留当前台词")
+        return []
+
+    translated: list[int] = []
+    pending = {seg.id: seg for seg in segments}
+    for entry in entries:
+        seg_id = entry.get("id")
+        text = entry.get("target_text")
+        if type(seg_id) is not int or seg_id not in pending or not isinstance(text, str) or not text.strip():
+            continue
+        seg = pending.pop(seg_id, None)
+        if seg is None:
+            continue
+        emotion = entry.get("emotion")
+        emotion = emotion if isinstance(emotion, str) and emotion in EMOTIONS else "neutral"
+        action = entry.get("action")
+        keep_original = entry.get("keep_original") is True
+        needs_resynth = (text.strip(), emotion, keep_original) != (seg.target_text, seg.emotion, seg.keep_original)
+        seg.target_text = text.strip()
+        seg.emotion = emotion
+        seg.action = action.strip() if isinstance(action, str) and action.strip() else "idle"
+        seg.keep_original = keep_original
+        if needs_resynth:
+            seg.invalidate_audio()
+        translated.append(seg.id)
     return translated

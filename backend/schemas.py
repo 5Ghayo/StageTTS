@@ -231,11 +231,13 @@ class ReferencePreview(EmotionRef):
 
 
 class SegmentDurationCheck(BaseModel):
-    """单句时长质检报告（用于时长约束反思闭环）。"""
+    """单句时长质检报告（用于双向时长约束反思闭环）。"""
 
     segment_id: int
     slot_duration: float
     actual_duration: float
+    fill_ratio: float
+    duration_state: Literal["too_short", "normal", "too_long"]
     overflow_ratio: float
     overflow_seconds: float
     needs_reflection: bool

@@ -72,11 +72,11 @@ FFmpeg 混音导出 output.mp4
 | 模块 | 当前状态 | 说明 |
 | :--- | :---: | :--- |
 | `script.json` 数据契约 | 已完成 | Pydantic v2 与 TypeScript 类型 1:1 对齐 |
-| 4 阶段解析流水线 | 已完成并实测 | FFmpeg → Demucs → WhisperX → pyannote → LLM 标注，已通过英文/日语真实视频测试 |
+| 4 阶段解析流水线 | 已完成并实测 | FFmpeg → Demucs → WhisperX → pyannote → LLM 标注，已通过英文/日语真实视频测试；ASR 片段会在说话人边界强制切分，过长片段才按语义/停顿切开，过短同角色片段会合并，避免“切得太碎”。 |
 | GPT-SoVITS 分组配音 | 已完成 | 按角色切换权重、按情绪选择参考音，缺失时使用与原文对应的同角色原声片段 |
 | 8GB 显存串行接力 | 已完成 | 解析前释放 GPT-SoVITS，配音时按需拉起 |
-| 配音时长闭环 | 已完成 | 全部配音、全管线和智能体统一支持超出时间槽 15% 时自动改写重配（最多两轮），试听与导出使用同一份调速后的音频 |
-| 参考音与角色校对 | 已完成 | 在「角色与情绪音色」中编辑/合并角色、批量改派、上传或试听 3–10 秒参考音并保存逐字稿；在「精修」中校对原文与说话人，在「项目媒体素材 → 翻译设置」中编辑术语表 |
+| 配音时长闭环 | 已完成 | 全部配音、全管线和智能体统一支持双向质检：>1.15x 自动精简，<0.8x 自动自然补足；最多两轮，最后才用 0.85–1.15x 温和变速兜底，试听与导出使用同一份调速后的音频 |
+| 参考音与角色校对 | 已完成 | 在「角色与情绪音色」中编辑/合并角色、批量改派、上传或试听 3–10 秒参考音并保存逐字稿；自动参考音从通过校对、无说话人重叠的同角色原句中挑选，不再从任意时间点盲截；在「精修」中校对原文与说话人，在「项目媒体素材 → 翻译设置」中编辑术语表 |
 | 评测脚本 | 骨架就绪 | 需要接入真实评测集后才能真正跑出指标 |
 
 ---
@@ -133,7 +133,18 @@ FFmpeg 混音导出 output.mp4
 }
 ```
 
-### 3.2 它给 GPT-SoVITS 提供什么？
+### 3.2 Stage4 翻译怎么生成？
+
+Stage4 现在是**一次性全文翻译**：
+
+1. 后端把当前项目所有非空原句按时间顺序拼成完整对白；
+2. 每句保留原始 `id`、说话人、角色说话风格、术语表和字数预算；
+3. LLM 先通读整段对白，再按 `id` 返回译文、情绪、动作和是否保留原声；
+4. 后端按 `id` 还原到 `segments`，不会重新编号，也不会合并原句。
+
+这样比“逐句孤立翻译”更能保持角色语气、前后承接和人名/术语一致性。
+
+### 3.3 它给 GPT-SoVITS 提供什么？
 
 真正调用 GPT-SoVITS 时，每句会组装成：
 
@@ -155,18 +166,20 @@ FFmpeg 混音导出 output.mp4
 | :--- | :--- |
 | `text` | `segments[i].target_text` |
 | `text_lang` | `segments[i].target_lang` |
-| `speed_factor` | `segments[i].speed_factor` |
-| `ref_audio_path` | `characters[speaker].emotion_refs[emotion].wav`，没有则从 `media.vocals_wav` 截取 |
-| `prompt_text` | 情绪参考音文本，或零样本时使用 `orig_text` |
-| `prompt_lang` | 情绪参考音语种，或自动检测 `orig_text` 语种 |
+| `speed_factor` | `/tts` 固定传 `1.0`；片段 `speed_factor` 在合成后由 FFmpeg `atempo` 应用 |
+| `ref_audio_path` | `characters[speaker].emotion_refs[emotion].wav`，没有则从 `media.vocals_wav` 生成自动候选 |
+| `prompt_text` | 情绪参考音文本，或自动候选对应的 `orig_text` |
+| `prompt_lang` | 情绪参考音语种，或自动候选使用 `script.source_lang` |
 
-如果角色没有配置权重和参考音，当前系统会：
+当前自动参考音逻辑如下：
 
-1. 从 `vocals.wav` 中按该 speaker 的时间段截取一段 3～8 秒原声；
-2. 保存为 `workspace/{project_id}/tts/_zeroshot_SPEAKER_00.wav`；
-3. 用这段原声作为音色参考；
-4. 用 `orig_text` 作为参考文本；
-5. 用 `target_text` 让 GPT-SoVITS 说目标语言。
+1. `characters[speaker].emotion_refs[emotion]` 中人工上传/绑定的参考音优先级最高；
+2. 没有人工参考音时，按 `segment.emotion → neutral → 任意可用情绪` 回退；
+3. 仍然没有时，才调用 `automatic_reference()` 从 `vocals.wav` 生成自动候选；
+4. 自动候选只选择**原文已校对、说话人已确认、3–10 秒、没有与其他说话人重叠**的同角色连续原句；
+5. 候选优先选一段完整连续台词，其次选接近 5 秒的片段；
+6. 自动候选的 `prompt_text` 仍来自 `orig_text`，所以如果 WhisperX 原文错得厉害，建议人工上传参考音并填写逐字稿；
+7. GPT-SoVITS 的 `/tts` 请求里 `speed_factor` 固定传 `1.0`，角色/片段的 `speed_factor` 是在后端用 FFmpeg `atempo` 对成品 WAV 做温和变速，试听和导出使用同一份处理后的文件。
 
 ---
 

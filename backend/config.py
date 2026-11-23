@@ -178,8 +178,11 @@ HF_TOKEN: str = settings.hf_token.strip()
 
 # 时长约束反思闭环核心阈值（见 ARCHITECTURE.md 铁律 #6）
 DURATION_OVERFLOW_RATIO: float = 1.15
+DURATION_UNDERFLOW_RATIO: float = 0.80
+MIN_DURATION_REFLECTION_SECONDS: float = 1.0
 MAX_REFLECTION_ROUNDS: int = 2
 MAX_GENTLE_SPEED: float = 1.15
+MIN_GENTLE_SPEED: float = 0.85
 
 # CORS 默认放行端口（Vite 开发服务器）
 ALLOWED_ORIGINS: list[str] = [

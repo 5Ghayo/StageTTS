@@ -804,6 +804,10 @@ export interface components {
             slot_duration: number;
             /** Actual Duration */
             actual_duration: number;
+            /** Fill Ratio */
+            fill_ratio: number;
+            /** Duration State */
+            duration_state: "too_short" | "normal" | "too_long";
             /** Overflow Ratio */
             overflow_ratio: number;
             /** Overflow Seconds */

@@ -63,6 +63,8 @@ def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]
     for index, seg in enumerate(ordered):
         if seg.speaker != speaker:
             continue
+        if seg.alignment_needs_review or seg.speaker_needs_review or not seg.orig_text.strip():
+            continue
         clip = []
         for following in range(index, len(ordered)):
             other = ordered[following]

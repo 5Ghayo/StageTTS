@@ -195,6 +195,7 @@ def synthesize_segments_grouped(
     segment_ids: Optional[List[int]] = None,
     *,
     require_shorter: bool = False,
+    require_longer: bool = False,
 ) -> Tuple[List[int], List[str]]:
     """按 speaker 分组批量调用 GPT-SoVITS (api_v2.py) 合成单句 WAV。
 
@@ -277,6 +278,8 @@ def synthesize_segments_grouped(
                             raise RuntimeError("合成音频没有有效时长")
                         if require_shorter and seg.actual_duration is not None and actual_duration >= seg.actual_duration:
                             raise RuntimeError("改写后的配音未缩短，保留上一版")
+                        if require_longer and seg.actual_duration is not None and actual_duration <= seg.actual_duration:
+                            raise RuntimeError("改写后的配音未变长，保留上一版")
                         finished_wav.replace(tts_dir / out_name)
                     except TTSServiceUnavailableError:
                         seg.status = "error"
