@@ -5,13 +5,37 @@
 
 from __future__ import annotations
 
+import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
+from weakref import WeakValueDictionary
 
 from backend import config
-from backend.schemas import ProjectScript, SegmentPatch
+from backend.schemas import ProjectScript, SegmentPatch, SynthesizeResponse
 from backend.services.media_mixer import mix_and_render
-from backend.services.tts_client import synthesize_segments_grouped
+from backend.services.synthesis import synthesize_with_duration_check
+from backend.services.task_runner import GpuBusyError, gpu_task_guard
+from backend.services.tts_client import TTSServiceUnavailableError
+
+_project_locks = WeakValueDictionary()
+_project_locks_guard = threading.Lock()
+
+
+@contextmanager
+def project_task_guard(project_id: str) -> Iterator[None]:
+    """同一项目的读改写操作不可并行，其他项目仍可保存和导出。"""
+    with _project_locks_guard:
+        lock = _project_locks.get(project_id)
+        if lock is None:
+            lock = _project_locks[project_id] = threading.RLock()
+    if not lock.acquire(blocking=False):
+        raise GpuBusyError("该项目正在解析、配音或导出，请在当前操作完成后重试。")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _script_path(project_id: str) -> Path:
@@ -33,8 +57,12 @@ def load_project_script(project_id: str) -> ProjectScript:
 def save_project_script(script: ProjectScript) -> Path:
     """将校验后的 ProjectScript 持久化至 script.json。"""
     path = _script_path(script.project_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(script.model_dump_json(indent=2), encoding="utf-8")
+    with project_task_guard(script.project_id):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=path.parent) as temp:
+            draft = Path(temp) / path.name
+            draft.write_text(script.model_dump_json(indent=2), encoding="utf-8")
+            draft.replace(path)
     return path
 
 
@@ -67,55 +95,77 @@ def batch_update_segments(
     project_id: str,
     updates: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """批量修改指定片段的台词、角色、情绪、动作或原声开关并持久化。
+    """应用片段补丁，并将影响音频的片段标为待合成。"""
+    with project_task_guard(project_id):
+        script = load_project_script(project_id)
+        seg_map = {seg.id: seg for seg in script.segments}
+        updated_ids: List[int] = []
+        marked_pending_ids: List[int] = []
 
-    若修改了 speaker / target_text / target_lang / emotion / keep_original，
-    自动将片段 status 重置为 "pending" 以便重合成。
-    """
-    script = load_project_script(project_id)
-    seg_map = {seg.id: seg for seg in script.segments}
-    updated_ids: List[int] = []
-    marked_pending_ids: List[int] = []
+        resynth_fields = {"speaker", "target_text", "target_lang", "emotion", "keep_original", "speed_factor"}
 
-    resynth_fields = {"speaker", "target_text", "target_lang", "emotion", "keep_original"}
+        for raw_patch in updates:
+            patch = SegmentPatch.model_validate(raw_patch)
+            if patch.id not in seg_map:
+                raise KeyError(f"片段 ID {patch.id} 不存在于项目 {project_id}")
+            seg = seg_map[patch.id]
+            patch_data = patch.model_dump(exclude={"id"}, exclude_none=True)
+            if "speaker" in patch_data:
+                if patch_data["speaker"] not in script.characters:
+                    raise ValueError("请先新建要指派的角色")
+                patch_data.setdefault("speaker_needs_review", False)
+            if "orig_text" in patch_data and patch_data["orig_text"] != seg.orig_text:
+                patch_data.setdefault("alignment_needs_review", True)
+            needs_resynth = False
+            for field_name, value in patch_data.items():
+                if getattr(seg, field_name) != value:
+                    setattr(seg, field_name, value)
+                    if field_name in resynth_fields:
+                        needs_resynth = True
+            updated_ids.append(seg.id)
+            if needs_resynth:
+                seg.invalidate_audio()
+            if needs_resynth and not seg.keep_original:
+                marked_pending_ids.append(seg.id)
 
-    for raw_patch in updates:
-        patch = SegmentPatch.model_validate(raw_patch)
-        if patch.id not in seg_map:
-            raise KeyError(f"片段 ID {patch.id} 不存在于项目 {project_id}")
-        seg = seg_map[patch.id]
-        patch_data = patch.model_dump(exclude={"id"}, exclude_none=True)
-        needs_resynth = False
-        for field_name, value in patch_data.items():
-            if getattr(seg, field_name) != value:
-                setattr(seg, field_name, value)
-                if field_name in resynth_fields:
-                    needs_resynth = True
-        updated_ids.append(seg.id)
-        if needs_resynth:
-            seg.status = "pending"
-            marked_pending_ids.append(seg.id)
-
-    save_project_script(script)
+        save_project_script(script)
     return {"updated_ids": updated_ids, "marked_pending_ids": marked_pending_ids}
+
+
+def synthesize_project(
+    project_id: str,
+    segment_ids: Optional[List[int]] = None,
+    *,
+    auto_reflect: bool = True,
+) -> SynthesizeResponse:
+    """合成并保存最终剧本，期间避免其他 GPU 任务切换服务。"""
+    with project_task_guard(project_id), gpu_task_guard():
+        script = load_project_script(project_id)
+        try:
+            synthesized_ids, overflow_segments, errors = synthesize_with_duration_check(
+                script, segment_ids, auto_reflect=auto_reflect,
+            )
+        except TTSServiceUnavailableError:
+            save_project_script(script)
+            raise
+        save_project_script(script)
+    return SynthesizeResponse(
+        project_id=project_id,
+        synthesized_ids=synthesized_ids,
+        overflow_segments=overflow_segments,
+        errors=errors,
+        script=script,
+    )
 
 
 def synthesize_segments(
     project_id: str,
     segment_ids: Optional[List[int]] = None,
+    *,
+    auto_reflect: bool = True,
 ) -> Dict[str, Any]:
-    """按角色分组批量调用 GPT-SoVITS 合成音频，并返回时长超标质检报告。"""
-    script = load_project_script(project_id)
-    synthesized_ids, overflow_segments, errors = synthesize_segments_grouped(
-        script,
-        segment_ids=segment_ids,
-    )
-    save_project_script(script)
-    return {
-        "synthesized_ids": synthesized_ids,
-        "overflow_segments": [item.model_dump() for item in overflow_segments],
-        "errors": errors,
-    }
+    result = synthesize_project(project_id, segment_ids, auto_reflect=auto_reflect)
+    return result.model_dump(exclude={"project_id", "script"})
 
 
 def update_mix_settings(
@@ -124,9 +174,10 @@ def update_mix_settings(
 ) -> Dict[str, Any]:
     """更新背景伴奏音量系数（限 0.0 ~ 2.0）并持久化 script.json。"""
     clamped = max(0.0, min(2.0, float(bgm_volume)))
-    script = load_project_script(project_id)
-    script.media.bgm_volume = clamped
-    save_project_script(script)
+    with project_task_guard(project_id):
+        script = load_project_script(project_id)
+        script.media.bgm_volume = clamped
+        save_project_script(script)
     return {"bgm_volume": clamped}
 
 
@@ -135,10 +186,11 @@ def render_final_video(
     burn_watermark: bool = False,
 ) -> Dict[str, Any]:
     """触发 pydub 拼轨与 FFmpeg 混音封装，输出成片路径并回写 script.json。"""
-    script = load_project_script(project_id)
-    output_video, duration = mix_and_render(script, burn_watermark=burn_watermark)
-    script.media.output_video = output_video
-    save_project_script(script)
+    with project_task_guard(project_id):
+        script = load_project_script(project_id)
+        output_video, duration = mix_and_render(script, burn_watermark=burn_watermark)
+        script.media.output_video = output_video
+        save_project_script(script)
     return {
         "output_video": output_video,
         "duration": duration,

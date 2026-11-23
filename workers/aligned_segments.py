@@ -1,0 +1,122 @@
+"""Split diarized ASR segments without guessing word times or dropping text."""
+
+from __future__ import annotations
+
+import math
+import re
+from typing import Any
+
+MAX_SECONDS = 8.0
+PREFERRED_SECONDS = 4.0
+PAUSE_SECONDS = 0.45
+PUNCTUATION = re.compile(r"""[.!?;,:。！？；，、：…]["'”’）)\]]*$""")
+DEFAULT_SPEAKER = "SPEAKER_00"
+
+
+def _time(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+        return round(value, 3)
+    return None
+
+
+def _word_offsets(text: str, words: list[dict]) -> list[int] | None:
+    # WhisperX can insert spaces when grouping CJK words. Match the original text
+    # ignoring whitespace, then cut the original string at the matched offsets.
+    letters = [(offset, char) for offset, char in enumerate(text) if not char.isspace()]
+    compact = "".join(char for _, char in letters)
+    cursor = 0
+    offsets = []
+    for word in words:
+        token = "".join(word["word"].split())
+        if not token or not compact.startswith(token, cursor):
+            return None
+        offsets.append(letters[cursor][0])
+        cursor += len(token)
+    return offsets if cursor == len(compact) else None
+
+
+def _split_segment(raw: dict, diarized: bool) -> list[dict]:
+    text = str(raw.get("text") or "").strip()
+    if not text:
+        return []
+    raw_start, raw_end = _time(raw.get("start")), _time(raw.get("end"))
+    start = raw_start if raw_start is not None else 0.0
+    end = raw_end if raw_end is not None and raw_end > start else round(start + 0.25, 3)
+    rank_speaker = (str(raw.get("speaker") or "").strip() or None) if diarized else None
+    words = []
+    for item in raw.get("words") or []:
+        word_start, word_end = _time(item.get("start")), _time(item.get("end"))
+        if word_start is None or word_end is None or not start <= word_start < word_end <= end:
+            word_start = word_end = None
+        speaker = (str(item.get("speaker") or "").strip() or None) if diarized else None
+        words.append(dict(word=str(item.get("word") or ""), start=word_start, end=word_end, speaker=speaker))
+
+    offsets = _word_offsets(text, words)
+    # A valid cut needs aligned words on both sides and must preserve their audio.
+    cuts = [
+        i for i in range(1, len(words))
+        if words[i - 1]["end"] is not None and words[i]["start"] is not None
+        and words[i - 1]["end"] <= words[i]["start"]
+    ] if offsets else []
+    # WhisperX's segment-level speaker can conceal a word-level transition.
+    def speaker_at(index: int) -> str | None:
+        return words[index]["speaker"] or rank_speaker
+
+    def part(left: int, right: int) -> dict:
+        part_start = words[left]["start"] if left else start
+        part_end = words[right - 1]["end"] if right < len(words) else end
+        left_offset = offsets[left] if left and offsets else 0
+        right_offset = offsets[right] if right < len(words) and offsets else len(text)
+        speakers = {speaker_at(i) for i in range(left, right)}
+        if not speakers:
+            speakers = {rank_speaker}
+        speaker = next((speaker_at(i) for i in range(left, right) if speaker_at(i)), rank_speaker)
+        part_words = words[left:right]
+        ordered_starts = [word["start"] for word in part_words if word["start"] is not None]
+        return dict(
+            start=part_start,
+            end=part_end,
+            speaker=speaker or DEFAULT_SPEAKER,
+            orig_text=text[left_offset:right_offset].strip(),
+            words=part_words,
+            alignment_needs_review=(
+                not offsets or raw_start is None or raw_end != end
+                or len(ordered_starts) != len(part_words) or ordered_starts != sorted(ordered_starts)
+                or part_end - part_start > MAX_SECONDS
+            ),
+            speaker_needs_review=(
+                len(speakers) != 1 or None in speakers
+                or any(word["start"] is not None and not word["speaker"] for word in part_words)
+            ),
+        )
+
+    forced = [i for i in cuts if speaker_at(i - 1) and speaker_at(i) and speaker_at(i - 1) != speaker_at(i)]
+    segments = []
+    left = 0
+    for right in [*forced, len(words)]:
+        part_start = words[left]["start"] if left else start
+        part_end = words[right - 1]["end"] if right < len(words) else end
+        while part_end - part_start > MAX_SECONDS:
+            available = [i for i in cuts if left < i < right]
+            if not available:
+                break
+            fitting = [i for i in available if words[i - 1]["end"] - part_start <= MAX_SECONDS]
+            natural = [
+                i for i in fitting
+                if words[i - 1]["end"] - part_start >= PREFERRED_SECONDS
+                and (PUNCTUATION.search(text[offsets[i - 1]:offsets[i]].rstrip())
+                     or words[i]["start"] - words[i - 1]["end"] >= PAUSE_SECONDS)
+            ]
+            cut = natural[-1] if natural else (fitting[-1] if fitting else available[0])
+            segments.append(part(left, cut))
+            left = cut
+            part_start = words[left]["start"]
+        segments.append(part(left, right))
+        left = right
+    return segments
+
+
+def normalize_segments(raw_segments: list[dict], *, diarized: bool = False) -> list[dict]:
+    segments = [part for raw in raw_segments for part in _split_segment(raw, diarized)]
+    segments.sort(key=lambda item: (item["start"], item["end"]))
+    return [dict(segment, id=index) for index, segment in enumerate(segments)]

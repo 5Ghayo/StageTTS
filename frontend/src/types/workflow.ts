@@ -37,15 +37,8 @@ export interface StageNodeData extends Record<string, unknown> {
 export interface PipelineConfig {
   computeType: "float16" | "int8";
   targetLang: "zh" | "en" | "ja";
-  overflowRatio: number;
-  maxReflectionRounds: number;
+  allowDemucsCpu: boolean;
   burnWatermark: boolean;
-}
-
-export interface VramState {
-  usedGb: number;
-  limitGb: number;
-  activeEnv: EnvBadge | "idle";
 }
 
 export interface PipelineLogEntry {

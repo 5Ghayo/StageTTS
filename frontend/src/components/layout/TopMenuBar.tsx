@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Clapperboard,
   Cpu,
@@ -10,7 +10,9 @@ import {
   Sparkles,
   Workflow,
 } from "lucide-react";
-import { ApiError, renderVideo } from "../../services/api";
+import type React from "react";
+import { useState } from "react";
+import { ApiError, type GpuDevice, fetchGpuStatus, renderVideo } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 import type { WorkspacePreset } from "../../types/workflow";
@@ -37,6 +39,10 @@ const PRESET_OPTIONS: Array<{
   },
 ];
 
+function formatGpuMemory(gpu: GpuDevice): string {
+  return `${(gpu.used_mib / 1024).toFixed(1)}/${(gpu.total_mib / 1024).toFixed(1)} GiB`;
+}
+
 /**
  * 紧凑 36px 顶部主控栏（#222222 哑光灰底、无外框暗槽分段器、极淡无框信息标签）。
  */
@@ -51,13 +57,26 @@ export const TopMenuBar: React.FC = () => {
 
   const workspacePreset = useWorkflowStore((s) => s.workspacePreset);
   const setWorkspacePreset = useWorkflowStore((s) => s.setWorkspacePreset);
-  const vramState = useWorkflowStore((s) => s.vramState);
   const pipelineConfig = useWorkflowStore((s) => s.pipelineConfig);
   const isPipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
   const runPipeline = useWorkflowStore((s) => s.runPipeline);
   const appendLog = useWorkflowStore((s) => s.appendLog);
 
   const [actionToast, setActionToast] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const { data: gpuData } = useQuery({
+    queryKey: ["gpu-status"],
+    queryFn: ({ signal }) => fetchGpuStatus(signal),
+    enabled: backendStatus === "online",
+    refetchInterval: 3000,
+    retry: false,
+  });
+  const gpus = gpuData?.devices ?? [];
+
+  const primaryGpu = gpus[0];
+  const gpuTitle = gpus.length
+    ? gpus.map((gpu) => `${gpu.name} · ${formatGpuMemory(gpu)}`).join("\n")
+    : "无法读取后端机器的 NVIDIA 显存数据";
 
   const statusColor =
     backendStatus === "online"
@@ -82,14 +101,22 @@ export const TopMenuBar: React.FC = () => {
       return;
     }
     setActionToast("正在按需启动 GPT-SoVITS 并配音...");
-    const res = await synthesizeSegment();
+    const ids =
+      pendingCount === 0
+        ? script.segments.filter((seg) => !seg.keep_original).map((seg) => seg.id)
+        : undefined;
+    const res = await synthesizeSegment(ids);
     setActionToast(res.message);
-    appendLog("env_tts", res.message, res.simulated ? "warn" : "success");
+    if (res.issues?.length) {
+      res.issues.forEach((issue) => appendLog("env_tts", issue, "warn"));
+    } else {
+      appendLog("env_tts", res.message, res.simulated ? "warn" : "success");
+    }
     window.setTimeout(() => setActionToast(null), 4000);
   };
 
   const handleExport = async () => {
-    if (!script) {
+    if (!script || isExporting) {
       return;
     }
     if (backendStatus === "offline") {
@@ -99,11 +126,37 @@ export const TopMenuBar: React.FC = () => {
       window.setTimeout(() => setActionToast(null), 3000);
       return;
     }
+    setIsExporting(true);
     setActionToast("导出中...");
     try {
-      const res = await renderVideo(
-        script.project_id,
-        pipelineConfig.burnWatermark
+      if (useProjectStore.getState().isDirty) {
+        await saveProjectScript();
+        const afterSave = useProjectStore.getState();
+        if (afterSave.backendStatus === "offline") {
+          const msg = "离线模式：已记录导出配置";
+          setActionToast(msg);
+          appendLog("env_backend", msg, "warn");
+          window.setTimeout(() => setActionToast(null), 3000);
+          return;
+        }
+        if (afterSave.error || afterSave.isDirty) {
+          const msg = afterSave.error ?? "请先保存当前修改后再导出";
+          setActionToast(msg);
+          appendLog("env_backend", msg, "error");
+          window.setTimeout(() => setActionToast(null), 3000);
+          return;
+        }
+      }
+      const res = await renderVideo(script.project_id, pipelineConfig.burnWatermark);
+      useProjectStore.setState((state) =>
+        state.script?.project_id === res.project_id
+          ? {
+              script: {
+                ...state.script,
+                media: { ...state.script.media, output_video: res.output_video },
+              },
+            }
+          : state,
       );
       setActionToast("已导出成片");
       appendLog("env_backend", `导出成功: ${res.output_video}`, "success");
@@ -122,6 +175,8 @@ export const TopMenuBar: React.FC = () => {
           : "导出失败";
       setActionToast(msg);
       appendLog("env_backend", msg, isStub ? "warn" : "error");
+    } finally {
+      setIsExporting(false);
     }
     window.setTimeout(() => setActionToast(null), 3000);
   };
@@ -131,17 +186,11 @@ export const TopMenuBar: React.FC = () => {
       {/* 左侧：Logo · 状态点 · 无边框项目标签 · 柔和次操作保存按钮 */}
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1.5 text-[13px] font-medium text-primary">
-          <Clapperboard
-            className="h-4 w-4 text-secondary"
-            strokeWidth={1.5}
-          />
+          <Clapperboard className="h-4 w-4 text-secondary" strokeWidth={1.5} />
           <span>StageTTS</span>
         </div>
 
-        <span
-          title={statusTitle}
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`}
-        />
+        <span title={statusTitle} className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`} />
 
         <span className="flex h-6 items-center rounded-[4px] bg-white/[0.04] px-2 font-mono tabular-nums text-[11px] text-secondary">
           {script ? script.project_id : "未打开项目"}
@@ -158,10 +207,7 @@ export const TopMenuBar: React.FC = () => {
             {isDirty ? (
               <span className="h-1.5 w-1.5 rounded-full bg-status-warning" />
             ) : (
-              <Save
-                className="h-3.5 w-3.5 text-secondary"
-                strokeWidth={1.5}
-              />
+              <Save className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
             )}
             <span>{isDirty ? "保存*" : "保存"}</span>
           </button>
@@ -181,9 +227,7 @@ export const TopMenuBar: React.FC = () => {
               type="button"
               onClick={() => setWorkspacePreset(preset.id)}
               className={`flex h-6 items-center gap-1.5 rounded-[3px] px-3 text-[12px] font-medium transition-colors ${
-                active
-                  ? "bg-[#333333] text-[#FFFFFF]"
-                  : "text-secondary hover:text-primary"
+                active ? "bg-[#333333] text-[#FFFFFF]" : "text-secondary hover:text-primary"
               }`}
             >
               {preset.icon}
@@ -208,12 +252,14 @@ export const TopMenuBar: React.FC = () => {
         )}
 
         <div
-          title={`当前显存占用（环境: ${vramState.activeEnv}）`}
+          title={gpuTitle}
           className="hidden h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-white/[0.04] px-2 font-mono tabular-nums text-[11px] text-secondary sm:flex"
         >
           <Cpu className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
-          <span>
-            5060 · {vramState.usedGb.toFixed(1)}/{vramState.limitGb.toFixed(0)}G
+          <span className="max-w-64 truncate">
+            {primaryGpu
+              ? `${primaryGpu.name.replace(/^NVIDIA GeForce /, "")} · ${formatGpuMemory(primaryGpu)}${gpus.length > 1 ? ` +${gpus.length - 1}` : ""}`
+              : "显存不可用"}
           </span>
         </div>
 
@@ -250,11 +296,12 @@ export const TopMenuBar: React.FC = () => {
               )}
               <button
                 type="button"
+                disabled={isExporting || isSynthesizing || isLoading || isPipelineRunning}
                 onClick={() => void handleExport()}
-                className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-[#3A6EA5] px-3 py-1 text-[12px] font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8]"
+                className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] bg-[#3A6EA5] px-3 py-1 text-[12px] font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8] disabled:opacity-50"
               >
                 <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
-                <span>导出成片</span>
+                <span>{isExporting ? "导出中..." : "导出成片"}</span>
               </button>
             </>
           )

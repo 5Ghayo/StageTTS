@@ -1,11 +1,6 @@
-import React, { useRef, useState } from "react";
-import {
-  ChevronRight,
-  Clapperboard,
-  FolderOpen,
-  Play,
-  Upload,
-} from "lucide-react";
+import { ChevronRight, Clapperboard, FolderOpen, Play, Upload } from "lucide-react";
+import type React from "react";
+import { useRef, useState } from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 
 /**
@@ -59,13 +54,8 @@ export const WelcomeCanvas: React.FC = () => {
         {/* 顶部标题条 */}
         <div className="flex h-9 items-center justify-between border-b border-white/[0.06] bg-[#1C1C1C] px-3.5">
           <div className="flex items-center gap-2">
-            <Clapperboard
-              className="h-4 w-4 text-secondary"
-              strokeWidth={1.5}
-            />
-            <span className="text-[13px] font-medium text-primary">
-              StageTTS 项目启动器
-            </span>
+            <Clapperboard className="h-4 w-4 text-secondary" strokeWidth={1.5} />
+            <span className="text-[13px] font-medium text-primary">StageTTS 项目启动器</span>
           </div>
 
           <div className="flex items-center gap-1.5 rounded-[4px] bg-white/[0.04] px-2 py-0.5 text-[11px] text-secondary">
@@ -110,12 +100,8 @@ export const WelcomeCanvas: React.FC = () => {
                       strokeWidth={1.5}
                     />
                     <div>
-                      <div className="font-medium text-primary">
-                        新建 / 导入音视频
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-secondary">
-                        选择或拖拽 MP4 / WAV
-                      </div>
+                      <div className="font-medium text-primary">新建 / 导入音视频</div>
+                      <div className="mt-0.5 text-[11px] text-secondary">选择或拖拽 MP4 / WAV</div>
                     </div>
                   </div>
                   <ChevronRight
@@ -136,12 +122,8 @@ export const WelcomeCanvas: React.FC = () => {
                       strokeWidth={1.5}
                     />
                     <div>
-                      <div className="font-medium text-primary">
-                        载入演示样例
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-secondary">
-                        双角色 4 句示例剧本
-                      </div>
+                      <div className="font-medium text-primary">载入演示样例</div>
+                      <div className="mt-0.5 text-[11px] text-secondary">双角色 4 句示例剧本</div>
                     </div>
                   </div>
                   <ChevronRight
@@ -161,15 +143,10 @@ export const WelcomeCanvas: React.FC = () => {
           <div className="flex min-h-[220px] flex-col">
             <div className="flex h-8 items-center justify-between border-b border-white/[0.06] bg-[#1D1D1D] px-3 text-[11px] text-secondary">
               <span className="flex items-center gap-1.5 font-medium">
-                <FolderOpen
-                  className="h-3.5 w-3.5 text-secondary"
-                  strokeWidth={1.5}
-                />
+                <FolderOpen className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
                 <span>最近项目</span>
               </span>
-              <span className="font-mono tabular-nums text-muted">
-                {projectList.length} 项
-              </span>
+              <span className="font-mono tabular-nums text-muted">{projectList.length} 项</span>
             </div>
 
             {projectList.length > 0 ? (
@@ -178,9 +155,7 @@ export const WelcomeCanvas: React.FC = () => {
                   <thead>
                     <tr className="border-b border-white/[0.06] bg-[#222222] text-[11px] text-muted">
                       <th className="px-3 py-1.5 font-normal">项目标识</th>
-                      <th className="w-20 px-3 py-1.5 text-right font-normal">
-                        操作
-                      </th>
+                      <th className="w-20 px-3 py-1.5 text-right font-normal">操作</th>
                     </tr>
                   </thead>
                   <tbody>

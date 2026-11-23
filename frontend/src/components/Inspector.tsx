@@ -1,4 +1,3 @@
-import React, { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ChevronLeft,
@@ -8,8 +7,12 @@ import {
   Save,
   Sparkles,
 } from "lucide-react";
+import type React from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
+import { useWorkflowStore } from "../store/useWorkflowStore";
 import type { EmotionType } from "../types/script";
+import { isSegmentOverflow } from "../utils/synthesisIssues";
 
 const EMOTIONS: Array<{ id: EmotionType; label: string; dotColor: string }> = [
   { id: "neutral", label: "平淡", dotColor: "#9C9C9C" },
@@ -33,6 +36,8 @@ export const Inspector: React.FC = () => {
   const script = useProjectStore((s) => s.script);
   const selectedSegmentId = useProjectStore((s) => s.selectedSegmentId);
   const isSynthesizing = useProjectStore((s) => s.isSynthesizing);
+  const isLoading = useProjectStore((s) => s.isLoading);
+  const pipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
   const audioVersionMap = useProjectStore((s) => s.audioVersionMap);
 
   const stepSegment = useProjectStore((s) => s.stepSegment);
@@ -44,13 +49,12 @@ export const Inspector: React.FC = () => {
 
   // 自定义极简试听条状态
   const audioRef = useRef<HTMLAudioElement>(null);
-  const simRafRef = useRef<number>(0);
+  const sourceAudioRef = useRef<HTMLAudioElement>(null);
   const [isAuditionPlaying, setIsAuditionPlaying] = useState(false);
   const [auditionTime, setAuditionTime] = useState(0);
   const [auditionDuration, setAuditionDuration] = useState(0);
 
-  const segment =
-    script?.segments.find((seg) => seg.id === selectedSegmentId) ?? null;
+  const segment = script?.segments.find((seg) => seg.id === selectedSegmentId) ?? null;
 
   const auditionUrl = segment
     ? getCacheBustedUrl(segment.tts_wav, audioVersionMap[segment.id])
@@ -59,9 +63,12 @@ export const Inspector: React.FC = () => {
   const fallbackDuration = segment
     ? Math.max(0.1, segment.actual_duration ?? segment.end - segment.start)
     : 0;
+  const activeSegmentId = segment?.id ?? null;
 
   useEffect(() => {
-    cancelAnimationFrame(simRafRef.current);
+    if (activeSegmentId === null && auditionUrl === null) {
+      return;
+    }
     const el = audioRef.current;
     if (el) {
       el.pause();
@@ -70,11 +77,13 @@ export const Inspector: React.FC = () => {
     setIsAuditionPlaying(false);
     setAuditionTime(0);
     setAuditionDuration(fallbackDuration);
-  }, [segment?.id, auditionUrl, fallbackDuration]);
+  }, [activeSegmentId, auditionUrl, fallbackDuration]);
 
   useEffect(() => {
-    return () => cancelAnimationFrame(simRafRef.current);
-  }, []);
+    if (activeSegmentId !== null) {
+      sourceAudioRef.current?.pause();
+    }
+  }, [activeSegmentId]);
 
   if (!script || !segment) {
     return (
@@ -85,64 +94,46 @@ export const Inspector: React.FC = () => {
   }
 
   const speakers = Object.keys(script.characters);
+  const editsDisabled = isLoading || isSynthesizing || pipelineRunning;
   const slotDuration = Math.max(0.1, segment.end - segment.start);
-  const recommendedChars = Math.max(2, Math.floor(slotDuration * 5));
+  const targetLang = segment.target_lang.replace(/^all_/, "").split("-")[0];
+  const isCjk = ["zh", "ja", "ko", "yue"].includes(targetLang);
+  const unit = isCjk ? "字" : "词";
+  const usedUnits = isCjk
+    ? Array.from(segment.target_text.replace(/\s+/g, "")).length
+    : segment.target_text.trim().split(/\s+/).filter(Boolean).length;
+  const recommendedUnits = Math.max(1, Math.floor(slotDuration * (isCjk ? 5 : 2.8)));
   const actualDuration = segment.actual_duration;
   const fillRatio = actualDuration ? actualDuration / slotDuration : 0;
-  const isOverflow = actualDuration !== null && fillRatio > 1.15;
+  const isOverflow = isSegmentOverflow(segment);
+  const limitRatio = segment.applied_speed_factor == null ? 1.15 : 1.0;
 
-  const effectiveDuration =
-    auditionDuration > 0 ? auditionDuration : fallbackDuration;
+  const effectiveDuration = auditionDuration > 0 ? auditionDuration : fallbackDuration;
   const auditionProgress =
     effectiveDuration > 0
       ? Math.min(100, Math.max(0, (auditionTime / effectiveDuration) * 100))
       : 0;
 
-  const startSimulatedAudition = (startFrom: number) => {
-    cancelAnimationFrame(simRafRef.current);
-    let lastTs = performance.now();
-    let cursor = startFrom >= effectiveDuration ? 0 : startFrom;
-    setIsAuditionPlaying(true);
-
-    const tick = (now: number) => {
-      const dt = (now - lastTs) / 1000;
-      lastTs = now;
-      cursor += dt;
-      if (cursor >= effectiveDuration) {
-        setAuditionTime(0);
-        setIsAuditionPlaying(false);
-        return;
-      }
-      setAuditionTime(cursor);
-      simRafRef.current = requestAnimationFrame(tick);
-    };
-    simRafRef.current = requestAnimationFrame(tick);
-  };
-
   const toggleAuditionPlay = async () => {
     const el = audioRef.current;
-    if (isAuditionPlaying) {
-      cancelAnimationFrame(simRafRef.current);
-      if (el && !el.paused) {
-        el.pause();
-      }
+    if (!el || !auditionUrl) return;
+    if (!el.paused) {
+      el.pause();
       setIsAuditionPlaying(false);
       return;
     }
 
-    if (el && auditionUrl) {
-      try {
-        if (el.currentTime >= (el.duration || effectiveDuration)) {
-          el.currentTime = 0;
-        }
-        await el.play();
-        setIsAuditionPlaying(true);
-        return;
-      } catch {
-        // 离线或演示音频文件不存在时，优雅降级为平滑进度演示
+    try {
+      if (el.ended) {
+        el.currentTime = 0;
+      }
+      await el.play();
+      if (audioRef.current === el && !el.paused) setIsAuditionPlaying(true);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setSynthNote("无法播放当前句，请检查配音文件或重试合成");
       }
     }
-    startSimulatedAudition(auditionTime);
   };
 
   const handleAuditionSeek = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -197,16 +188,81 @@ export const Inspector: React.FC = () => {
           </div>
         </div>
 
-        {/* 原文对照（虚线分隔） */}
-        {segment.orig_text && (
-          <div
-            title={segment.orig_text}
-            className="flex items-baseline gap-2 border-t border-dashed border-white/[0.08] pt-3 text-[11px]"
-          >
-            <span className="shrink-0 whitespace-nowrap text-muted">原文</span>
-            <span className="truncate text-secondary">{segment.orig_text}</span>
+        <div className="space-y-2 border-t border-dashed border-white/[0.08] pt-3">
+          <div className="flex items-center justify-between gap-2 text-[11px] text-secondary">
+            <label htmlFor="source-transcript">原文</label>
+            {(script.media.vocals_wav || script.media.source_video) && (
+              <>
+                <audio
+                  ref={sourceAudioRef}
+                  src={script.media.vocals_wav || script.media.source_video || undefined}
+                  preload="none"
+                  onTimeUpdate={(e) => {
+                    if (e.currentTarget.currentTime >= segment.end) e.currentTarget.pause();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="hover:text-primary"
+                  onClick={async () => {
+                    const audio = sourceAudioRef.current;
+                    if (!audio) return;
+                    if (!audio.paused) {
+                      audio.pause();
+                      return;
+                    }
+                    try {
+                      audio.currentTime = segment.start;
+                      await audio.play();
+                    } catch {
+                      setSynthNote("原声试听失败");
+                    }
+                  }}
+                >
+                  播放 / 暂停原声
+                </button>
+              </>
+            )}
           </div>
-        )}
+          <textarea
+            id="source-transcript"
+            rows={2}
+            disabled={editsDisabled}
+            className="w-full rounded-[4px] border border-white/[0.07] bg-[#181818] px-2.5 py-1.5 text-primary"
+            value={segment.orig_text}
+            onChange={(e) => updateSegmentLocal({ id: segment.id, orig_text: e.target.value })}
+          />
+          {segment.alignment_needs_review !== false && (
+            <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
+              <span className="text-status-warning">原文与时间范围待校对</span>
+              <button
+                type="button"
+                className="text-secondary hover:text-primary"
+                disabled={editsDisabled || !segment.orig_text.trim()}
+                onClick={() =>
+                  updateSegmentLocal({ id: segment.id, alignment_needs_review: false })
+                }
+              >
+                确认原文与时间范围
+              </button>
+            </div>
+          )}
+          {!!segment.words?.length && (
+            <details className="text-[11px] text-secondary">
+              <summary className="cursor-pointer">词级对齐</summary>
+              <ul className="mt-1 max-h-28 overflow-y-auto">
+                {segment.words.map((word, index) => (
+                  <li key={`${segment.id}-${index}-${word.word}`}>
+                    {word.word} ·{" "}
+                    {word.start == null || word.end == null
+                      ? "未对齐"
+                      : `${word.start.toFixed(3)}–${word.end.toFixed(3)}s`}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
 
         {/* 配音台词输入（#181818 哑光凹槽，无亮框） */}
         <div className="space-y-1.5 border-t border-dashed border-white/[0.08] pt-3">
@@ -214,16 +270,15 @@ export const Inspector: React.FC = () => {
             <span className="whitespace-nowrap text-secondary">配音台词</span>
             <span
               className={`shrink-0 whitespace-nowrap font-mono tabular-nums ${
-                segment.target_text.length > recommendedChars + 4
-                  ? "text-status-warning"
-                  : "text-muted"
+                usedUnits > recommendedUnits ? "text-status-warning" : "text-muted"
               }`}
             >
-              {segment.target_text.length} 字 · 建议 ≤ {recommendedChars} 字
+              {usedUnits} {unit} · 建议 ≤ {recommendedUnits} {unit}
             </span>
           </div>
           <textarea
             rows={2}
+            disabled={editsDisabled}
             value={segment.target_text}
             onChange={(e) =>
               updateSegmentLocal({
@@ -243,9 +298,8 @@ export const Inspector: React.FC = () => {
             </label>
             <select
               value={segment.speaker}
-              onChange={(e) =>
-                updateSegmentLocal({ id: segment.id, speaker: e.target.value })
-              }
+              disabled={editsDisabled}
+              onChange={(e) => updateSegmentLocal({ id: segment.id, speaker: e.target.value })}
               className="h-7 min-w-0 flex-1 truncate rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary transition-colors focus:border-white/25 focus:outline-none"
             >
               {speakers.map((spk) => (
@@ -255,6 +309,19 @@ export const Inspector: React.FC = () => {
               ))}
             </select>
           </div>
+          {segment.speaker_needs_review !== false && script.characters[segment.speaker] && (
+            <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
+              <span className="text-status-warning">说话人待校对</span>
+              <button
+                type="button"
+                className="text-secondary hover:text-primary"
+                disabled={editsDisabled}
+                onClick={() => updateSegmentLocal({ id: segment.id, speaker: segment.speaker })}
+              >
+                确认当前说话人
+              </button>
+            </div>
+          )}
 
           <div className="flex items-center gap-2">
             <label className="w-16 shrink-0 whitespace-nowrap text-[11px] text-secondary">
@@ -262,6 +329,7 @@ export const Inspector: React.FC = () => {
             </label>
             <input
               type="text"
+              disabled={editsDisabled}
               value={segment.action ?? ""}
               onChange={(e) =>
                 updateSegmentLocal({
@@ -270,7 +338,7 @@ export const Inspector: React.FC = () => {
                 })
               }
               placeholder="如点头 / 摇头"
-              className="h-7 min-w-0 flex-1 rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary placeholder:text-muted transition-colors focus:border-white/25 focus:outline-none"
+              className="h-7 min-w-0 flex-1 rounded-[4px] border border-white/[0.07] bg-[#181818] px-2 text-[12px] text-primary placeholder:text-muted transition-colors focus:border-white/25 focus:outline-none disabled:opacity-50"
             />
           </div>
         </div>
@@ -278,9 +346,7 @@ export const Inspector: React.FC = () => {
         {/* 情绪与语速组（虚线分隔，12px 组间距） */}
         <div className="space-y-2.5 border-t border-dashed border-white/[0.08] pt-3">
           <div className="space-y-1.5">
-            <span className="block whitespace-nowrap text-[11px] text-secondary">
-              配音情绪
-            </span>
+            <span className="block whitespace-nowrap text-[11px] text-secondary">配音情绪</span>
             <div className="grid h-[26px] grid-cols-5 gap-0.5 rounded-[4px] bg-[#181818] p-0.5">
               {EMOTIONS.map((emo) => {
                 const active = segment.emotion === emo.id;
@@ -288,10 +354,9 @@ export const Inspector: React.FC = () => {
                   <button
                     key={emo.id}
                     type="button"
-                    onClick={() =>
-                      updateSegmentLocal({ id: segment.id, emotion: emo.id })
-                    }
-                    className={`flex items-center justify-center gap-1 whitespace-nowrap rounded-[3px] text-[11px] transition-colors ${
+                    disabled={editsDisabled}
+                    onClick={() => updateSegmentLocal({ id: segment.id, emotion: emo.id })}
+                    className={`flex items-center justify-center gap-1 whitespace-nowrap rounded-[3px] text-[11px] transition-colors disabled:opacity-50 ${
                       active
                         ? "bg-[#333333] font-medium text-[#FFFFFF]"
                         : "text-secondary hover:text-primary"
@@ -318,6 +383,7 @@ export const Inspector: React.FC = () => {
             <input
               aria-label="语速倍率"
               type="range"
+              disabled={editsDisabled}
               min={0.8}
               max={1.4}
               step={0.05}
@@ -328,13 +394,11 @@ export const Inspector: React.FC = () => {
                   speed_factor: Number(e.target.value),
                 })
               }
-              className="min-w-0 flex-1"
+              className="min-w-0 flex-1 disabled:opacity-50"
             />
             <span
               className={`w-10 shrink-0 whitespace-nowrap text-right font-mono tabular-nums text-[11px] ${
-                segment.speed_factor > 1.15
-                  ? "text-status-warning"
-                  : "text-primary"
+                segment.speed_factor > 1.15 ? "text-status-warning" : "text-primary"
               }`}
             >
               {segment.speed_factor.toFixed(2)}x
@@ -343,20 +407,16 @@ export const Inspector: React.FC = () => {
 
           {segment.speed_factor > 1.15 && (
             <p className="flex items-center gap-1 text-[11px] text-status-warning">
-              <AlertTriangle
-                className="h-3.5 w-3.5 shrink-0"
-                strokeWidth={1.5}
-              />
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
               <span>加速过高易失真，超长句建议改用 AI 助手精简</span>
             </p>
           )}
 
           <label className="flex cursor-pointer items-center justify-between gap-2 text-[11px]">
-            <span className="truncate text-secondary">
-              保留原声（笑声、叹息不替换）
-            </span>
+            <span className="truncate text-secondary">保留原声（笑声、叹息不替换）</span>
             <input
               type="checkbox"
+              disabled={editsDisabled}
               checked={segment.keep_original}
               onChange={(e) =>
                 updateSegmentLocal({
@@ -364,7 +424,7 @@ export const Inspector: React.FC = () => {
                   keep_original: e.target.checked,
                 })
               }
-              className="h-3.5 w-3.5 shrink-0 rounded-[2px]"
+              className="h-3.5 w-3.5 shrink-0 rounded-[2px] disabled:opacity-50"
             />
           </label>
         </div>
@@ -378,12 +438,12 @@ export const Inspector: React.FC = () => {
                 className={`shrink-0 whitespace-nowrap font-mono tabular-nums ${
                   isOverflow
                     ? "text-status-error"
-                    : actualDuration !== null
+                    : actualDuration != null
                       ? "text-primary"
                       : "text-status-warning"
                 }`}
               >
-                {actualDuration !== null
+                {actualDuration != null
                   ? `${actualDuration.toFixed(1)}s / ${slotDuration.toFixed(1)}s`
                   : `待合成 (${slotDuration.toFixed(1)}s)`}
               </span>
@@ -398,8 +458,8 @@ export const Inspector: React.FC = () => {
                 }}
               />
               <div
-                title="115% 超时预警线"
-                style={{ left: `${Math.round((1.15 / 1.3) * 100)}%` }}
+                title={segment.applied_speed_factor == null ? "115% 超时预警线" : "100% 时间槽上限"}
+                style={{ left: `${Math.round((limitRatio / 1.3) * 100)}%` }}
                 className="absolute bottom-0 top-0 w-px bg-status-warning"
               />
             </div>
@@ -408,10 +468,9 @@ export const Inspector: React.FC = () => {
           {/* 极简自定义 28px 试听条 */}
           {auditionUrl && (
             <div className="space-y-1">
-              <span className="block whitespace-nowrap text-[11px] text-secondary">
-                当前句试听
-              </span>
+              <span className="block whitespace-nowrap text-[11px] text-secondary">当前句试听</span>
               <audio
+                key={auditionUrl}
                 ref={audioRef}
                 src={auditionUrl}
                 preload="metadata"
@@ -436,15 +495,9 @@ export const Inspector: React.FC = () => {
                   className="flex h-5 w-5 shrink-0 items-center justify-center rounded-[3px] text-primary transition-colors hover:bg-[#363636]"
                 >
                   {isAuditionPlaying ? (
-                    <Pause
-                      className="h-3.5 w-3.5 fill-current"
-                      strokeWidth={1.5}
-                    />
+                    <Pause className="h-3.5 w-3.5 fill-current" strokeWidth={1.5} />
                   ) : (
-                    <Play
-                      className="ml-0.5 h-3.5 w-3.5 fill-current"
-                      strokeWidth={1.5}
-                    />
+                    <Play className="ml-0.5 h-3.5 w-3.5 fill-current" strokeWidth={1.5} />
                   )}
                 </button>
 
@@ -466,8 +519,7 @@ export const Inspector: React.FC = () => {
                 </div>
 
                 <span className="shrink-0 whitespace-nowrap font-mono tabular-nums text-[11px] text-secondary">
-                  {formatMiniTime(auditionTime)} /{" "}
-                  {formatMiniTime(effectiveDuration)}
+                  {formatMiniTime(auditionTime)} / {formatMiniTime(effectiveDuration)}
                 </span>
               </div>
             </div>
@@ -485,8 +537,9 @@ export const Inspector: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            disabled={editsDisabled}
             onClick={() => void saveProjectScript()}
-            className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 py-1 text-[12px] font-medium text-primary transition-colors hover:bg-[#363636]"
+            className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 py-1 text-[12px] font-medium text-primary transition-colors hover:bg-[#363636] disabled:opacity-50"
           >
             <Save className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
             <span>保存</span>
@@ -494,7 +547,7 @@ export const Inspector: React.FC = () => {
           <button
             type="button"
             onClick={() => void handleSingleSynthesize()}
-            disabled={isSynthesizing || segment.keep_original}
+            disabled={editsDisabled || segment.keep_original}
             className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[4px] bg-[#3A6EA5] px-2.5 py-1 text-[12px] font-medium text-[#FFFFFF] transition-colors hover:bg-[#467DB8] disabled:opacity-50"
           >
             <Sparkles className="h-3.5 w-3.5" strokeWidth={1.5} />

@@ -1,17 +1,9 @@
-import React from "react";
 import { X } from "lucide-react";
+import type React from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
-import type { EmotionType } from "../../types/script";
-import { normalizeSpeakerColor } from "../../utils/speakerColor";
-
-const EMOTION_LABELS: Record<EmotionType, string> = {
-  neutral: "平淡",
-  angry: "愤怒",
-  happy: "喜悦",
-  sad: "悲伤",
-  whisper: "低语",
-};
+import { CharacterPanel } from "./CharacterPanel";
+import { TranslationSettings } from "./TranslationSettings";
 
 /**
  * 240px 按需展开的左侧停靠抽屉（#222222 面板，极淡虚线分隔）。
@@ -35,8 +27,6 @@ export const AssetBinPanel: React.FC = () => {
     { label: "成片输出", ready: Boolean(script.media.output_video) },
   ];
 
-  const characterEntries = Object.entries(script.characters);
-
   return (
     <div className="flex h-full w-60 shrink-0 flex-col bg-[#222222] text-[12px]">
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5">
@@ -55,80 +45,13 @@ export const AssetBinPanel: React.FC = () => {
 
       <div className="flex-1 overflow-y-auto">
         {leftDrawer === "characters" ? (
-          characterEntries.length > 0 ? (
-            <div className="divide-y divide-dashed divide-white/[0.08]">
-              {characterEntries.map(([speakerKey, char]) => {
-                const hasWeights = Boolean(
-                  char.gpt_weights && char.sovits_weights
-                );
-                const emotionKeys = Object.keys(
-                  char.emotion_refs
-                ) as EmotionType[];
-                const segCount = script.segments.filter(
-                  (seg) => seg.speaker === speakerKey
-                ).length;
-
-                return (
-                  <div key={speakerKey} className="px-3.5 py-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span
-                          className="h-1.5 w-1.5 shrink-0 rounded-full"
-                          style={{
-                            backgroundColor: normalizeSpeakerColor(char.color),
-                          }}
-                        />
-                        <span className="truncate font-medium text-primary">
-                          {char.display_name}
-                        </span>
-                      </div>
-                      <span className="shrink-0 font-mono tabular-nums text-[11px] text-secondary">
-                        {segCount} 句
-                      </span>
-                    </div>
-
-                    <div className="mt-1.5 flex items-center gap-1.5 text-[11px]">
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${
-                          hasWeights ? "bg-status-ready" : "bg-status-warning"
-                        }`}
-                      />
-                      <span
-                        className={
-                          hasWeights ? "text-secondary" : "text-muted"
-                        }
-                      >
-                        {hasWeights ? "已绑定微调模型" : "零样本兜底"}
-                      </span>
-                    </div>
-
-                    {emotionKeys.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {emotionKeys.map((emo) => (
-                          <span
-                            key={emo}
-                            className="rounded-[4px] bg-white/[0.05] px-1.5 py-0.5 text-[10px] text-secondary"
-                          >
-                            {EMOTION_LABELS[emo]}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="p-3.5 text-muted">当前剧本暂无角色配置</p>
-          )
+          <CharacterPanel key={script.project_id} script={script} />
         ) : (
           <div>
+            <TranslationSettings key={script.project_id} script={script} />
             <div className="divide-y divide-white/[0.05] border-b border-dashed border-white/[0.08]">
               {mediaRows.map((row) => (
-                <div
-                  key={row.label}
-                  className="flex h-8 items-center justify-between px-3.5"
-                >
+                <div key={row.label} className="flex h-8 items-center justify-between px-3.5">
                   <span className="text-primary">{row.label}</span>
                   <span className="flex items-center gap-1.5 text-[11px] text-secondary">
                     <span
@@ -143,9 +66,7 @@ export const AssetBinPanel: React.FC = () => {
             </div>
 
             <div className="p-3.5">
-              <div className="mb-1.5 text-[11px] font-medium text-secondary">
-                台词跳转
-              </div>
+              <div className="mb-1.5 text-[11px] font-medium text-secondary">台词跳转</div>
               <div className="space-y-0.5">
                 {script.segments.map((seg) => (
                   <button
@@ -158,9 +79,7 @@ export const AssetBinPanel: React.FC = () => {
                     className="flex h-7 w-full items-center justify-between rounded-[4px] px-2 text-left text-[11px] text-secondary transition-colors hover:bg-[#2C2C2C] hover:text-primary"
                   >
                     <span className="truncate">
-                      <span className="font-mono tabular-nums text-muted">
-                        #{seg.id}
-                      </span>{" "}
+                      <span className="font-mono tabular-nums text-muted">#{seg.id}</span>{" "}
                       {seg.target_text}
                     </span>
                     <span className="ml-2 shrink-0 font-mono tabular-nums text-[10px] text-muted">

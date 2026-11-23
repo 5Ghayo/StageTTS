@@ -1,5 +1,6 @@
-import React, { memo } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, type NodeProps, Position } from "@xyflow/react";
+import type React from "react";
+import { memo } from "react";
 import type { StageFlowNode } from "../../store/useWorkflowStore";
 import type { EnvBadge, NodeCategory, NodeRunStatus } from "../../types/workflow";
 
@@ -99,106 +100,96 @@ const PORT_COLOR: Record<string, string> = {
 /**
  * ComfyUI 风格低饱和着色管线节点（铺色卡片底 + 柔和微对比顶底栏）。
  */
-export const StageNode: React.FC<NodeProps<StageFlowNode>> = memo(
-  ({ data, selected }) => {
-    const theme = CATEGORY_THEME[data.category];
-    const envLabel = ENV_BADGE_MAP[data.env];
-    const rowCount = Math.max(data.inputs.length, data.outputs.length, 1);
+export const StageNode: React.FC<NodeProps<StageFlowNode>> = memo(({ data, selected }) => {
+  const theme = CATEGORY_THEME[data.category];
+  const envLabel = ENV_BADGE_MAP[data.env];
+  const rowCount = Math.max(data.inputs.length, data.outputs.length, 1);
 
-    return (
+  return (
+    <div
+      style={{
+        backgroundColor: theme.bodyBg,
+        borderColor:
+          data.status === "running" ? "#4FA882" : selected ? theme.selectedBorder : theme.border,
+      }}
+      className="w-[200px] overflow-hidden rounded-[6px] border transition-colors"
+    >
+      {/* 顶栏（低饱和同色系稍亮头栏 + 状态点） */}
       <div
-        style={{
-          backgroundColor: theme.bodyBg,
-          borderColor:
-            data.status === "running"
-              ? "#4FA882"
-              : selected
-                ? theme.selectedBorder
-                : theme.border,
-        }}
-        className="w-[200px] overflow-hidden rounded-[6px] border transition-colors"
+        style={{ backgroundColor: theme.headerBg }}
+        className="flex items-center justify-between border-b border-white/[0.06] px-2.5 py-1.5"
       >
-        {/* 顶栏（低饱和同色系稍亮头栏 + 状态点） */}
-        <div
-          style={{ backgroundColor: theme.headerBg }}
-          className="flex items-center justify-between border-b border-white/[0.06] px-2.5 py-1.5"
-        >
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[data.status]}`}
-            />
-            <span className="truncate text-[12px] font-medium text-primary">
-              {data.title}
-            </span>
-          </div>
-          <span className="ml-2 shrink-0 rounded-[4px] bg-black/25 px-1.5 py-0.5 font-mono tabular-nums text-[10px] text-secondary">
-            {data.vramGb > 0 ? `${data.vramGb.toFixed(1)}G` : "CPU"}
-          </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[data.status]}`} />
+          <span className="truncate text-[12px] font-medium text-primary">{data.title}</span>
         </div>
-
-        {/* 左右端口区（承接整卡低饱和铺色底） */}
-        <div className="space-y-1.5 py-2 text-[11px]">
-          {Array.from({ length: rowCount }).map((_, idx) => {
-            const inputPort = data.inputs[idx];
-            const outputPort = data.outputs[idx];
-            return (
-              <div
-                key={idx}
-                className="relative flex min-h-[19px] items-center justify-between px-3"
-              >
-                {inputPort ? (
-                  <div className="flex items-center gap-1.5">
-                    <Handle
-                      id={inputPort.id}
-                      type="target"
-                      position={Position.Left}
-                      className={`!h-2 !w-2 !border ${PORT_COLOR[inputPort.type] ?? "!bg-[#888888] !border-[#1C1C1C]"}`}
-                    />
-                    <span className="text-secondary">{inputPort.label}</span>
-                  </div>
-                ) : (
-                  <span />
-                )}
-
-                {outputPort ? (
-                  <div className="flex items-center gap-1.5 text-right">
-                    <span className="text-primary">{outputPort.label}</span>
-                    <Handle
-                      id={outputPort.id}
-                      type="source"
-                      position={Position.Right}
-                      className={`!h-2 !w-2 !border ${PORT_COLOR[outputPort.type] ?? "!bg-[#888888] !border-[#1C1C1C]"}`}
-                    />
-                  </div>
-                ) : (
-                  <span />
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* 底部摘要与同色系低饱和环境标识 */}
-        <div
-          style={{ backgroundColor: theme.footerBg }}
-          className="flex items-center justify-between gap-2 border-t border-white/[0.05] px-2.5 py-1.5 text-[10px]"
-        >
-          <span className="truncate text-secondary" title={data.summary}>
-            {data.summary}
-          </span>
-          <span
-            style={{
-              backgroundColor: theme.badgeBg,
-              color: theme.badgeText,
-            }}
-            className="shrink-0 rounded-[4px] px-1.5 py-0.5 font-medium"
-          >
-            {envLabel}
-          </span>
-        </div>
+        <span className="ml-2 shrink-0 rounded-[4px] bg-black/25 px-1.5 py-0.5 font-mono tabular-nums text-[10px] text-secondary">
+          {data.vramGb > 0 ? `${data.vramGb.toFixed(1)}G` : "CPU"}
+        </span>
       </div>
-    );
-  }
-);
+
+      {/* 左右端口区（承接整卡低饱和铺色底） */}
+      <div className="space-y-1.5 py-2 text-[11px]">
+        {Array.from({ length: rowCount }).map((_, idx) => {
+          const inputPort = data.inputs[idx];
+          const outputPort = data.outputs[idx];
+          return (
+            <div
+              key={`${inputPort?.id ?? "in"}-${outputPort?.id ?? "out"}-${idx}`}
+              className="relative flex min-h-[19px] items-center justify-between px-3"
+            >
+              {inputPort ? (
+                <div className="flex items-center gap-1.5">
+                  <Handle
+                    id={inputPort.id}
+                    type="target"
+                    position={Position.Left}
+                    className={`!h-2 !w-2 !border ${PORT_COLOR[inputPort.type] ?? "!bg-[#888888] !border-[#1C1C1C]"}`}
+                  />
+                  <span className="text-secondary">{inputPort.label}</span>
+                </div>
+              ) : (
+                <span />
+              )}
+
+              {outputPort ? (
+                <div className="flex items-center gap-1.5 text-right">
+                  <span className="text-primary">{outputPort.label}</span>
+                  <Handle
+                    id={outputPort.id}
+                    type="source"
+                    position={Position.Right}
+                    className={`!h-2 !w-2 !border ${PORT_COLOR[outputPort.type] ?? "!bg-[#888888] !border-[#1C1C1C]"}`}
+                  />
+                </div>
+              ) : (
+                <span />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 底部摘要与同色系低饱和环境标识 */}
+      <div
+        style={{ backgroundColor: theme.footerBg }}
+        className="flex items-center justify-between gap-2 border-t border-white/[0.05] px-2.5 py-1.5 text-[10px]"
+      >
+        <span className="truncate text-secondary" title={data.summary}>
+          {data.summary}
+        </span>
+        <span
+          style={{
+            backgroundColor: theme.badgeBg,
+            color: theme.badgeText,
+          }}
+          className="shrink-0 rounded-[4px] px-1.5 py-0.5 font-medium"
+        >
+          {envLabel}
+        </span>
+      </div>
+    </div>
+  );
+});
 
 StageNode.displayName = "StageNode";

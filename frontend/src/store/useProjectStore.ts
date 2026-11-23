@@ -2,19 +2,22 @@ import { create } from "zustand";
 import { createDemoScriptCopy } from "../data/demoScript";
 import {
   ApiError,
+  saveProjectScript as apiSaveProjectScript,
+  synthesizeSegments as apiSynthesizeSegments,
   checkHealth,
   fetchProjectScript,
   fetchProjects,
-  saveProjectScript as apiSaveProjectScript,
-  synthesizeSegments as apiSynthesizeSegments,
+  translateProject,
   uploadProjectMedia,
 } from "../services/api";
 import type {
   CharacterConfig,
   ProjectMode,
   ProjectScript,
+  Segment,
   SegmentPatch,
 } from "../types/script";
+import { synthesisIssues } from "../utils/synthesisIssues";
 
 /**
  * 为静态音频/视频资源 URL 拼接防缓存时间戳（ARCHITECTURE.md 铁律 #8）。
@@ -22,7 +25,7 @@ import type {
  */
 export function getCacheBustedUrl(
   rawUrl: string | null | undefined,
-  versionToken?: number
+  versionToken?: number,
 ): string | null {
   if (!rawUrl) {
     return null;
@@ -79,15 +82,17 @@ interface ProjectState {
   updateSegmentLocal: (patch: SegmentPatch) => void;
   batchUpdateSegmentsLocal: (patches: SegmentPatch[]) => number[];
   updateBgmVolume: (volume: number) => void;
-  updateCharacter: (
-    speakerKey: string,
-    patch: Partial<CharacterConfig>
-  ) => void;
+  updateCharacter: (speakerKey: string, patch: Partial<CharacterConfig>) => void;
+  addCharacter: (name: string) => string | null;
+  mergeCharacters: (source: string, destination: string) => void;
+  updateTranslationSettings: (sourceLang: string | null, glossary: Record<string, string>) => void;
+  retranslate: () => Promise<string>;
   loadProjectScript: (projectId: string) => Promise<void>;
   saveProjectScript: () => Promise<void>;
   synthesizeSegment: (segmentIds?: number[]) => Promise<{
     simulated: boolean;
     message: string;
+    issues?: string[];
   }>;
 }
 
@@ -99,17 +104,28 @@ const DEFAULT_TRACK_STATES: TrackStates = {
   bgmMuted: false,
 };
 
+function invalidateAudio(seg: Segment): Segment {
+  return {
+    ...seg,
+    status: seg.keep_original ? "ready" : "pending",
+    tts_wav: null,
+    actual_duration: seg.keep_original ? seg.end - seg.start : null,
+    applied_speed_factor: null,
+  };
+}
+
 function applyPatchToSegments(
   script: ProjectScript,
-  patches: SegmentPatch[]
+  patches: SegmentPatch[],
 ): { nextScript: ProjectScript; markedPendingIds: number[] } {
-  const resynthFields = new Set([
+  const resynthFields: Array<keyof SegmentPatch & keyof Segment> = [
     "speaker",
     "target_text",
     "target_lang",
     "emotion",
     "keep_original",
-  ]);
+    "speed_factor",
+  ];
   const patchMap = new Map<number, SegmentPatch>();
   for (const p of patches) {
     patchMap.set(p.id, p);
@@ -123,19 +139,21 @@ function applyPatchToSegments(
     }
     const { id: _ignoreId, ...fields } = patch;
     const cleanFields = Object.fromEntries(
-      Object.entries(fields).filter(([, value]) => value !== undefined)
-    );
-    const shouldMarkPending = Object.keys(cleanFields).some((key) =>
-      resynthFields.has(key)
-    );
-    if (shouldMarkPending) {
+      Object.entries(fields).filter(([, value]) => value !== undefined),
+    ) as Partial<Segment>;
+    if (cleanFields.speaker !== undefined) {
+      if (!Object.prototype.hasOwnProperty.call(script.characters, cleanFields.speaker)) return seg;
+      cleanFields.speaker_needs_review ??= false;
+    }
+    if (cleanFields.orig_text !== undefined && cleanFields.orig_text !== seg.orig_text) {
+      cleanFields.alignment_needs_review ??= true;
+    }
+    const updated = { ...seg, ...cleanFields };
+    const affectsAudio = resynthFields.some((key) => updated[key] !== seg[key]);
+    if (affectsAudio && !updated.keep_original) {
       markedPendingIds.push(seg.id);
     }
-    return {
-      ...seg,
-      ...cleanFields,
-      status: shouldMarkPending ? ("pending" as const) : seg.status,
-    };
+    return affectsAudio ? invalidateAudio(updated) : updated;
   });
 
   return {
@@ -273,8 +291,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const objectUrl = URL.createObjectURL(file);
       const duration = await probeBrowserMediaDuration(objectUrl, isAudio);
       const cleanName =
-        file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") ||
-        `local_${Date.now()}`;
+        file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") || `local_${Date.now()}`;
       const localScript: ProjectScript = {
         project_id: cleanName,
         mode: targetMode,
@@ -286,9 +303,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           duration,
           bgm_volume: 0.75,
         },
+        glossary: {},
         characters: {
           SPEAKER_00: {
             display_name: "主讲人",
+            speaking_style: "",
             color: "#5B8DEF",
             gpt_weights: null,
             sovits_weights: null,
@@ -303,6 +322,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             end: Math.min(duration, 4.0),
             speaker: "SPEAKER_00",
             orig_text: "",
+            words: [],
+            alignment_needs_review: true,
+            speaker_needs_review: true,
             target_text: "请点击“精修”编辑本句台词，或连接后端自动识别分轨。",
             target_lang: "zh",
             emotion: "neutral",
@@ -330,12 +352,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   setScript: (script) =>
-    set({
-      script,
-      mode: script.mode,
-      selectedSegmentId: script.segments[0]?.id ?? null,
-      error: null,
-      isDirty: false,
+    set((state) => {
+      const keepSelection =
+        state.script?.project_id === script.project_id &&
+        state.selectedSegmentId != null &&
+        script.segments.some((seg) => seg.id === state.selectedSegmentId);
+      return {
+        script,
+        mode: script.mode,
+        selectedSegmentId: keepSelection
+          ? state.selectedSegmentId
+          : (script.segments[0]?.id ?? null),
+        error: null,
+        isDirty: false,
+      };
     }),
 
   setMode: (mode) =>
@@ -353,13 +383,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (segments.length === 0) {
         return state;
       }
-      const currentIdx = segments.findIndex(
-        (seg) => seg.id === state.selectedSegmentId
-      );
+      const currentIdx = segments.findIndex((seg) => seg.id === state.selectedSegmentId);
       const nextIdx =
-        currentIdx === -1
-          ? 0
-          : Math.max(0, Math.min(segments.length - 1, currentIdx + delta));
+        currentIdx === -1 ? 0 : Math.max(0, Math.min(segments.length - 1, currentIdx + delta));
       const target = segments[nextIdx];
       return {
         selectedSegmentId: target.id,
@@ -376,8 +402,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setIsPlaying: (playing) => set({ isPlaying: playing }),
 
-  setTimelineZoom: (zoom) =>
-    set({ timelineZoom: Math.max(30, Math.min(180, Math.round(zoom))) }),
+  setTimelineZoom: (zoom) => set({ timelineZoom: Math.max(30, Math.min(180, Math.round(zoom))) }),
 
   toggleTrackState: (key) =>
     set((state) => ({
@@ -414,10 +439,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!state.script || patches.length === 0) {
       return [];
     }
-    const { nextScript, markedPendingIds } = applyPatchToSegments(
-      state.script,
-      patches
-    );
+    const { nextScript, markedPendingIds } = applyPatchToSegments(state.script, patches);
     set({
       script: nextScript,
       isDirty: true,
@@ -445,23 +467,108 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   updateCharacter: (speakerKey, patch) =>
     set((state) => {
-      if (!state.script || !state.script.characters[speakerKey]) {
+      const script = state.script;
+      const previous = script?.characters[speakerKey];
+      if (!script || !previous) {
         return state;
       }
+      const character = { ...previous, ...patch };
+      const voiceChanged =
+        character.gpt_weights !== previous.gpt_weights ||
+        character.sovits_weights !== previous.sovits_weights ||
+        character.emotion_refs !== previous.emotion_refs;
       return {
         isDirty: true,
         script: {
-          ...state.script,
+          ...script,
           characters: {
-            ...state.script.characters,
-            [speakerKey]: {
-              ...state.script.characters[speakerKey],
-              ...patch,
-            },
+            ...script.characters,
+            [speakerKey]: character,
           },
+          segments: voiceChanged
+            ? script.segments.map((seg) =>
+                seg.speaker === speakerKey && !seg.keep_original ? invalidateAudio(seg) : seg,
+              )
+            : script.segments,
         },
       };
     }),
+
+  addCharacter: (name) => {
+    const script = get().script;
+    const displayName = name.trim();
+    if (!script || !displayName) return null;
+    let index = Object.keys(script.characters).length + 1;
+    while (script.characters[`character_${index}`]) index += 1;
+    const speaker = `character_${index}`;
+    set({
+      isDirty: true,
+      script: {
+        ...script,
+        characters: {
+          ...script.characters,
+          [speaker]: {
+            display_name: displayName,
+            speaking_style: "",
+            color: "#3b82f6",
+            gpt_weights: null,
+            sovits_weights: null,
+            emotion_refs: {},
+            avatar: null,
+          },
+        },
+      },
+    });
+    return speaker;
+  },
+
+  mergeCharacters: (source, destination) =>
+    set((state) => {
+      const script = state.script;
+      if (!script?.characters[source] || !script.characters[destination] || source === destination)
+        return state;
+      const patches = script.segments
+        .filter((seg) => seg.speaker === source)
+        .map((seg) => ({
+          id: seg.id,
+          speaker: destination,
+          speaker_needs_review: seg.speaker_needs_review ?? true,
+        }));
+      const { nextScript } = applyPatchToSegments(script, patches);
+      const characters = { ...nextScript.characters };
+      delete characters[source];
+      return { isDirty: true, script: { ...nextScript, characters } };
+    }),
+
+  updateTranslationSettings: (sourceLang, glossary) =>
+    set((state) =>
+      state.script
+        ? {
+            script: { ...state.script, source_lang: sourceLang, glossary },
+            isDirty: true,
+          }
+        : state,
+    ),
+
+  retranslate: async () => {
+    const { script, isDirty, backendStatus, isLoading, isSynthesizing } = get();
+    if (!script || backendStatus !== "online") return "请连接后端后重译";
+    if (isLoading || isSynthesizing) return "请等待当前操作完成";
+    set({ isLoading: true, error: null });
+    try {
+      if (isDirty) await apiSaveProjectScript(script);
+      const result = await translateProject(script.project_id);
+      if (get().script !== script) return "重译已在后端完成，当前编辑保留在本地";
+      const errNote = result.errors?.length ? `（部分批次失败：${result.errors[0]}）` : "";
+      const message = `已翻译 ${result.translated_ids.length} 条，保留 ${result.skipped_count} 条${errNote}`;
+      set({ script: result.script, isDirty: false, lastSyncMessage: message });
+      return message;
+    } catch (err) {
+      return err instanceof Error ? err.message : "重译失败";
+    } finally {
+      set({ isLoading: false });
+    }
+  },
 
   loadProjectScript: async (projectId) => {
     set({ isLoading: true, error: null });
@@ -501,6 +608,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const saved = await apiSaveProjectScript(script);
+      if (get().script !== script) {
+        set({ isLoading: false });
+        return;
+      }
       set({
         script: saved,
         isLoading: false,
@@ -558,14 +669,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const slot = Math.max(0.4, seg.end - seg.start);
         const estimated = Math.min(
           slot * 1.12,
-          Math.max(0.8, seg.target_text.length / 4.8 / Math.max(0.5, seg.speed_factor))
+          Math.max(0.8, seg.target_text.length / 4.8 / Math.max(0.5, seg.speed_factor)),
         );
         const paddedId = String(seg.id).padStart(4, "0");
         return {
           ...seg,
-          tts_wav:
-            seg.tts_wav ??
-            `/workspace/${latestScript.project_id}/tts/seg_${paddedId}.wav`,
+          tts_wav: seg.tts_wav ?? `/workspace/${latestScript.project_id}/tts/seg_${paddedId}.wav`,
           actual_duration: Number(estimated.toFixed(2)),
           status: "ready" as const,
         };
@@ -589,38 +698,46 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     set({ isSynthesizing: true, error: null });
     try {
+      if (state.isDirty) {
+        const saved = await apiSaveProjectScript(script);
+        if (get().script?.project_id !== script.project_id) {
+          set({ isSynthesizing: false });
+          return { simulated: false, message: "项目已切换，已取消合成" };
+        }
+        set((curr) => (curr.script === script ? { script: saved, isDirty: false } : {}));
+      }
       const res = await apiSynthesizeSegments(script.project_id, targetIds);
+      if (get().script?.project_id !== script.project_id) {
+        set({ isSynthesizing: false });
+        return { simulated: false, message: "项目已切换，合成结果已保存到原项目" };
+      }
+      const issues = synthesisIssues(res);
+      const message = `已合成 ${res.synthesized_ids.length} 条${issues.length ? ` · ${issues[0]}` : ""}`;
       get().bumpAudioVersion(res.synthesized_ids);
-      set({
-        script: res.script,
-        isSynthesizing: false,
-        isDirty: false,
-        backendStatus: "online",
-        lastSyncMessage: `已完成 ${res.synthesized_ids.length} 条配音合成`,
+      set((curr) => {
+        const keepSelection =
+          curr.selectedSegmentId != null &&
+          res.script.segments.some((seg) => seg.id === curr.selectedSegmentId);
+        return {
+          script: res.script,
+          selectedSegmentId: keepSelection
+            ? curr.selectedSegmentId
+            : (res.script.segments[0]?.id ?? null),
+          isSynthesizing: false,
+          isDirty: false,
+          backendStatus: "online",
+          lastSyncMessage: message,
+        };
       });
       return {
         simulated: false,
-        message: `已完成 ${res.synthesized_ids.length} 条配音合成`,
+        message,
+        issues,
       };
     } catch (err) {
-      const isUnavailableOrOffline =
-        err instanceof ApiError &&
-        (err.status === 503 ||
-          err.status === 502 ||
-          err.status === 504 ||
-          err.isNotImplemented ||
-          err.isNetworkError);
-      if (!isUnavailableOrOffline) {
-        set({
-          isSynthesizing: false,
-          error: err instanceof Error ? err.message : "合成失败",
-        });
-        return {
-          simulated: false,
-          message: err instanceof Error ? err.message : "合成失败",
-        };
-      }
-      return applyLocalSimulatedSynth("语音服务未启动，已执行本地演示合成");
+      const message = err instanceof Error ? err.message : "合成失败";
+      set({ isSynthesizing: false, error: message });
+      return { simulated: false, message, issues: [message] };
     }
   },
 }));

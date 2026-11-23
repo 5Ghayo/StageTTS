@@ -1,19 +1,21 @@
 import {
-  applyEdgeChanges,
-  applyNodeChanges,
   type Edge,
   type EdgeChange,
   type Node,
   type NodeChange,
+  applyEdgeChanges,
+  applyNodeChanges,
 } from "@xyflow/react";
 import { create } from "zustand";
 import {
+  type ParseStatusResponse,
   fetchParseStatus,
   parseProjectMedia,
   renderVideo,
+  saveProjectScript,
+  subscribeParseStatus,
   synthesizeSegments,
 } from "../services/api";
-import { useProjectStore } from "./useProjectStore";
 import type {
   CenterViewTab,
   LeftDrawerTab,
@@ -22,9 +24,10 @@ import type {
   PipelineLogEntry,
   RightPanelTab,
   StageNodeData,
-  VramState,
   WorkspacePreset,
 } from "../types/workflow";
+import { synthesisIssues } from "../utils/synthesisIssues";
+import { useProjectStore } from "./useProjectStore";
 
 export type StageFlowNode = Node<StageNodeData, "stageNode">;
 
@@ -132,11 +135,8 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         status: "idle",
         inputs: [{ id: "in-script", label: "标准剧本", type: "SCRIPT" }],
         outputs: [{ id: "out-wavs", label: "分句配音", type: "AUDIO[]" }],
-        summary: `超 ${Math.round((config.overflowRatio - 1) * 100)}% 改写 · ${config.maxReflectionRounds} 轮`,
-        params: {
-          overflow_ratio: config.overflowRatio,
-          max_rounds: config.maxReflectionRounds,
-        },
+        summary: "超 15% 时最多改写两轮",
+        params: { overflow_ratio: 1.15, max_rounds: 2 },
       },
     },
     {
@@ -270,7 +270,7 @@ function nowTimeStr(): string {
 function makeLog(
   env: PipelineLogEntry["env"],
   message: string,
-  level: PipelineLogEntry["level"] = "info"
+  level: PipelineLogEntry["level"] = "info",
 ): PipelineLogEntry {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -284,8 +284,7 @@ function makeLog(
 const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
   computeType: "int8",
   targetLang: "zh",
-  overflowRatio: 1.15,
-  maxReflectionRounds: 2,
+  allowDemucsCpu: false,
   burnWatermark: false,
 };
 
@@ -298,7 +297,6 @@ interface WorkflowState {
   nodes: StageFlowNode[];
   edges: Edge[];
   pipelineConfig: PipelineConfig;
-  vramState: VramState;
   isPipelineRunning: boolean;
   pipelineLogs: PipelineLogEntry[];
 
@@ -314,7 +312,7 @@ interface WorkflowState {
   appendLog: (
     env: PipelineLogEntry["env"],
     message: string,
-    level?: PipelineLogEntry["level"]
+    level?: PipelineLogEntry["level"],
   ) => void;
   runPipeline: (options?: { parseOnly?: boolean }) => Promise<void>;
   runPipelineSimulation: () => Promise<void>;
@@ -331,15 +329,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   nodes: createInitialNodes(DEFAULT_PIPELINE_CONFIG),
   edges: INITIAL_EDGES,
   pipelineConfig: DEFAULT_PIPELINE_CONFIG,
-  vramState: {
-    usedGb: 0.2,
-    limitGb: 8.0,
-    activeEnv: "idle",
-  },
   isPipelineRunning: false,
-  pipelineLogs: [
-    makeLog("system", "RTX 5060 8GB 串行显存接力策略已就绪", "info"),
-  ],
+  pipelineLogs: [makeLog("system", "RTX 5060 8GB 串行显存接力策略已就绪", "info")],
 
   setWorkspacePreset: (preset) => {
     if (preset === "workflow") {
@@ -362,9 +353,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       workspacePreset: preset,
       centerTab: "video",
       rightTab:
-        state.rightTab === "node" || state.rightTab === "logs"
-          ? "inspector"
-          : state.rightTab,
+        state.rightTab === "node" || state.rightTab === "logs" ? "inspector" : state.rightTab,
     }));
   },
 
@@ -431,28 +420,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             },
           };
         }
-        if (node.id === "agent_tts") {
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              summary: `超 ${Math.round((nextConfig.overflowRatio - 1) * 100)}% 改写 · ${nextConfig.maxReflectionRounds} 轮`,
-              params: {
-                ...node.data.params,
-                overflow_ratio: nextConfig.overflowRatio,
-                max_rounds: nextConfig.maxReflectionRounds,
-              },
-            },
-          };
-        }
         if (node.id === "ffmpeg_mixer") {
           return {
             ...node,
             data: {
               ...node.data,
-              summary: nextConfig.burnWatermark
-                ? "重编码烧录合规水印"
-                : "无损流快速封装",
+              summary: nextConfig.burnWatermark ? "重编码烧录合规水印" : "无损流快速封装",
               params: {
                 ...node.data.params,
                 burn_watermark: nextConfig.burnWatermark,
@@ -476,10 +449,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   appendLog: (env, message, level = "info") =>
     set((state) => ({
-      pipelineLogs: [
-        ...state.pipelineLogs.slice(-39),
-        makeLog(env, message, level),
-      ],
+      pipelineLogs: [...state.pipelineLogs.slice(-39), makeLog(env, message, level)],
     })),
 
   runPipeline: async (options) => {
@@ -506,9 +476,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const setNodeStatus = (nodeId: string, status: NodeRunStatus) => {
       set((state) => ({
         nodes: state.nodes.map((node) =>
-          node.id === nodeId
-            ? { ...node, data: { ...node.data, status } }
-            : node
+          node.id === nodeId ? { ...node, data: { ...node.data, status } } : node,
         ),
       }));
     };
@@ -523,18 +491,20 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       }));
     };
 
+    const targetProjectId = currentScript.project_id;
+    const isSameProject = () => useProjectStore.getState().script?.project_id === targetProjectId;
     const cfg = get().pipelineConfig;
-    const whisperVram = cfg.computeType === "int8" ? 3.4 : 5.2;
     const needsParse =
-      parseOnly ||
-      currentScript.segments.length === 0 ||
-      !currentScript.media.vocals_wav;
+      parseOnly || currentScript.segments.length === 0 || !currentScript.media.vocals_wav;
 
     set((state) => ({
       isPipelineRunning: true,
       rightTab: "logs",
       nodes: state.nodes.map((n) => {
-        if (!needsParse && ["media_input", "demucs", "whisperx", "llm_tagger", "script_hub"].includes(n.id)) {
+        if (
+          !needsParse &&
+          ["media_input", "demucs", "whisperx", "llm_tagger", "script_hub"].includes(n.id)
+        ) {
           return { ...n, data: { ...n.data, status: "done" } };
         }
         return { ...n, data: { ...n.data, status: "queued" } };
@@ -552,11 +522,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         activeNode = "media_input";
         setNodeStatus("media_input", "running");
         setActiveEdges(["e-input-demucs"]);
-        set({ vramState: { usedGb: 0.2, limitGb: 8, activeEnv: "env_parse" } });
         get().appendLog(
           "env_parse",
           `启动真实 4 阶段解析：项目 ${activeScript.project_id}（目标语种=${cfg.targetLang}，精度=${cfg.computeType}）`,
-          "info"
+          "info",
         );
 
         let seenLogCount = 0;
@@ -570,14 +539,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             setNodeStatus("media_input", "done");
             setNodeStatus("demucs", "running");
             setActiveEdges(["e-demucs-whisper", "e-demucs-hub-bgm"]);
-            set({ vramState: { usedGb: 2.1, limitGb: 8, activeEnv: "env_parse" } });
           } else if (stage === "Stage2" || stage === "Stage3") {
             activeNode = "whisperx";
             setNodeStatus("media_input", "done");
             setNodeStatus("demucs", "done");
             setNodeStatus("whisperx", "running");
             setActiveEdges(["e-whisper-llm"]);
-            set({ vramState: { usedGb: whisperVram, limitGb: 8, activeEnv: "env_parse" } });
           } else if (stage === "Stage4") {
             activeNode = "llm_tagger";
             setNodeStatus("media_input", "done");
@@ -585,7 +552,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             setNodeStatus("whisperx", "done");
             setNodeStatus("llm_tagger", "running");
             setActiveEdges(["e-llm-hub"]);
-            set({ vramState: { usedGb: 0.5, limitGb: 8, activeEnv: "env_parse" } });
           } else if (stage === "Done") {
             activeNode = "script_hub";
             setNodeStatus("media_input", "done");
@@ -596,48 +562,80 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           }
         };
 
-        const pollTimer = window.setInterval(() => {
-          void fetchParseStatus(activeScript.project_id)
-            .then((status) => {
-              if (status.stage && status.stage !== "idle") {
-                applyStageFromWorker(status.stage);
-              }
-              if (status.logs.length > seenLogCount) {
-                const newLogs = status.logs.slice(seenLogCount);
-                seenLogCount = status.logs.length;
-                for (const line of newLogs) {
-                  get().appendLog("env_parse", line, "info");
-                }
-              }
-            })
-            .catch(() => {
-              // 忽略偶发轮询抖动
-            });
-        }, 1200);
+        const applyParseStatus = (status: ParseStatusResponse, final = false) => {
+          if (!final && !status.active) {
+            return;
+          }
+          const count = status.log_count ?? status.logs.length;
+          if (count < seenLogCount) {
+            return;
+          }
+          if (status.stage && status.stage !== "idle") {
+            applyStageFromWorker(status.stage);
+          }
+          const firstNew = Math.max(0, status.logs.length - (count - seenLogCount));
+          for (const line of status.logs.slice(firstNew)) {
+            const level = /使用未分离音频|失败|显存不足/.test(line) ? "warn" : "info";
+            get().appendLog("env_parse", line, level);
+          }
+          seenLogCount = count;
+        };
+
+        const refreshParseStatus = async (final = false) => {
+          try {
+            const status = await fetchParseStatus(targetProjectId);
+            applyParseStatus(status, final);
+          } catch {
+            // 解析仍由 POST 请求跟踪。
+          }
+        };
+
+        let fallbackTimer: number | undefined;
+        const unsubscribeSse = subscribeParseStatus(
+          targetProjectId,
+          (status) => applyParseStatus(status),
+          () => {
+            if (fallbackTimer === undefined) {
+              fallbackTimer = window.setInterval(() => void refreshParseStatus(), 1200);
+            }
+          },
+        );
 
         try {
+          if (projectState.isDirty) {
+            activeScript = await saveProjectScript(activeScript);
+            if (isSameProject()) {
+              useProjectStore.setState({ isDirty: false });
+            }
+          }
           activeScript = await parseProjectMedia(activeScript.project_id, {
             target_lang: cfg.targetLang,
             compute_type: cfg.computeType,
+            allow_demucs_cpu: cfg.allowDemucsCpu,
           });
         } finally {
-          window.clearInterval(pollTimer);
+          unsubscribeSse();
+          if (fallbackTimer !== undefined) {
+            window.clearInterval(fallbackTimer);
+          }
+          await refreshParseStatus(true);
         }
 
-        // 将解析出的真实剧本写回全局项目状态（立即刷新时间轴与检查器）
-        useProjectStore.getState().setScript(activeScript);
+        // 将解析出的真实剧本写回全局项目状态（仅当当前未切换项目时更新视图）
+        if (isSameProject()) {
+          useProjectStore.getState().setScript(activeScript);
+        }
         setNodeStatus("media_input", "done");
         setNodeStatus("demucs", "done");
         setNodeStatus("whisperx", "done");
         setNodeStatus("llm_tagger", "done");
         setNodeStatus("script_hub", "done");
-        set({ vramState: { usedGb: 0.0, limitGb: 8, activeEnv: "idle" } });
 
         const charCount = Object.keys(activeScript.characters).length;
         get().appendLog(
           "env_parse",
           `解析完成并已释放显存：生成 ${activeScript.segments.length} 条片段、${charCount} 个说话人`,
-          "success"
+          "success",
         );
 
         if (parseOnly) {
@@ -646,7 +644,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           get().appendLog(
             "system",
             "仅解析模式已完成，可切回「剪辑」视图查看时间轴并按需合成配音",
-            "success"
+            "success",
           );
           return;
         }
@@ -662,6 +660,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       // -------------------------------------------------------------------
       // 阶段 B：调用真实后端 POST /api/projects/{id}/synthesize（GPT-SoVITS）
       // -------------------------------------------------------------------
+      if (!needsParse && projectState.isDirty) {
+        activeScript = await saveProjectScript(activeScript);
+        if (isSameProject()) {
+          useProjectStore.setState({ script: activeScript, isDirty: false });
+        }
+      }
       const pendingIds = activeScript.segments
         .filter((s) => !s.keep_original && s.status !== "ready")
         .map((s) => s.id);
@@ -669,37 +673,27 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       activeNode = "agent_tts";
       setNodeStatus("agent_tts", "running");
       setActiveEdges(["e-hub-tts", "e-tts-mixer", "e-tts-stage"]);
-      set({ vramState: { usedGb: 3.8, limitGb: 8, activeEnv: "env_tts" } });
 
       if (pendingIds.length > 0) {
         get().appendLog(
           "env_tts",
           `开始调用 GPT-SoVITS 合成 ${pendingIds.length} 条待合成片段...`,
-          "info"
+          "info",
         );
         const synthRes = await synthesizeSegments(activeScript.project_id, pendingIds);
         activeScript = synthRes.script;
-        useProjectStore.getState().setScript(activeScript);
-        useProjectStore.getState().bumpAudioVersion(synthRes.synthesized_ids);
-
-        if (synthRes.errors.length > 0) {
-          get().appendLog(
-            "env_tts",
-            `部分片段合成失败 (${synthRes.errors.length} 条)：${synthRes.errors[0]}`,
-            "warn"
-          );
+        if (isSameProject()) {
+          useProjectStore.getState().setScript(activeScript);
+          useProjectStore.getState().bumpAudioVersion(synthRes.synthesized_ids);
         }
-        if (synthRes.overflow_segments.length > 0) {
-          get().appendLog(
-            "env_tts",
-            `检测到 ${synthRes.overflow_segments.length} 条片段超长（>1.15x），可在「剪辑 -> 智能体」触发自动精简`,
-            "warn"
-          );
+
+        for (const issue of synthesisIssues(synthRes)) {
+          get().appendLog("env_tts", issue, "warn");
         }
         get().appendLog(
           "env_tts",
           `语音合成完成：成功 ${synthRes.synthesized_ids.length} 条`,
-          "success"
+          "success",
         );
       } else {
         get().appendLog("env_tts", "所有片段均为已就绪状态，跳过重复合成", "info");
@@ -710,19 +704,15 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       // 阶段 C：调用真实后端 POST /api/projects/{id}/render（FFmpeg 混音封装）
       // -------------------------------------------------------------------
       const hasReadyOrOrig = activeScript.segments.some(
-        (s) => s.status === "ready" || s.keep_original
+        (s) => s.status === "ready" || s.keep_original,
       );
       if (hasReadyOrOrig) {
         activeNode = "ffmpeg_mixer";
         setNodeStatus("ffmpeg_mixer", "running");
         setNodeStatus("virtual_stage_out", "running");
-        set({ vramState: { usedGb: 0.2, limitGb: 8, activeEnv: "env_backend" } });
         get().appendLog("env_backend", "正在执行 pydub 毫秒拼轨与 FFmpeg 混音封装...", "info");
 
-        const renderRes = await renderVideo(
-          activeScript.project_id,
-          cfg.burnWatermark
-        );
+        const renderRes = await renderVideo(activeScript.project_id, cfg.burnWatermark);
         activeScript = {
           ...activeScript,
           media: {
@@ -730,13 +720,15 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             output_video: renderRes.output_video,
           },
         };
-        useProjectStore.getState().setScript(activeScript);
+        if (isSameProject()) {
+          useProjectStore.getState().setScript(activeScript);
+        }
         setNodeStatus("ffmpeg_mixer", "done");
         setNodeStatus("virtual_stage_out", "done");
         get().appendLog(
           "env_backend",
           `全管线执行完毕，成片已输出：${renderRes.output_video}`,
-          "success"
+          "success",
         );
       } else {
         setNodeStatus("ffmpeg_mixer", "idle");
@@ -745,18 +737,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       }
 
       setActiveEdges([]);
-      set({
-        isPipelineRunning: false,
-        vramState: { usedGb: 0.2, limitGb: 8, activeEnv: "idle" },
-      });
+      set({ isPipelineRunning: false });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "管线执行异常";
       setNodeStatus(activeNode, "error");
       setActiveEdges([]);
-      set({
-        isPipelineRunning: false,
-        vramState: { usedGb: 0.0, limitGb: 8, activeEnv: "idle" },
-      });
+      set({ isPipelineRunning: false });
       get().appendLog("system", `管线执行失败：${msg}`, "error");
     }
   },
@@ -769,9 +755,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const setNodeStatus = (nodeId: string, status: NodeRunStatus) => {
       set((state) => ({
         nodes: state.nodes.map((node) =>
-          node.id === nodeId
-            ? { ...node, data: { ...node.data, status } }
-            : node
+          node.id === nodeId ? { ...node, data: { ...node.data, status } } : node,
         ),
       }));
     };
@@ -800,27 +784,18 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
     setNodeStatus("media_input", "running");
     setActiveEdges(["e-input-demucs"]);
-    set({ vramState: { usedGb: 0.1, limitGb: 8, activeEnv: "env_backend" } });
     await sleep(350);
     setNodeStatus("media_input", "done");
 
     setNodeStatus("demucs", "running");
     setActiveEdges(["e-demucs-whisper", "e-demucs-hub-bgm"]);
-    set({ vramState: { usedGb: 2.1, limitGb: 8, activeEnv: "env_parse" } });
     get().appendLog("env_parse", "分离纯人声与背景伴奏", "info");
     await sleep(500);
     setNodeStatus("demucs", "done");
 
     setNodeStatus("whisperx", "running");
     setActiveEdges(["e-whisper-llm"]);
-    set({
-      vramState: { usedGb: whisperVram, limitGb: 8, activeEnv: "env_parse" },
-    });
-    get().appendLog(
-      "env_parse",
-      `语音识别与说话人聚类（显存 ${whisperVram} GB）`,
-      "info"
-    );
+    get().appendLog("env_parse", `语音识别与说话人聚类（显存 ${whisperVram} GB）`, "info");
     await sleep(600);
     setNodeStatus("whisperx", "done");
 
@@ -830,34 +805,27 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     await sleep(450);
     setNodeStatus("llm_tagger", "done");
 
-    set({ vramState: { usedGb: 0.0, limitGb: 8, activeEnv: "idle" } });
     get().appendLog("env_parse", "解析子进程退出，显存已释放归零", "success");
     await sleep(350);
 
     setNodeStatus("script_hub", "running");
     setActiveEdges(["e-hub-tts", "e-hub-mixer-bgm", "e-hub-stage"]);
-    set({ vramState: { usedGb: 0.2, limitGb: 8, activeEnv: "env_backend" } });
     await sleep(350);
     setNodeStatus("script_hub", "done");
 
     setNodeStatus("agent_tts", "running");
     setActiveEdges(["e-tts-mixer", "e-tts-stage"]);
-    set({ vramState: { usedGb: 4.2, limitGb: 8, activeEnv: "env_tts" } });
     get().appendLog("env_tts", "按角色分组合成并检查时长约束 (4.2 GB)", "info");
     await sleep(700);
     setNodeStatus("agent_tts", "done");
 
     setNodeStatus("ffmpeg_mixer", "running");
     setNodeStatus("virtual_stage_out", "running");
-    set({ vramState: { usedGb: 0.2, limitGb: 8, activeEnv: "env_backend" } });
     get().appendLog("env_backend", "混音封装与舞台同步完成", "success");
     await sleep(450);
     setNodeStatus("ffmpeg_mixer", "done");
     setNodeStatus("virtual_stage_out", "done");
     setActiveEdges([]);
-    set({
-      isPipelineRunning: false,
-      vramState: { usedGb: 4.2, limitGb: 8, activeEnv: "env_tts" },
-    });
+    set({ isPipelineRunning: false });
   },
 }));

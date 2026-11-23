@@ -73,10 +73,10 @@ FFmpeg 混音导出 output.mp4
 | :--- | :---: | :--- |
 | `script.json` 数据契约 | 已完成 | Pydantic v2 与 TypeScript 类型 1:1 对齐 |
 | 4 阶段解析流水线 | 已完成并实测 | FFmpeg → Demucs → WhisperX → pyannote → LLM 标注，已通过英文/日语真实视频测试 |
-| GPT-SoVITS 分组配音 | 已完成 | 按 speaker 分组、情绪参考音路由、零样本兜底 |
+| GPT-SoVITS 分组配音 | 已完成 | 按角色切换权重、按情绪选择参考音，缺失时使用与原文对应的同角色原声片段 |
 | 8GB 显存串行接力 | 已完成 | 解析前释放 GPT-SoVITS，配音时按需拉起 |
-| Agent 时长反思闭环 | 部分完成 | Agent 对话路径会自动反思；普通「全部配音 / 运行全管线」目前只检测并提示超长，尚未自动调用 Agent 改写 |
-| 参考音管理 | 基础可用 | 默认从 `vocals.wav` 自动截零样本参考音，但没有角色参考音管理面板 |
+| 配音时长闭环 | 已完成 | 全部配音、全管线和智能体统一支持超出时间槽 15% 时自动改写重配（最多两轮），试听与导出使用同一份调速后的音频 |
+| 参考音与角色校对 | 已完成 | 在「角色与情绪音色」中编辑/合并角色、批量改派、上传或试听 3–10 秒参考音并保存逐字稿；在「精修」中校对原文与说话人，在「项目媒体素材 → 翻译设置」中编辑术语表 |
 | 评测脚本 | 骨架就绪 | 需要接入真实评测集后才能真正跑出指标 |
 
 ---
@@ -340,22 +340,29 @@ ffprobe -version
 
 ---
 
-### 5.2 安装 Node.js
+### 5.2 安装 Node.js 与 pnpm
 
-推荐 Node.js 20 LTS。
+推荐 Node.js 20 LTS（前端使用 `pnpm` 管理依赖与 `pnpm-lock.yaml`）。
 
 验证：
 
 ```powershell
 node -v
-npm -v
+pnpm -v
+```
+
+若尚未安装 `pnpm`，可先启用 Corepack 或全局安装：
+
+```powershell
+corepack enable
+# 或 npm install -g pnpm
 ```
 
 然后进入前端目录安装依赖：
 
 ```powershell
 cd frontend
-npm install
+pnpm install
 ```
 
 ---
@@ -598,7 +605,7 @@ http://127.0.0.1:8000/api/health
 
 ```powershell
 cd frontend
-npm run dev
+pnpm dev
 ```
 
 浏览器打开：
@@ -662,10 +669,9 @@ ffmpeg -version
 
 ---
 
-### Q4：Demucs CUDA 失败后回退 CPU
+### Q4：Demucs 长素材与 CUDA 显存问题
 
-长视频在 8GB 显卡上有可能 OOM。  
-代码会回退 CPU，不会中断，但速度会明显变慢。
+长素材使用 CUDA 分块分离（OOM 时自动缩小分块重试）。若手动启动的本机 GPT-SoVITS 仍在线，请先停止该服务再解析。CUDA 不可用或失败时默认继续使用未分离音轨，也可在「人声分离」节点中显式启用 CPU 分离。
 
 建议：
 

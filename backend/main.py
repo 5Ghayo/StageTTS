@@ -2,44 +2,68 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import shutil
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import AsyncIterator, Dict, List
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
-from backend.agent.orchestrator import LLMNotConfiguredError, run_agent_chat
-from backend.agent.tools import load_project_script, save_project_script
+from backend.agent.orchestrator import run_agent_chat
+from backend.agent.tools import (
+    load_project_script,
+    project_task_guard,
+    render_final_video,
+    save_project_script,
+    synthesize_project,
+)
 from backend.schemas import (
     AgentChatRequest,
     AgentChatResponse,
+    GpuStatusResponse,
+    HealthResponse,
     MediaInfo,
     ParseRequest,
+    ParseStatusResponse,
+    ProjectListResponse,
     ProjectMode,
     ProjectScript,
+    ReferencePreview,
+    ReferenceUploadResponse,
     RenderRequest,
     RenderResponse,
     SynthesizeRequest,
     SynthesizeResponse,
+    TranslationResponse,
+    UploadResponse,
 )
-from backend.services.media_mixer import check_ffmpeg_available, mix_and_render
+from backend.services.media_mixer import check_ffmpeg_available
+from backend.services.references import automatic_reference, store_reference_audio
 from backend.services.task_runner import (
     GpuBusyError,
+    ParseWorkerError,
     get_parse_progress,
     is_gpu_busy,
     probe_media_duration,
+    read_gpu_memory,
     run_parse_worker,
+)
+from backend.services.translation import (
+    LLMNotConfiguredError,
+    LLMServiceError,
+    create_openai_client,
+    translate_script,
 )
 from backend.services.tts_client import (
     TTSServiceUnavailableError,
     check_tts_service,
-    synthesize_segments_grouped,
 )
 
 # 确保挂载目录存在，避免 StaticFiles 初始化报错
@@ -83,6 +107,11 @@ def _gpu_busy_handler(_: Request, exc: GpuBusyError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": _err_detail(exc)})
 
 
+@app.exception_handler(ParseWorkerError)
+def _parse_worker_handler(_: Request, exc: ParseWorkerError) -> JSONResponse:
+    return JSONResponse(status_code=500, content={"detail": _err_detail(exc)})
+
+
 @app.exception_handler(TTSServiceUnavailableError)
 def _tts_unavailable_handler(_: Request, exc: TTSServiceUnavailableError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": _err_detail(exc)})
@@ -91,6 +120,11 @@ def _tts_unavailable_handler(_: Request, exc: TTSServiceUnavailableError) -> JSO
 @app.exception_handler(LLMNotConfiguredError)
 def _llm_unconfigured_handler(_: Request, exc: LLMNotConfiguredError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": _err_detail(exc)})
+
+
+@app.exception_handler(LLMServiceError)
+def _llm_service_error_handler(_: Request, exc: LLMServiceError) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": _err_detail(exc)})
 
 
 @app.exception_handler(FileNotFoundError)
@@ -139,7 +173,7 @@ def _find_input_media(project_id: str, script: ProjectScript | None) -> Path:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/health")
+@app.get("/api/health", response_model=HealthResponse)
 def health_check() -> Dict[str, object]:
     """服务健康检查、GPU 单任务锁状态与外部环境就绪度探测。"""
     return {
@@ -159,7 +193,12 @@ def health_check() -> Dict[str, object]:
     }
 
 
-@app.get("/api/projects")
+@app.get("/api/gpu", response_model=GpuStatusResponse)
+def gpu_status() -> Dict[str, object]:
+    return {"devices": read_gpu_memory()}
+
+
+@app.get("/api/projects", response_model=ProjectListResponse)
 def list_projects() -> Dict[str, List[str]]:
     """列出 workspace/ 下所有包含 script.json 的有效项目 ID。"""
     projects: List[str] = []
@@ -189,13 +228,54 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
     return payload
 
 
+@app.post("/api/projects/{project_id}/references", response_model=ReferenceUploadResponse)
+def upload_project_reference(project_id: str, file: UploadFile = File(...)) -> dict[str, str]:
+    safe_id = _validate_project_id(project_id)
+    load_project_script(safe_id)
+    if file.size is not None and file.size > 32 * 1024 * 1024:
+        raise ValueError("参考音文件不能超过 32 MB")
+    return {"wav": store_reference_audio(safe_id, file.file)}
+
+
+@app.post("/api/projects/{project_id}/characters/{speaker}/reference-preview", response_model=ReferencePreview)
+def preview_automatic_reference(project_id: str, speaker: str) -> ReferencePreview:
+    safe_id = _validate_project_id(project_id)
+    with project_task_guard(safe_id):
+        script = load_project_script(safe_id)
+        if speaker not in script.characters:
+            raise FileNotFoundError("角色不存在")
+        ref = automatic_reference(script, speaker)
+        if ref is None:
+            raise ValueError("找不到 3–10 秒的同角色参考音。请确认台词原文、时间范围、说话人和源语种，或上传参考音")
+        return ref
+
+
+@app.post("/api/projects/{project_id}/translate", response_model=TranslationResponse)
+def retranslate_project(project_id: str) -> TranslationResponse:
+    safe_id = _validate_project_id(project_id)
+    with project_task_guard(safe_id):
+        script = load_project_script(safe_id)
+        batch_errors: list[str] = []
+        translated = translate_script(script, create_openai_client(), errors=batch_errors)
+        if not translated and batch_errors:
+            raise LLMServiceError(f"台词重译失败：{batch_errors[0]}")
+        if translated:
+            save_project_script(script)
+        return TranslationResponse(
+            script=script,
+            translated_ids=translated,
+            skipped_count=len(script.segments) - len(translated),
+            errors=batch_errors,
+        )
+
+
 # ---------------------------------------------------------------------------
 # 上传、解析、分组 TTS 合成、Agent 协同与后期导出接口
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/projects/upload")
-async def upload_project_media(
+@app.post("/api/projects/upload", response_model=UploadResponse)
+def upload_project_media(
     file: UploadFile = File(...),
     mode: ProjectMode = Form("video_dubbing"),
     project_id: str = Form(""),
@@ -207,31 +287,32 @@ async def upload_project_media(
         else f"proj_{int(time.time())}"
     )
 
-    project_dir = config.WORKSPACE_DIR / safe_id
-    project_dir.mkdir(parents=True, exist_ok=True)
+    with project_task_guard(safe_id):
+        project_dir = config.WORKSPACE_DIR / safe_id
+        project_dir.mkdir(parents=True, exist_ok=True)
 
-    ext = Path(file.filename or "input.mp4").suffix.lower() or ".mp4"
-    input_name = f"input{ext}"
-    input_path = project_dir / input_name
+        ext = Path(file.filename or "input.mp4").suffix.lower() or ".mp4"
+        input_name = f"input{ext}"
+        input_path = project_dir / input_name
 
-    with input_path.open("wb") as out_fp:
-        shutil.copyfileobj(file.file, out_fp)
+        with input_path.open("wb") as out_fp:
+            shutil.copyfileobj(file.file, out_fp)
 
-    duration = probe_media_duration(input_path)
-    media_url = f"/workspace/{safe_id}/{input_name}"
+        duration = probe_media_duration(input_path)
+        media_url = f"/workspace/{safe_id}/{input_name}"
 
-    initial_script = ProjectScript(
-        project_id=safe_id,
-        mode=mode,
-        media=MediaInfo(
-            source_video=media_url,
-            duration=duration,
-            bgm_volume=0.75,
-        ),
-        characters={},
-        segments=[],
-    )
-    save_project_script(initial_script)
+        initial_script = ProjectScript(
+            project_id=safe_id,
+            mode=mode,
+            media=MediaInfo(
+                source_video=media_url,
+                duration=duration,
+                bgm_volume=0.75,
+            ),
+            characters={},
+            segments=[],
+        )
+        save_project_script(initial_script)
 
     return {
         "project_id": safe_id,
@@ -240,53 +321,72 @@ async def upload_project_media(
     }
 
 
-@app.get("/api/projects/{project_id}/parse/status")
+@app.get("/api/projects/{project_id}/parse/status", response_model=ParseStatusResponse)
 def get_project_parse_status(project_id: str) -> Dict[str, object]:
     """查询指定项目的离线解析实时阶段与日志（供前端节点流轮询）。"""
     safe_id = _validate_project_id(project_id)
     return get_parse_progress(safe_id)
 
 
+@app.get("/api/projects/{project_id}/parse/stream")
+async def stream_project_parse_status(project_id: str, request: Request) -> StreamingResponse:
+    """SSE 实时推送指定项目的离线解析阶段与日志。"""
+    safe_id = _validate_project_id(project_id)
+
+    async def event_generator() -> AsyncIterator[str]:
+        last_key: tuple[object, ...] | None = None
+        saw_active = False
+        idle_ticks = 0
+        while not await request.is_disconnected():
+            status = get_parse_progress(safe_id)
+            active = bool(status.get("active"))
+            if active:
+                saw_active = True
+            key = (active, status.get("stage"), status.get("log_count"), status.get("error"))
+            if key != last_key:
+                last_key = key
+                yield f"data: {json.dumps(status, ensure_ascii=False)}\n\n"
+            if not active and (saw_active or idle_ticks >= 15):
+                break
+            idle_ticks += 1
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/projects/{project_id}/parse", response_model=ProjectScript)
 def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
     """启动 env_parse 子进程执行离线解析并生成 script.json（受 GPU 单任务锁保护）。"""
     safe_id = _validate_project_id(project_id)
-    existing_script: ProjectScript | None = None
-    try:
-        existing_script = load_project_script(safe_id)
-    except FileNotFoundError:
-        existing_script = None
+    with project_task_guard(safe_id):
+        existing_script: ProjectScript | None = None
+        try:
+            existing_script = load_project_script(safe_id)
+        except FileNotFoundError:
+            existing_script = None
 
-    input_path = _find_input_media(safe_id, existing_script)
-    mode = existing_script.mode if existing_script else "video_dubbing"
+        input_path = _find_input_media(safe_id, existing_script)
+        mode = existing_script.mode if existing_script else "video_dubbing"
 
-    run_parse_worker(
-        project_id=safe_id,
-        input_path=input_path,
-        target_lang=req.target_lang,
-        compute_type=req.compute_type,
-        mode=mode,
-    )
-    return load_project_script(safe_id)
+        run_parse_worker(
+            project_id=safe_id,
+            input_path=input_path,
+            target_lang=req.target_lang,
+            compute_type=req.compute_type,
+            mode=mode,
+            allow_demucs_cpu=req.allow_demucs_cpu,
+        )
+        return load_project_script(safe_id)
 
 
 @app.post("/api/projects/{project_id}/synthesize", response_model=SynthesizeResponse)
 def synthesize_project_segments(project_id: str, req: SynthesizeRequest) -> SynthesizeResponse:
-    """按 speaker 分组调用 GPT-SoVITS 合成片段，保存 script.json 并返回时长质检结果。"""
-    safe_id = _validate_project_id(project_id)
-    script = load_project_script(safe_id)
-    synthesized_ids, overflow_segments, errors = synthesize_segments_grouped(
-        script,
-        segment_ids=req.segment_ids,
-    )
-    save_project_script(script)
-    return SynthesizeResponse(
-        project_id=safe_id,
-        synthesized_ids=synthesized_ids,
-        overflow_segments=overflow_segments,
-        errors=errors,
-        script=script,
-    )
+    """分组配音并执行时长闭环，返回最终剧本和剩余超长。"""
+    return synthesize_project(_validate_project_id(project_id), req.segment_ids)
 
 
 @app.post("/api/projects/{project_id}/agent/chat", response_model=AgentChatResponse)
@@ -304,13 +404,7 @@ def agent_chat(project_id: str, req: AgentChatRequest) -> AgentChatResponse:
 def render_project_video(project_id: str, req: RenderRequest) -> RenderResponse:
     """执行 pydub 毫秒拼轨与 FFmpeg 混音封装，导出 output.mp4（或虚拟舞台音频）。"""
     safe_id = _validate_project_id(project_id)
-    script = load_project_script(safe_id)
-    output_video, duration = mix_and_render(script, burn_watermark=req.burn_watermark)
-    script.media.output_video = output_video
-    save_project_script(script)
     return RenderResponse(
         project_id=safe_id,
-        output_video=output_video,
-        duration=duration,
-        burn_watermark=req.burn_watermark,
+        **render_final_video(safe_id, burn_watermark=req.burn_watermark),
     )
