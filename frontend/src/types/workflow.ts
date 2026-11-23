@@ -2,6 +2,8 @@
  * ComfyUI 节点流管线与 Premiere 工作区相关类型定义。
  */
 
+import type { SubtitleBurnMode } from "./script";
+
 export type WorkspacePreset = "editing" | "workflow" | "stage";
 
 export type CenterViewTab = "video" | "stage" | "graph";
@@ -57,6 +59,7 @@ export function pipelineNodeHint(nodeId: string | null): string {
 export interface PipelineConfig {
   targetLang: "zh" | "en" | "ja";
   burnWatermark: boolean;
+  burnSubtitles: SubtitleBurnMode;
 }
 
 export interface PipelineLogEntry {

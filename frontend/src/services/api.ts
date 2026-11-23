@@ -2,6 +2,7 @@ import createClient from "openapi-fetch";
 import type { components, paths } from "../types/api.generated";
 import type {
   AgentChatResponse,
+  ExportDirsResponse,
   GpuDevice,
   GpuStatusResponse,
   HealthResponse,
@@ -10,13 +11,20 @@ import type {
   ProjectScript,
   ReferencePreview,
   ReferenceUploadResponse,
+  RenderRequest,
   RenderResponse,
+  ScriptSnapshotListResponse,
+  SubtitleLayout,
   SynthesizeResponse,
   TranslationResponse,
   UploadResponse,
+  VoicePreset,
+  VoicePresetCreateRequest,
+  VoicePresetDeleteResponse,
+  VoicePresetListResponse,
 } from "../types/script";
 
-export type { GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
+export type { ExportDirsResponse, GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
 
 export class ApiError extends Error {
   status: number;
@@ -232,11 +240,65 @@ export function sendAgentChat(
   );
 }
 
-export function renderVideo(projectId: string, burnWatermark = false): Promise<RenderResponse> {
+export function fetchExportDirs(): Promise<ExportDirsResponse> {
+  return unwrap(apiClient.GET("/api/export/dirs"));
+}
+
+export function getSubtitlesUrl(projectId: string, layout: SubtitleLayout = "target"): string {
+  return `/api/projects/${encodeURIComponent(projectId)}/subtitles?layout=${encodeURIComponent(layout)}`;
+}
+
+export function renderVideo(
+  projectId: string,
+  options: Partial<RenderRequest> = {},
+): Promise<RenderResponse> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/render", {
       params: { path: { project_id: projectId } },
-      body: { burn_watermark: burnWatermark },
+      body: {
+        burn_watermark: false,
+        burn_subtitles: "none",
+        ...options,
+      },
+    }),
+  );
+}
+
+export function fetchProjectHistory(projectId: string): Promise<ScriptSnapshotListResponse> {
+  return unwrap(
+    apiClient.GET("/api/projects/{project_id}/history", {
+      params: { path: { project_id: projectId } },
+    }),
+  );
+}
+
+export function restoreProjectSnapshot(
+  projectId: string,
+  snapshotId: string,
+): Promise<ProjectScript> {
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/history/{snapshot_id}/restore", {
+      params: { path: { project_id: projectId, snapshot_id: snapshotId } },
+    }),
+  );
+}
+
+export function fetchVoicePresets(): Promise<VoicePresetListResponse> {
+  return unwrap(apiClient.GET("/api/voice-presets"));
+}
+
+export function createVoicePreset(payload: VoicePresetCreateRequest): Promise<VoicePreset> {
+  return unwrap(
+    apiClient.POST("/api/voice-presets", {
+      body: payload,
+    }),
+  );
+}
+
+export function deleteVoicePreset(presetId: string): Promise<VoicePresetDeleteResponse> {
+  return unwrap(
+    apiClient.DELETE("/api/voice-presets/{preset_id}", {
+      params: { path: { preset_id: presetId } },
     }),
   );
 }

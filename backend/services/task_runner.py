@@ -88,6 +88,64 @@ def _probe_tts_ready(timeout: float = 1.0) -> bool:
         return False
 
 
+def _terminate_process_tree(proc: subprocess.Popen[Any], grace_sec: float = 5.0) -> None:
+    """跨平台优雅终止子进程及其派生子进程，超时后强制清理进程树。"""
+    if proc.poll() is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    real_pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+    if os.name == "nt":
+        proc.terminate()
+        try:
+            proc.wait(timeout=grace_sec)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        if real_pid is not None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(real_pid)],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+
+    if real_pid is not None:
+        try:
+            os.killpg(real_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.terminate()
+    else:
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=grace_sec)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    if real_pid is not None:
+        try:
+            os.killpg(real_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def ensure_tts_stopped() -> bool:
     """停止后端持有的 GPT-SoVITS 进程，等它退出后才释放句柄。"""
     global _tts_proc, _tts_log_fp, _tts_config_dir
@@ -95,12 +153,7 @@ def ensure_tts_stopped() -> bool:
     with _tts_proc_lock:
         if _tts_proc is not None:
             if _tts_proc.poll() is None:
-                try:
-                    _tts_proc.terminate()
-                    _tts_proc.wait(timeout=6)
-                except subprocess.TimeoutExpired:
-                    _tts_proc.kill()
-                    _tts_proc.wait(timeout=3)
+                _terminate_process_tree(_tts_proc, grace_sec=6.0)
                 stopped = True
             _tts_proc = None
         if _tts_log_fp is not None:
@@ -171,8 +224,11 @@ def ensure_tts_running() -> None:
         return
 
     api_script = config.GPT_SOVITS_ROOT / "api_v2.py"
-    python_bin = Path(config.GPT_SOVITS_PYTHON) if config.GPT_SOVITS_PYTHON else None
-    if not api_script.is_file() or python_bin is None or not python_bin.is_file():
+    python_cmd = config.GPT_SOVITS_PYTHON.strip()
+    python_valid = bool(
+        python_cmd and (Path(python_cmd).is_file() or shutil.which(python_cmd) is not None)
+    )
+    if not api_script.is_file() or not python_valid:
         return
 
     parsed = urlparse(config.TTS_API_URL)
@@ -180,7 +236,7 @@ def ensure_tts_running() -> None:
     port = parsed.port or 9880
 
     cmd = [
-        str(python_bin),
+        python_cmd,
         "-u",
         str(api_script),
         "-a",
@@ -224,6 +280,7 @@ def ensure_tts_running() -> None:
                 env=tts_env,
                 stdout=_tts_log_fp,
                 stderr=subprocess.STDOUT,
+                start_new_session=os.name != "nt",
             )
 
     deadline = time.time() + config.TTS_STARTUP_TIMEOUT_SEC
@@ -499,22 +556,7 @@ def run_parse_worker(
             try:
                 returncode = proc.wait(timeout=config.PARSE_TIMEOUT_SEC)
             except subprocess.TimeoutExpired as exc:
-                if os.name == "nt":
-                    try:
-                        subprocess.run(
-                            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                            capture_output=True, timeout=5,
-                        )
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
-                    if proc.poll() is None:
-                        proc.kill()
-                else:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                proc.wait()
+                _terminate_process_tree(proc, grace_sec=0.5)
                 reader.join(timeout=3)
                 err_msg = f"parse_worker 执行超时（>{config.PARSE_TIMEOUT_SEC}s）"
                 _finish_parse_progress(error=err_msg)

@@ -6,6 +6,7 @@
 import type { components } from "./api.generated";
 
 export type CinematicStems = components["schemas"]["CinematicStems"];
+export type StemVolumes = components["schemas"]["StemVolumes"];
 export type MediaInfo = components["schemas"]["MediaInfo"];
 export type EmotionRef = components["schemas"]["EmotionRef"];
 export type AvatarConfig = components["schemas"]["AvatarConfig"];
@@ -18,10 +19,14 @@ export type ProjectMode = ProjectScript["mode"];
 export type EmotionType = Segment["emotion"];
 export type SegmentStatus = Segment["status"];
 export type AvatarType = AvatarConfig["type"];
+export type SubtitleBurnMode = components["schemas"]["RenderRequest"]["burn_subtitles"];
+export type SubtitleLayout = Exclude<SubtitleBurnMode, "none">;
 
 export type SegmentPatch = { id: Segment["id"] } & Partial<
   Pick<
     Segment,
+    | "start"
+    | "end"
     | "speaker"
     | "orig_text"
     | "alignment_needs_review"
@@ -51,4 +56,13 @@ export type SegmentDurationCheck = components["schemas"]["SegmentDurationCheck"]
 export type SynthesizeResponse = components["schemas"]["SynthesizeResponse"];
 export type ToolCallLog = components["schemas"]["ToolCallLog"];
 export type AgentChatResponse = components["schemas"]["AgentChatResponse"];
+export type ExportDirOption = components["schemas"]["ExportDirOption"];
+export type ExportDirsResponse = components["schemas"]["ExportDirsResponse"];
+export type RenderRequest = components["schemas"]["RenderRequest"];
 export type RenderResponse = components["schemas"]["RenderResponse"];
+export type ScriptSnapshotMeta = components["schemas"]["ScriptSnapshotMeta"];
+export type ScriptSnapshotListResponse = components["schemas"]["ScriptSnapshotListResponse"];
+export type VoicePreset = components["schemas"]["VoicePreset"];
+export type VoicePresetCreateRequest = components["schemas"]["VoicePresetCreateRequest"];
+export type VoicePresetListResponse = components["schemas"]["VoicePresetListResponse"];
+export type VoicePresetDeleteResponse = components["schemas"]["VoicePresetDeleteResponse"];

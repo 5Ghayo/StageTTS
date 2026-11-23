@@ -13,6 +13,8 @@ ProjectMode = Literal["video_dubbing", "virtual_stage"]
 EmotionType = Literal["neutral", "angry", "happy", "sad", "whisper"]
 SegmentStatus = Literal["pending", "synthesizing", "ready", "error"]
 AvatarType = Literal["live2d", "vrm"]
+SubtitleBurnMode = Literal["none", "target", "bilingual"]
+SubtitleLayout = Literal["target", "bilingual"]
 
 
 class CinematicStems(BaseModel):
@@ -22,6 +24,14 @@ class CinematicStems(BaseModel):
     effects: str
 
 
+class StemVolumes(BaseModel):
+    """Banquet 四轨分离后各背景子轨独立音量系数（0.0 ~ 2.0）。"""
+
+    singing: float = Field(default=1.0, ge=0.0, le=2.0, description="歌声轨音量系数")
+    music: float = Field(default=1.0, ge=0.0, le=2.0, description="伴奏音乐轨音量系数")
+    effects: float = Field(default=1.0, ge=0.0, le=2.0, description="环境与音效轨音量系数")
+
+
 class MediaInfo(BaseModel):
     """项目关联音视频资源与全局混音参数。"""
 
@@ -29,9 +39,11 @@ class MediaInfo(BaseModel):
     vocals_wav: Optional[str] = Field(default=None, description="识别和参考音使用的对白轨 URL")
     bgm_wav: Optional[str] = Field(default=None, description="歌声、伴奏和音效合成的背景轨 URL")
     cinematic_stems: Optional[CinematicStems] = Field(default=None, description="影视四轨分离结果")
+    stem_volumes: Optional[StemVolumes] = Field(default=None, description="四轨分离背景子轨独立音量系数")
     output_video: Optional[str] = Field(default=None, description="最终混音成片 URL")
     duration: float = Field(ge=0.0, description="媒体总时长（秒）")
     bgm_volume: float = Field(default=0.75, ge=0.0, le=2.0, description="BGM 混音音量系数")
+    auto_ducking: bool = Field(default=True, description="人声出现时是否自动闪避背景音乐")
 
 
 class EmotionRef(BaseModel):
@@ -339,6 +351,15 @@ class ProjectScript(BaseModel):
     evidence: SourceEvidence | None = None
     segments: List[Segment] = Field(default_factory=list, json_schema_extra={"default": []})
 
+    @model_validator(mode="after")
+    def _validate_unique_segment_ids(self) -> "ProjectScript":
+        seen: set[int] = set()
+        for seg in self.segments:
+            if seg.id in seen:
+                raise ValueError(f"Duplicate segment id: {seg.id}")
+            seen.add(seg.id)
+        return self
+
 
     @model_validator(mode="after")
     def _evidence_segment_links(self) -> "ProjectScript":
@@ -448,6 +469,8 @@ class SegmentPatch(BaseModel):
     """单句或批量更新字段补丁（仅提供需修改的字段）。"""
 
     id: int = Field(ge=0)
+    start: Optional[float] = Field(default=None, ge=0.0)
+    end: Optional[float] = Field(default=None, gt=0.0)
     speaker: Optional[str] = None
     orig_text: Optional[str] = None
     segment_timing_needs_review: Optional[bool] = None
@@ -540,12 +563,48 @@ class AgentChatResponse(BaseModel):
     script: ProjectScript
 
 
+class ExportDirOption(BaseModel):
+    """前端导出弹窗可选本机目录。"""
+
+    label: str
+    path: str
+
+
+class ExportDirsResponse(BaseModel):
+    """工作区与本机推荐导出目录列表。"""
+
+    workspace_dir: str
+    suggested_dirs: List[ExportDirOption] = Field(
+        default_factory=list, json_schema_extra={"default": []},
+    )
+
+
 class RenderRequest(BaseModel):
     """成片导出混音请求。"""
 
     burn_watermark: bool = Field(
         default=False,
         description="为 True 时通过重编码烧录“AI 合成语音”硬水印；False 时使用 -c:v copy 快速无损导出",
+    )
+    burn_subtitles: SubtitleBurnMode = Field(
+        default="none",
+        description="是否将 ASS 字幕烧录进成片画面：none / target / bilingual",
+    )
+    export_ass_sidecar: Optional[SubtitleLayout] = Field(
+        default=None,
+        description="可选：同步导出同名外挂 ASS 字幕（target / bilingual）",
+    )
+    auto_ducking: Optional[bool] = Field(
+        default=None,
+        description="是否启用 BGM 自动闪避；为空时沿用 script.media.auto_ducking",
+    )
+    output_filename: Optional[str] = Field(
+        default=None,
+        description="可选自定义输出文件名（如 my_dub.mp4）",
+    )
+    output_dir: Optional[str] = Field(
+        default=None,
+        description="可选本机额外保存目录绝对路径（支持 ~ 展开）",
     )
 
 
@@ -556,3 +615,66 @@ class RenderResponse(BaseModel):
     output_video: str
     duration: float
     burn_watermark: bool
+    burn_subtitles: SubtitleBurnMode = "none"
+    auto_ducking: bool = True
+    saved_path: str = ""
+    subtitle_url: Optional[str] = None
+    subtitle_saved_path: Optional[str] = None
+
+
+class ScriptSnapshotMeta(BaseModel):
+    """剧本历史快照元数据。"""
+
+    snapshot_id: str
+    created_at: str
+    label: str = "手动保存"
+    segment_count: int = Field(ge=0)
+
+
+class ScriptSnapshotListResponse(BaseModel):
+    """项目历史快照列表响应。"""
+
+    project_id: str
+    snapshots: List[ScriptSnapshotMeta] = Field(
+        default_factory=list, json_schema_extra={"default": []},
+    )
+
+
+class VoicePreset(BaseModel):
+    """跨项目全局音色预设契约。"""
+
+    preset_id: str
+    name: str = Field(min_length=1)
+    speaking_style: str = ""
+    gpt_weights: Optional[str] = None
+    sovits_weights: Optional[str] = None
+    emotion_refs: Dict[EmotionType, EmotionRef] = Field(
+        default_factory=dict, json_schema_extra={"default": {}},
+    )
+    created_at: str
+
+
+class VoicePresetCreateRequest(BaseModel):
+    """创建跨项目音色预设请求。"""
+
+    name: str = Field(min_length=1, max_length=80)
+    speaking_style: str = ""
+    gpt_weights: Optional[str] = None
+    sovits_weights: Optional[str] = None
+    emotion_refs: Dict[EmotionType, EmotionRef] = Field(
+        default_factory=dict, json_schema_extra={"default": {}},
+    )
+
+
+class VoicePresetListResponse(BaseModel):
+    """全局音色预设列表响应。"""
+
+    presets: List[VoicePreset] = Field(
+        default_factory=list, json_schema_extra={"default": []},
+    )
+
+
+class VoicePresetDeleteResponse(BaseModel):
+    """删除音色预设响应。"""
+
+    deleted_id: str
