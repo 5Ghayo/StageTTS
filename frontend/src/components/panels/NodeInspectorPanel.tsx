@@ -37,7 +37,11 @@ export const NodeInspectorPanel: React.FC = () => {
             <span>{selectedNode.data.title}</span>
           </span>
           <span className="shrink-0 whitespace-nowrap rounded-[4px] bg-white/[0.04] px-2 py-0.5 font-mono tabular-nums text-[11px] text-secondary">
-            {selectedNode.data.vramGb === null ? "—" : selectedNode.data.vramGb > 0 ? `${selectedNode.data.vramGb.toFixed(1)} GB` : "纯 CPU"}
+            {selectedNode.data.vramGb === null
+              ? "—"
+              : selectedNode.data.vramGb > 0
+                ? `${selectedNode.data.vramGb.toFixed(1)} GB`
+                : "纯 CPU"}
           </span>
         </div>
         <p className="mt-1.5 text-secondary">{selectedNode.data.summary}</p>

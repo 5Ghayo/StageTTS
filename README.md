@@ -766,7 +766,7 @@ StageTTS/
 
 评测脚本在 [experiments/](experiments)，目前是骨架：
 
-- `eval_diarization.py`：Demucs 前后 WER/CER、DER 对比
+- `eval_diarization.py`：Banquet 分离前后 WER/CER、DER 对比
 - `eval_batch_speed.py`：按 speaker 分组合成 vs 逐句合成耗时/显存对比
 - `eval_speaker_sim.py`：声纹相似度与 MOS 评测
 

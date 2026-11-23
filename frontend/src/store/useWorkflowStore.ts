@@ -62,8 +62,8 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         status: "done",
         inputs: [{ id: "in-media", label: "媒体流", type: "MEDIA" }],
         outputs: [
-          { id: "out-vocals", label: "纯人声", type: "AUDIO" },
-          { id: "out-bgm", label: "伴奏轨", type: "AUDIO" },
+          { id: "out-vocals", label: "对白轨", type: "AUDIO" },
+          { id: "out-bgm", label: "背景轨", type: "AUDIO" },
         ],
         summary: "Banquet 分离对白、歌声、伴奏和音效",
         params: { model: "banquet" },
@@ -79,7 +79,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         env: "env_parse",
         vramGb: parseVram,
         status: "done",
-        inputs: [{ id: "in-vocals", label: "纯人声", type: "AUDIO" }],
+        inputs: [{ id: "in-vocals", label: "对白轨", type: "AUDIO" }],
         outputs: [{ id: "out-turns", label: "角色时间段", type: "SEGMENTS" }],
         summary: `${config.computeType === "int8" ? "省显存 INT8" : "标准 FP16"} · ${parseVram} GB`,
         params: { compute_type: config.computeType },
@@ -113,7 +113,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         status: "done",
         inputs: [
           { id: "in-draft", label: "剧本初稿", type: "JSON" },
-          { id: "in-bgm", label: "伴奏轨", type: "AUDIO" },
+          { id: "in-bgm", label: "背景轨", type: "AUDIO" },
         ],
         outputs: [
           { id: "out-script", label: "标准剧本", type: "SCRIPT" },

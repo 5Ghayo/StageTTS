@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -185,7 +186,7 @@ def _probe_duration(media_path: Path) -> float:
 
 
 def _extract_wav_and_probe(input_path: Path, work_wav: Path) -> float:
-    """用 FFmpeg 将任意音视频统一抽取为 44.1kHz stereo WAV。"""
+    """用 FFmpeg 将任意音视频统一抽取为 48kHz stereo WAV（与 Banquet 采样率一致）。"""
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("未在系统 PATH 中找到 ffmpeg，无法抽取音频。")
     cmd = [
@@ -197,7 +198,7 @@ def _extract_wav_and_probe(input_path: Path, work_wav: Path) -> float:
         "-acodec",
         "pcm_s16le",
         "-ar",
-        "44100",
+        "48000",
         "-ac",
         "2",
         str(work_wav),
@@ -236,17 +237,57 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
     devices = ("cuda", "cpu") if device == "cuda" else ("cpu",)
     for target_device in devices:
         _log("Stage1", f"Banquet ({target_device}) 直接分离对白、歌声、音乐与音效")
-        proc = subprocess.run(
-            [sys.executable, str(ROOT_DIR / "workers/banquet_worker.py"),
-             "--source-root", str(source_root), "--checkpoint", str(checkpoint),
-             "--input", str(extracted_wav), "--output-dir", str(output_dir),
-             "--device", target_device],
-            env=env, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=900,
+        cmd = [
+            sys.executable,
+            str(ROOT_DIR / "workers/banquet_worker.py"),
+            "--source-root",
+            str(source_root),
+            "--checkpoint",
+            str(checkpoint),
+            "--input",
+            str(extracted_wav),
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            target_device,
+        ]
+        output_lines: List[str] = []
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
-        if proc.returncode == 0:
+
+        def _drain_banquet(stream: Any = proc.stdout, lines: List[str] = output_lines) -> None:
+            if stream is None:
+                return
+            for raw_line in stream:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith("[banquet] "):
+                    _log("Stage1", line.removeprefix("[banquet] ").strip())
+                else:
+                    lines.append(line)
+
+        reader = threading.Thread(target=_drain_banquet, daemon=True)
+        reader.start()
+        try:
+            returncode = proc.wait(timeout=900)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            proc.wait()
+            reader.join(timeout=3)
+            raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。") from exc
+        reader.join(timeout=5)
+        if returncode == 0:
             return
-        detail = proc.stderr.strip() or proc.stdout.strip()
+        detail = "\n".join(output_lines).strip()
         if target_device == "cpu" or not _is_cuda_oom(RuntimeError(detail)):
             raise RuntimeError(f"Banquet ({target_device}) 分离失败：{detail[-600:]}")
         _log("Stage1", "Banquet CUDA 显存不足，改用 CPU 重试")
@@ -539,6 +580,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _cleanup_stale_cinematic_dirs(output_dir: Path, keep: Path) -> None:
+    keep_resolved = keep.resolve()
+    for candidate in output_dir.iterdir():
+        if candidate.is_dir() and candidate.name.startswith("cinematic-") and candidate.resolve() != keep_resolved:
+            shutil.rmtree(candidate, ignore_errors=True)
+
+
 def run_pipeline(args: argparse.Namespace) -> Path:
     if not args.input.is_file():
         raise FileNotFoundError(f"输入媒体文件不存在: {args.input}")
@@ -576,7 +624,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         review_count = sum(seg["alignment_needs_review"] or seg["speaker_needs_review"] for seg in raw_segments)
         if review_count:
             _log("Stage3", f"{review_count} 条片段的原文范围或说话人待人工校对")
-        return _build_and_save_script(
+        script_out = _build_and_save_script(
             args=args,
             duration=duration,
             vocals_wav=vocals_wav,
@@ -588,6 +636,9 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     except BaseException:
         shutil.rmtree(cinematic_dir, ignore_errors=True)
         raise
+
+    _cleanup_stale_cinematic_dirs(args.output_dir, keep=cinematic_dir)
+    return script_out
 
 
 def main() -> None:

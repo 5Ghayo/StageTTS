@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import soundfile as sf
@@ -56,17 +57,29 @@ def load_model(source_root: Path, checkpoint: Path, device: str) -> nn.Module:
 
 
 @torch.inference_mode()
-def separate(model: nn.Module, waveform: torch.Tensor, device: str) -> dict[str, torch.Tensor]:
+def separate(
+    model: nn.Module,
+    waveform: torch.Tensor,
+    device: str,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, torch.Tensor]:
     """Use the paper's 8 s window and 1 s hop, with one inference for a short clip."""
     def infer(chunk: torch.Tensor) -> dict[str, torch.Tensor]:
-        # The checkpoint is mono. Treat each source channel as a batch item.
-        signals = model({"mixture": {"audio": chunk[:, None].to(device)}})
-        return {stem: signal[:, 0].cpu() for stem, signal in signals.items()}
+        # The checkpoint is mono. Run one channel at a time to keep peak VRAM low on 8GB GPUs.
+        per_stem: dict[str, list[torch.Tensor]] = {}
+        for channel in range(chunk.shape[0]):
+            mono = chunk[channel : channel + 1, None].to(device)
+            signals = model({"mixture": {"audio": mono}})
+            for stem, signal in signals.items():
+                per_stem.setdefault(stem, []).append(signal[0, 0].cpu())
+        return {stem: torch.stack(channels, dim=0) for stem, channels in per_stem.items()}
 
     length = waveform.shape[-1]
     chunk_size = 8 * SAMPLE_RATE
     hop_size = SAMPLE_RATE
     if length <= chunk_size:
+        if progress is not None:
+            progress("正在分离音频（1/1 窗口）")
         # Reflect padding in the STFT requires more than n_fft // 2 samples.
         waveform = F.pad(waveform, (0, max(0, 1025 - length)))
         return {stem: signal[..., :length] for stem, signal in infer(waveform).items()}
@@ -78,7 +91,10 @@ def separate(model: nn.Module, waveform: torch.Tensor, device: str) -> dict[str,
     estimates = {stem: torch.zeros((waveform.shape[0], length)) for stem in STEMS}
 
     # Accumulate only the part of each window that overlaps the original audio.
-    for start in range(0, overlap + length, hop_size):
+    starts = range(0, overlap + length, hop_size)
+    total = len(starts)
+    report_step = max(1, total // 20)
+    for idx, start in enumerate(starts, start=1):
         chunk = waveform[..., start:start + chunk_size]
         chunk = F.pad(chunk, (0, chunk_size - chunk.shape[-1]))
         signals = infer(chunk)
@@ -90,6 +106,8 @@ def separate(model: nn.Module, waveform: torch.Tensor, device: str) -> dict[str,
         weights[output_slice] += fade
         for stem, signal in signals.items():
             estimates[stem][..., output_slice] += signal[..., chunk_slice] * fade
+        if progress is not None and (idx == 1 or idx == total or idx % report_step == 0):
+            progress(f"分离进度 {idx}/{total} 窗口 ({idx * 100 // total}%)")
 
     for signal in estimates.values():
         signal.div_(weights)
@@ -105,6 +123,9 @@ def main() -> None:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
 
+    def emit(message: str) -> None:
+        print(f"[banquet] {message}", flush=True)
+
     audio, sample_rate = sf.read(args.input, dtype="float32", always_2d=True)
     if len(audio) == 0:
         raise ValueError("Banquet 输入音频为空。")
@@ -112,8 +133,10 @@ def main() -> None:
     if sample_rate != SAMPLE_RATE:
         waveform = torchaudio.functional.resample(waveform, sample_rate, SAMPLE_RATE)
 
+    emit(f"加载 Banquet 模型 ({args.device})...")
     model = load_model(args.source_root, args.checkpoint, args.device)
-    estimates = separate(model, waveform, args.device)
+    estimates = separate(model, waveform, args.device, progress=emit)
+    emit("正在写入四轨 WAV 文件...")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for stem, signal in estimates.items():
         if not torch.isfinite(signal).all():
