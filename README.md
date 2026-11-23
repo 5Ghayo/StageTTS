@@ -93,8 +93,14 @@ FFmpeg 混音导出 output.mp4
   "mode": "video_dubbing",
   "media": {
     "source_video": "/workspace/proj_xxx/input.mp4",
-    "vocals_wav": "/workspace/proj_xxx/vocals.wav",
-    "bgm_wav": "/workspace/proj_xxx/bgm.wav",
+    "vocals_wav": "/workspace/proj_xxx/cinematic-xxxx/dialogue.wav",
+    "bgm_wav": "/workspace/proj_xxx/cinematic-xxxx/bgm.wav",
+    "cinematic_stems": {
+      "dialogue": "/workspace/proj_xxx/cinematic-xxxx/dialogue.wav",
+      "singing": "/workspace/proj_xxx/cinematic-xxxx/singing.wav",
+      "music": "/workspace/proj_xxx/cinematic-xxxx/music.wav",
+      "effects": "/workspace/proj_xxx/cinematic-xxxx/effects.wav"
+    },
     "output_video": null,
     "duration": 60.0,
     "bgm_volume": 0.75

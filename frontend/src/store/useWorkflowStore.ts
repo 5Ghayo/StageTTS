@@ -117,7 +117,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         ],
         outputs: [
           { id: "out-script", label: "标准剧本", type: "SCRIPT" },
-          { id: "out-bgm-pass", label: "伴奏参考", type: "AUDIO" },
+          { id: "out-bgm-pass", label: "背景轨", type: "AUDIO" },
         ],
         summary: "多端共享单一数据源",
         params: { schema: "v2" },
@@ -151,7 +151,7 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
         status: "idle",
         inputs: [
           { id: "in-wavs", label: "分句配音", type: "AUDIO[]" },
-          { id: "in-bgm", label: "伴奏参考", type: "AUDIO" },
+          { id: "in-bgm", label: "背景轨", type: "AUDIO" },
         ],
         outputs: [{ id: "out-mp4", label: "成片视频", type: "MP4" }],
         summary: config.burnWatermark ? "重编码烧录合规水印" : "无损流快速封装",

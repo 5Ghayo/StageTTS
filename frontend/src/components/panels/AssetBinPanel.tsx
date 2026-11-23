@@ -25,10 +25,15 @@ export const AssetBinPanel: React.FC = () => {
     { label: "原视频流", ready: Boolean(script.media.source_video) },
     ...(stems
       ? [
-          { label: "对白轨", ready: true, url: stems.dialogue },
-          { label: "歌声轨", ready: true, url: stems.singing },
-          { label: "音乐轨", ready: true, url: stems.music },
-          { label: "音效轨", ready: true, url: stems.effects },
+          { label: "对白轨", ready: Boolean(stems.dialogue), url: stems.dialogue },
+          { label: "歌声轨", ready: Boolean(stems.singing), url: stems.singing },
+          { label: "音乐轨", ready: Boolean(stems.music), url: stems.music },
+          { label: "音效轨", ready: Boolean(stems.effects), url: stems.effects },
+          {
+            label: "背景轨",
+            ready: Boolean(script.media.bgm_wav),
+            url: script.media.bgm_wav ?? undefined,
+          },
         ]
       : [
           { label: "人声轨", ready: Boolean(script.media.vocals_wav) },
@@ -69,7 +74,7 @@ export const AssetBinPanel: React.FC = () => {
                         row.ready ? "bg-status-ready" : "bg-muted"
                       }`}
                     />
-                    {"url" in row ? (
+                    {"url" in row && row.url ? (
                       <a
                         href={row.url}
                         target="_blank"

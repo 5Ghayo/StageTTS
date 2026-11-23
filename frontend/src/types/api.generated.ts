@@ -637,6 +637,8 @@ export interface components {
             llm_configured: boolean;
             /** Hf Token Configured */
             hf_token_configured: boolean;
+            /** Banquet Configured */
+            banquet_configured: boolean;
             /** Env Parse Python */
             env_parse_python: string;
         };

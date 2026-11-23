@@ -61,7 +61,7 @@
 
 4. **动态情绪参考音频路由与零样本兜底**
    - 合成前根据 `segment.emotion` 查询 `characters[speaker].emotion_refs[emotion]`；若目标情绪不存在，自动回退到 `emotion_refs["neutral"]`，再无则取任意可用参考音。
-   - 缺少可用情绪参考时，从本项目 `vocals.wav` 按同角色已对齐或人工确认的台词范围截取 3–10 秒，并使用对应原文。切换角色权重后恢复服务默认权重。
+   - 缺少可用情绪参考时，从本项目 `media.vocals_wav`（对白轨，兼容旧项目 `vocals.wav`）按同角色已对齐或人工确认的台词范围截取 3–10 秒，并使用对应原文。切换角色权重后恢复服务默认权重。
 
 5. **Agent 严禁裸写 FFmpeg 或 Shell 命令**
    - 大模型 Agent 只能通过 OpenAI Function Calling 调度后端封装好的 **5 个确定性原子工具**（`query_script`、`batch_update_segments`、`synthesize_segments`、`update_mix_settings`、`render_final_video`）。禁止让 LLM 生成并执行任意 FFmpeg 命令或 Python 代码。
@@ -73,7 +73,7 @@
      - 新 WAV 记录 `applied_speed_factor`，导出按成品直接拼轨。旧 WAV 缺少该字段时沿用导出时变速。
 
 7. **音视频后期与 FFmpeg 硬水印坑点规避**
-   - `pydub` 按毫秒 `overlay` 拼接完整人声轨（避免长命令行参数溢出）。当 `segment.keep_original == true` 时，直接从 `vocals.wav` 对应 `[start, end]` 切片保留原声（笑声、叹息等），跳过 TTS 音频。
+   - `pydub` 按毫秒 `overlay` 拼接完整人声轨（避免长命令行参数溢出）。当 `segment.keep_original == true` 时，直接从 `media.vocals_wav`（对白轨）对应 `[start, end]` 切片保留原声（笑声、叹息等），跳过 TTS 音频。
    - FFmpeg 混音必须使用 `amix=inputs=2:duration=first:normalize=0`（配合精确音量系数 `media.bgm_volume`），禁止使用默认 `normalize=1` 导致音量被莫名腰斩。
    - **关键坑点**：FFmpeg 的 `-c:v copy`（视频流直拷贝）**不能与 `-vf`（视频滤镜，如烧录右下角视觉水印）同时使用**，否则 FFmpeg 直接报错退出。因此：
      - **快速无损预览/导出（`burn_watermark=false`）**：使用 `-c:v copy`，合规标识由前端播放层或软字幕展示；
@@ -100,8 +100,14 @@
   "mode": "video_dubbing",
   "media": {
     "source_video": "/workspace/proj_demo_01/input.mp4",
-    "vocals_wav": "/workspace/proj_demo_01/vocals.wav",
-    "bgm_wav": "/workspace/proj_demo_01/bgm.wav",
+    "vocals_wav": "/workspace/proj_demo_01/cinematic-xxxx/dialogue.wav",
+    "bgm_wav": "/workspace/proj_demo_01/cinematic-xxxx/bgm.wav",
+    "cinematic_stems": {
+      "dialogue": "/workspace/proj_demo_01/cinematic-xxxx/dialogue.wav",
+      "singing": "/workspace/proj_demo_01/cinematic-xxxx/singing.wav",
+      "music": "/workspace/proj_demo_01/cinematic-xxxx/music.wav",
+      "effects": "/workspace/proj_demo_01/cinematic-xxxx/effects.wav"
+    },
     "output_video": null,
     "duration": 45.2,
     "bgm_volume": 0.75
@@ -182,7 +188,7 @@
 | `segment` | `target_lang` | `string` | 是 | 目标语种代码（如 `zh`, `en`, `ja`） |
 | `segment` | `emotion` | `EmotionType` | 是 | 情绪标签 |
 | `segment` | `action` | `string \| null` | 否 | 虚拟舞台预制动作标签（如 `shake_head`, `nod`） |
-| `segment` | `keep_original` | `boolean` | 是 | `true` 时保留 `vocals.wav` 原声，不做 TTS 替换 |
+| `segment` | `keep_original` | `boolean` | 是 | `true` 时保留 `media.vocals_wav` 原声，不做 TTS 替换 |
 | `segment` | `speed_factor` | `number` | 是 | 温和语速调整系数（默认 `1.0`，建议上限 `1.15`） |
 | `segment` | `tts_wav` | `string \| null` | 否 | 单句合成音频 URL（如 `/workspace/{id}/tts/seg_0000.wav`） |
 | `segment` | `applied_speed_factor` | `number \| null` | 否 | 已写入 WAV 的倍率，旧项目为空 |

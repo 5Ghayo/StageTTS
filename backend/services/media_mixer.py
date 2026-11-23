@@ -72,7 +72,6 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
     """使用 pydub 按毫秒 overlay 拼接完整人声轨（含原声笑声/叹息保留）。"""
     max_seg_end = max((seg.end for seg in script.segments), default=0.0)
     total_ms = max(1000, int(max(script.media.duration, max_seg_end) * 1000))
-    vocal_track = AudioSegment.silent(duration=total_ms, frame_rate=44100).set_channels(2)
 
     vocals_audio: Optional[AudioSegment] = None
     if script.media.vocals_wav:
@@ -83,6 +82,9 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
                     vocals_audio = AudioSegment.from_file(source)
         except ValueError:
             vocals_audio = None
+
+    frame_rate = vocals_audio.frame_rate if vocals_audio is not None else 44100
+    vocal_track = AudioSegment.silent(duration=total_ms, frame_rate=frame_rate).set_channels(2)
 
     with tempfile.TemporaryDirectory(prefix="stagetts_mix_") as tmp_name:
         tmp_dir = Path(tmp_name)

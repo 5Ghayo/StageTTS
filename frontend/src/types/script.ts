@@ -5,6 +5,7 @@
 
 import type { components } from "./api.generated";
 
+export type CinematicStems = components["schemas"]["CinematicStems"];
 export type MediaInfo = components["schemas"]["MediaInfo"];
 export type EmotionRef = components["schemas"]["EmotionRef"];
 export type AvatarConfig = components["schemas"]["AvatarConfig"];

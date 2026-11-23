@@ -57,13 +57,27 @@ def load_model(source_root: Path, checkpoint: Path, device: str) -> nn.Module:
 
 
 @torch.inference_mode()
+def _normalize_peak(signal: torch.Tensor, limit: float = 0.99) -> torch.Tensor:
+    if signal.numel() == 0:
+        return signal
+    peak = float(signal.abs().max().item())
+    if peak > limit:
+        return signal * (limit / peak)
+    return signal
+
+
+@torch.inference_mode()
 def separate(
     model: nn.Module,
     waveform: torch.Tensor,
     device: str,
     progress: Callable[[str], None] | None = None,
+    hop_seconds: float = 1.0,
 ) -> dict[str, torch.Tensor]:
-    """Use the paper's 8 s window and 1 s hop, with one inference for a short clip."""
+    """Use the paper's 8 s window and configurable hop (default 1 s), with one inference for a short clip."""
+    if not (0 < hop_seconds <= 4.0):
+        raise ValueError("Banquet hop_seconds 必须在 (0, 4.0] 秒范围内。")
+
     def infer(chunk: torch.Tensor) -> dict[str, torch.Tensor]:
         # The checkpoint is mono. Run one channel at a time to keep peak VRAM low on 8GB GPUs.
         per_stem: dict[str, list[torch.Tensor]] = {}
@@ -76,7 +90,7 @@ def separate(
 
     length = waveform.shape[-1]
     chunk_size = 8 * SAMPLE_RATE
-    hop_size = SAMPLE_RATE
+    hop_size = max(1, round(hop_seconds * SAMPLE_RATE))
     if length <= chunk_size:
         if progress is not None:
             progress("正在分离音频（1/1 窗口）")
@@ -121,6 +135,7 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--hop-seconds", type=float, default=1.0)
     args = parser.parse_args()
 
     def emit(message: str) -> None:
@@ -135,15 +150,15 @@ def main() -> None:
 
     emit(f"加载 Banquet 模型 ({args.device})...")
     model = load_model(args.source_root, args.checkpoint, args.device)
-    estimates = separate(model, waveform, args.device, progress=emit)
+    estimates = separate(model, waveform, args.device, progress=emit, hop_seconds=args.hop_seconds)
     emit("正在写入四轨 WAV 文件...")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for stem, signal in estimates.items():
         if not torch.isfinite(signal).all():
             raise RuntimeError(f"Banquet 生成的 {stem} 轨包含非有限值。")
-        # The automatic voice-reference extractor reads dialogue with the stdlib wave module.
-        subtype = "PCM_16" if stem == "dialogue" else "FLOAT"
-        sf.write(args.output_dir / f"{stem}.wav", signal.T.numpy(), SAMPLE_RATE, subtype=subtype)
+        # Write 16-bit PCM WAV so dialogue works with stdlib wave and all stems play reliably in browsers.
+        normalized = _normalize_peak(signal)
+        sf.write(args.output_dir / f"{stem}.wav", normalized.T.numpy(), SAMPLE_RATE, subtype="PCM_16")
 
 
 if __name__ == "__main__":

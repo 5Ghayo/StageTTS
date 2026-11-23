@@ -135,6 +135,7 @@ class ReadinessInfo(BaseModel):
     tts_url: str
     llm_configured: bool
     hf_token_configured: bool
+    banquet_configured: bool
     env_parse_python: str
 
 

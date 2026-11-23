@@ -22,6 +22,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -221,21 +223,41 @@ def _extract_wav_and_probe(input_path: Path, work_wav: Path) -> float:
 
 
 def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
-    paths = {}
-    for name in ("BANQUET_ROOT", "BANQUET_CHECKPOINT"):
-        value = os.getenv(name, "").strip()
-        if not value:
-            raise RuntimeError(f"Banquet 四轨需要在 backend/.env 配置 {name}。")
-        paths[name] = (ROOT_DIR / Path(value).expanduser()).resolve()
-    source_root = paths["BANQUET_ROOT"]
-    checkpoint = paths["BANQUET_CHECKPOINT"]
-    if not (source_root / "src/models/bandit/bandit.py").is_file() or not checkpoint.is_file():
-        raise RuntimeError("Banquet 源码或权重缺失，请检查 BANQUET_ROOT 和 BANQUET_CHECKPOINT。")
+    source_root, checkpoint = config.resolve_banquet_paths()
+
+    hop_raw = os.getenv("BANQUET_HOP_SECONDS", "").strip()
+    hop_args: List[str] = []
+    if hop_raw:
+        try:
+            hop_seconds = float(hop_raw)
+        except ValueError as exc:
+            raise RuntimeError(f"BANQUET_HOP_SECONDS 配置非法：{hop_raw}") from exc
+        if not (0 < hop_seconds <= 4.0):
+            raise RuntimeError(f"BANQUET_HOP_SECONDS 必须在 (0, 4.0] 秒范围内，当前为 {hop_raw}")
+        hop_args = ["--hop-seconds", str(hop_seconds)]
 
     env = os.environ.copy()
     env.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+    env["PYTHONUTF8"] = "1"
     devices = ("cuda", "cpu") if device == "cuda" else ("cpu",)
+    deadline = time.monotonic() + 900
+
+    def _drain_banquet(stream: Any, lines: deque[str]) -> None:
+        if stream is None:
+            return
+        for raw_line in stream:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("[banquet] "):
+                _log("Stage1", line.removeprefix("[banquet] ").strip())
+            else:
+                lines.append(line)
+
     for target_device in devices:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。")
         _log("Stage1", f"Banquet ({target_device}) 直接分离对白、歌声、音乐与音效")
         cmd = [
             sys.executable,
@@ -250,8 +272,9 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             str(output_dir),
             "--device",
             target_device,
+            *hop_args,
         ]
-        output_lines: List[str] = []
+        output_lines: deque[str] = deque(maxlen=200)
         proc = subprocess.Popen(
             cmd,
             env=env,
@@ -262,34 +285,32 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             errors="replace",
             bufsize=1,
         )
-
-        def _drain_banquet(stream: Any = proc.stdout, lines: List[str] = output_lines) -> None:
-            if stream is None:
-                return
-            for raw_line in stream:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                if line.startswith("[banquet] "):
-                    _log("Stage1", line.removeprefix("[banquet] ").strip())
-                else:
-                    lines.append(line)
-
-        reader = threading.Thread(target=_drain_banquet, daemon=True)
+        reader = threading.Thread(target=_drain_banquet, args=(proc.stdout, output_lines), daemon=True)
         reader.start()
         try:
-            returncode = proc.wait(timeout=900)
-        except subprocess.TimeoutExpired as exc:
-            proc.kill()
-            proc.wait()
-            reader.join(timeout=3)
-            raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。") from exc
-        reader.join(timeout=5)
+            try:
+                returncode = proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired as exc:
+                proc.kill()
+                proc.wait()
+                reader.join(timeout=3)
+                raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。") from exc
+            except BaseException:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                reader.join(timeout=3)
+                raise
+            reader.join(timeout=5)
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
         if returncode == 0:
             return
         detail = "\n".join(output_lines).strip()
         if target_device == "cpu" or not _is_cuda_oom(RuntimeError(detail)):
-            raise RuntimeError(f"Banquet ({target_device}) 分离失败：{detail[-600:]}")
+            suffix = detail[-600:] if detail else "无错误输出"
+            raise RuntimeError(f"Banquet ({target_device}) 分离失败 (code={returncode})：{suffix}")
         _log("Stage1", "Banquet CUDA 显存不足，改用 CPU 重试")
 
 
@@ -302,8 +323,8 @@ def _finish_four_stems(output_dir: Path, project_id: str) -> Tuple[Path, Path, C
     proc = subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-y",
          "-i", str(tracks["effects"]), "-i", str(tracks["music"]), "-i", str(tracks["singing"]),
-         "-filter_complex", "amix=inputs=3:duration=first:normalize=0",
-         "-c:a", "pcm_f32le", str(bgm_path)],
+         "-filter_complex", "amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.98:level=0:latency=1",
+         "-c:a", "pcm_s16le", str(bgm_path)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -312,6 +333,8 @@ def _finish_four_stems(output_dir: Path, project_id: str) -> Tuple[Path, Path, C
     )
     if proc.returncode != 0:
         raise RuntimeError(f"影视背景轨合成失败：{proc.stderr[-600:]}")
+    if not bgm_path.is_file() or bgm_path.stat().st_size <= 44:
+        raise RuntimeError("影视背景轨合成结果为空，请检查分离音轨后重试。")
 
     stems = CinematicStems(**{
         stem: _project_media_url(path, output_dir.parent, project_id) for stem, path in tracks.items()

@@ -188,6 +188,7 @@ def health_check() -> Dict[str, object]:
             "tts_url": config.TTS_API_URL,
             "llm_configured": config.is_llm_configured(),
             "hf_token_configured": config.is_hf_token_configured(),
+            "banquet_configured": config.is_banquet_configured(),
             "env_parse_python": config.ENV_PARSE_PYTHON,
         },
     }

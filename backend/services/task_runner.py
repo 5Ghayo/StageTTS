@@ -417,6 +417,11 @@ def run_parse_worker(
             f"未找到 env_parse Python 可执行文件: {python_bin}。请检查 backend/.env 中的 ENV_PARSE_PYTHON 配置。"
         )
 
+    try:
+        banquet_root, banquet_checkpoint = config.resolve_banquet_paths()
+    except RuntimeError as exc:
+        raise ParseWorkerError(str(exc)) from exc
+
     output_dir = config.WORKSPACE_DIR / project_id
     output_dir.mkdir(parents=True, exist_ok=True)
     effective_compute = compute_type or config.WHISPER_COMPUTE_TYPE
@@ -442,6 +447,8 @@ def run_parse_worker(
 
     sub_env = os.environ.copy()
     sub_env["PYTHONUTF8"] = "1"
+    sub_env["BANQUET_ROOT"] = str(banquet_root)
+    sub_env["BANQUET_CHECKPOINT"] = str(banquet_checkpoint)
     if config.HF_HOME:
         sub_env["HF_HOME"] = config.HF_HOME
     if config.HUGGINGFACE_HUB_CACHE:
