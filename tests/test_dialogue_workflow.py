@@ -292,6 +292,13 @@ class DialogueWorkflowTest(unittest.TestCase):
                     speaker="SPEAKER_00",
                     orig_text="We need to verify every single audio track carefully before exporting the final film.",
                 ),
+                Segment(
+                    id=3,
+                    start=12.2,
+                    end=13.5,
+                    speaker="SPEAKER_00",
+                    orig_text="Oh...",
+                ),
             ],
         )
         repair_client = MagicMock()
@@ -325,6 +332,14 @@ class DialogueWorkflowTest(unittest.TestCase):
                                     "keep_original": False,
                                     "self_check": {"semantic_complete": True, "omitted_info": ""},
                                 },
+                                {
+                                    "id": 3,
+                                    "target_text": "（停顿）",
+                                    "emotion": "sad",
+                                    "action": "sigh",
+                                    "keep_original": True,
+                                    "self_check": {"semantic_complete": False, "omitted_info": "tone"},
+                                },
                             ])
                         )
                     )
@@ -338,18 +353,21 @@ class DialogueWorkflowTest(unittest.TestCase):
                                 {"id": 0, "target_text": "在启动任务前先检查信标状态。"},
                                 {"id": 1, "target_text": "请现在就检查甲板上的每一个传感器。"},
                                 {"id": 2, "target_text": "导出成片前我们需要仔细核对每一条音轨。"},
+                                {"id": 3, "target_text": "哦……"},
                             ])
                         )
                     )
                 ]
             ),
         ]
-        self.assertEqual(translation.translate_script(repair_script, repair_client), [0, 1, 2])
+        self.assertEqual(translation.translate_script(repair_script, repair_client), [0, 1, 2, 3])
         self.assertEqual(repair_client.chat.completions.create.call_count, 2)
-        s0, s1, s2 = repair_script.segments
+        s0, s1, s2, s3 = repair_script.segments
         self.assertEqual((s0.emotion, s0.action, s0.keep_original), ("angry", "point", False))
-        self.assertEqual((s1.emotion, s1.action, s1.keep_original), ("sad", "sigh", True))
+        # 上游 _is_non_speech 守卫会过滤长整句误标的 keep_original=True，仅短叹词保留原声
+        self.assertEqual((s1.emotion, s1.action, s1.keep_original), ("sad", "sigh", False))
         self.assertEqual((s2.emotion, s2.action, s2.keep_original), ("whisper", "nod", False))
+        self.assertEqual((s3.emotion, s3.action, s3.keep_original), ("sad", "sigh", True))
 
     def test_long_script_translation_uses_sliding_dialogue_window(self):
         script = ProjectScript(
