@@ -13,6 +13,12 @@ from backend.agent.prompts import DIRECTOR_TRANSLATE_PROMPT, TRANSLATION_REPAIR_
 from backend.schemas import ProjectScript, Segment
 
 EMOTIONS = {"neutral", "angry", "happy", "sad", "whisper"}
+WHOLE_DIALOGUE_MAX_SEGMENTS = 80
+WINDOW_CONTEXT_MARGIN = 20
+_CJK_LANGS = {"zh", "ja", "yue", "ko"}
+_CJK_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+_NON_CJK_WORD_RE = re.compile(r"[^\W_]+(?:['-][^\W_]+)*")
+_ASCII_GLOSSARY_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\s\-']*[A-Za-z0-9]|[A-Za-z0-9]")
 CONTEXT_INSTRUCTIONS = (
     "先通读完整对白理解剧情、角色关系和前后语气，再按原句 id 还原译文。"
     "参照相邻台词、角色语气和术语表；术语出现时使用固定译法。"
@@ -111,8 +117,14 @@ class DialogueContext:
             "lines": list(entries),
         }
 
-    def whole_dialogue_payload(self, segments: Iterable[Segment], *, full_segments: Iterable[Segment] | None = None) -> dict:
-        """构造通读全文的翻译请求，并保留原句 id 供结果还原。"""
+    def whole_dialogue_payload(
+        self,
+        segments: Iterable[Segment],
+        *,
+        full_segments: Iterable[Segment] | None = None,
+        dialogue_window: tuple[int, int, int] | None = None,
+    ) -> dict:
+        """构造通读全文或滑动窗口上下文的翻译请求，并保留原句 id 供结果还原。"""
         ordered = sorted(segments, key=lambda seg: (seg.start, seg.id))
         dialogue_source = sorted(full_segments or segments, key=lambda seg: (seg.start, seg.id))
         lines = [self.entry(seg) for seg in ordered]
@@ -125,7 +137,7 @@ class DialogueContext:
         payload = self.payload(lines)
         payload.update({
             "target_lang": target_lang,
-            "translation_mode": "whole_dialogue_once",
+            "translation_mode": "windowed_dialogue" if dialogue_window is not None else "whole_dialogue_once",
             "dialogue": "\n".join(dialogue_lines),
             "output_requirements": (
                 "先理解整段对白，再逐条还原到 lines 中的 id；"
@@ -133,6 +145,13 @@ class DialogueContext:
                 "每项必须包含 id、target_text、emotion、action、keep_original、self_check。"
             ),
         })
+        if dialogue_window is not None:
+            start_idx, end_idx, total_count = dialogue_window
+            payload["dialogue_window"] = {
+                "start_index": start_idx,
+                "end_index": end_idx,
+                "total_segments": total_count,
+            }
         return payload
 
 
@@ -145,32 +164,50 @@ def _self_check_flags(entry: dict) -> tuple[bool, str]:
     return complete is not False, omitted
 
 
+def _count_non_cjk_words(text: str) -> int:
+    cleaned = _CJK_CHAR_RE.sub(" ", text)
+    return len(_NON_CJK_WORD_RE.findall(cleaned))
+
+
 def _is_suspicious(seg: Segment, text: str, glossary: dict[str, str] | None = None) -> bool:
-    """启发式判断是否可能摘要化/漏译；不是硬拒绝，只触发一次 repair。"""
+    """启发式判断是否可能摘要化/漏译或遗漏术语表规定译法；只触发一次 repair。"""
     source = seg.orig_text.strip()
     candidate = text.strip()
-    if len(source) >= 12 and len(candidate) <= max(2, int(len(source) * 0.25)):
-        return True
-    glossary = glossary or {}
-    stopwords = {"is", "are", "was", "were", "the", "a", "an", "here", "this", "that", "line", "ready"}
-    latin_words = [
-        word for word in re.findall(r"[A-Za-z][A-Za-z\-']+", source)
-        if word.casefold() not in stopwords and len(word) >= 3
-    ]
-    for word in latin_words:
-        if word.casefold() in candidate.casefold():
+    target_cjk = seg.target_lang.removeprefix("all_").split("-")[0] in _CJK_LANGS
+    src_cjk = len(_CJK_CHAR_RE.findall(source))
+    src_words = _count_non_cjk_words(source)
+    compact_src = re.sub(r"\s+", "", source)
+    compact_cand = re.sub(r"\s+", "", candidate)
+
+    if target_cjk:
+        if src_cjk >= 12 and len(compact_cand) <= max(2, int(len(compact_src) * 0.30)):
+            return True
+        if src_cjk < 12 and src_words >= 6 and len(compact_cand) <= max(2, int(src_words * 0.60)):
+            return True
+    else:
+        cand_words = _count_non_cjk_words(candidate)
+        if src_cjk >= 10 and cand_words <= max(2, int(len(compact_src) * 0.25)):
+            return True
+        if src_cjk < 10 and src_words >= 6 and cand_words <= max(2, int(src_words * 0.35)):
+            return True
+
+    for raw_source_term, raw_target_term in (glossary or {}).items():
+        source_term = raw_source_term.strip()
+        target_term = raw_target_term.strip()
+        if not source_term or not target_term:
             continue
-        mapped = next((target for source_term, target in glossary.items() if source_term.casefold() == word.casefold()), "")
-        if mapped and mapped.casefold() in candidate.casefold():
-            continue
-        if glossary and all(
-            (content.casefold() in candidate.casefold())
-            or any(source_term.casefold() == content.casefold() and target.casefold() in candidate.casefold()
-                   for source_term, target in glossary.items())
-            for content in latin_words
-        ):
-            return False
-        return True
+        if _ASCII_GLOSSARY_TERM_RE.fullmatch(source_term):
+            matched = bool(
+                re.search(
+                    rf"(?<![A-Za-z0-9]){re.escape(source_term)}(?![A-Za-z0-9])",
+                    source,
+                    flags=re.IGNORECASE,
+                )
+            )
+        else:
+            matched = source_term.casefold() in source.casefold()
+        if matched and target_term.casefold() not in candidate.casefold():
+            return True
     return False
 
 
@@ -247,9 +284,12 @@ def translate_script(
     if not segments:
         return []
 
-    payload = context.whole_dialogue_payload(segments)
+    use_window = len(segments) > WHOLE_DIALOGUE_MAX_SEGMENTS
     if log:
-        log(f"调用导演 LLM 一次性通读并翻译全部 {len(segments)} 条台词")
+        if use_window:
+            log(f"剧本共 {len(segments)} 条台词，启用滑动窗口上下文分批翻译")
+        else:
+            log(f"调用导演 LLM 通读全文并翻译全部 {len(segments)} 条台词")
 
     translated: list[int] = []
     pending = {seg.id: seg for seg in segments}
@@ -257,9 +297,19 @@ def translate_script(
     chunk_size = config.TRANSLATION_CHUNK_SIZE
     for offset in range(0, len(segments), chunk_size):
         batch = segments[offset:offset + chunk_size]
-        batch_payload = context.whole_dialogue_payload(batch, full_segments=segments)
+        if use_window:
+            win_start = max(0, offset - WINDOW_CONTEXT_MARGIN)
+            win_end = min(len(segments), offset + len(batch) + WINDOW_CONTEXT_MARGIN)
+            batch_payload = context.whole_dialogue_payload(
+                batch,
+                full_segments=segments[win_start:win_end],
+                dialogue_window=(win_start, win_end, len(segments)),
+            )
+        else:
+            batch_payload = context.whole_dialogue_payload(batch, full_segments=segments)
         if log:
-            log(f"调用导演 LLM 通读全文并翻译片段 #{batch[0].id}..#{batch[-1].id}（{len(batch)} 条）")
+            mode_label = "按滑动窗口上下文翻译" if use_window else "通读全文并翻译"
+            log(f"调用导演 LLM {mode_label}片段 #{batch[0].id}..#{batch[-1].id}（{len(batch)} 条）")
         try:
             entries = complete_dialogue(client, DIRECTOR_TRANSLATE_PROMPT, batch_payload)
         except (OpenAIError, ValueError, IndexError, json.JSONDecodeError) as exc:
@@ -269,7 +319,7 @@ def translate_script(
                 log("本批翻译失败，保留当前台词")
             continue
 
-        suspicious: list[tuple[Segment, str]] = []
+        suspicious: list[tuple[Segment, str, dict]] = []
         for entry in entries:
             seg_id = entry.get("id")
             text = entry.get("target_text")
@@ -278,7 +328,7 @@ def translate_script(
             seg = pending[seg_id]
             complete, omitted = _self_check_flags(entry)
             if not complete or omitted or _is_suspicious(seg, text, script.glossary):
-                suspicious.append((seg, text.strip()))
+                suspicious.append((seg, text.strip(), entry))
                 continue
             if _apply_translation(seg, text, entry):
                 completed_ids.add(seg.id)
@@ -286,10 +336,21 @@ def translate_script(
 
         if not suspicious:
             continue
-        repaired = _repair_entries(client, context, suspicious)
-        for seg, _old_text in suspicious:
+        repaired = _repair_entries(
+            client,
+            context,
+            [(seg, old_text) for seg, old_text, _ in suspicious],
+        )
+        for seg, _old_text, orig_entry in suspicious:
             text = repaired.get(seg.id)
-            if text and seg.id not in completed_ids and _apply_translation(seg, text, {"id": seg.id, "target_text": text}):
+            repaired_entry = {
+                "id": seg.id,
+                "target_text": text,
+                "emotion": orig_entry.get("emotion"),
+                "action": orig_entry.get("action"),
+                "keep_original": orig_entry.get("keep_original"),
+            }
+            if text and seg.id not in completed_ids and _apply_translation(seg, text, repaired_entry):
                 completed_ids.add(seg.id)
                 translated.append(seg.id)
             elif errors is not None:

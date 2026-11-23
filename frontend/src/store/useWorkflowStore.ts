@@ -154,8 +154,18 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
           { id: "in-bgm", label: "背景轨", type: "AUDIO" },
         ],
         outputs: [{ id: "out-mp4", label: "成片视频", type: "MP4" }],
-        summary: config.burnWatermark ? "重编码烧录合规水印" : "无损流快速封装",
-        params: { burn_watermark: config.burnWatermark },
+        summary:
+          config.burnSubtitles !== "none"
+            ? config.burnWatermark
+              ? "单次重编码烧录字幕与水印"
+              : "重编码烧录 ASS 硬字幕"
+            : config.burnWatermark
+              ? "重编码烧录合规水印"
+              : "无损流快速封装",
+        params: {
+          burn_watermark: config.burnWatermark,
+          burn_subtitles: config.burnSubtitles,
+        },
       },
     },
     {
@@ -285,6 +295,7 @@ const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
   computeType: "int8",
   targetLang: "zh",
   burnWatermark: false,
+  burnSubtitles: "none",
 };
 
 interface WorkflowState {
@@ -424,10 +435,18 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             ...node,
             data: {
               ...node.data,
-              summary: nextConfig.burnWatermark ? "重编码烧录合规水印" : "无损流快速封装",
+              summary:
+                nextConfig.burnSubtitles !== "none"
+                  ? nextConfig.burnWatermark
+                    ? "单次重编码烧录字幕与水印"
+                    : "重编码烧录 ASS 硬字幕"
+                  : nextConfig.burnWatermark
+                    ? "重编码烧录合规水印"
+                    : "无损流快速封装",
               params: {
                 ...node.data.params,
                 burn_watermark: nextConfig.burnWatermark,
+                burn_subtitles: nextConfig.burnSubtitles,
               },
             },
           };
@@ -710,7 +729,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         setNodeStatus("virtual_stage_out", "running");
         get().appendLog("env_backend", "正在执行 pydub 毫秒拼轨与 FFmpeg 混音封装...", "info");
 
-        const renderRes = await renderVideo(activeScript.project_id, cfg.burnWatermark);
+        const renderRes = await renderVideo(activeScript.project_id, {
+          burn_watermark: cfg.burnWatermark,
+          burn_subtitles: cfg.burnSubtitles,
+          auto_ducking: activeScript.media.auto_ducking ?? true,
+        });
         activeScript = {
           ...activeScript,
           media: {

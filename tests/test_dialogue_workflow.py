@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend import config
 from backend.main import app
-from backend.schemas import CharacterConfig, EmotionRef, MediaInfo, ProjectScript, Segment
+from backend.schemas import AlignedWord, CharacterConfig, EmotionRef, MediaInfo, ProjectScript, Segment
 from backend.services import references, synthesis, translation, tts_client
 from workers.aligned_segments import normalize_segments
 from workers.parse_worker import _build_and_save_script
@@ -222,3 +222,359 @@ class DialogueWorkflowTest(unittest.TestCase):
             with patch.object(references, "MAX_REFERENCE_BYTES", 16):
                 with self.assertRaisesRegex(ValueError, "32 MB"):
                     references.store_reference_audio("oversized", io.BytesIO(b"0" * 32))
+
+    def test_en_to_zh_translation_avoids_false_repair_and_repair_preserves_tags(self):
+        normal_script = ProjectScript(
+            project_id="en_zh_ok",
+            source_lang="en",
+            glossary={"AI": "人工智能"},
+            media=MediaInfo(duration=12),
+            segments=[
+                Segment(
+                    id=0,
+                    start=0.0,
+                    end=4.0,
+                    speaker="SPEAKER_00",
+                    orig_text="Wait, are you sure this local video dubbing tool works without cloud servers?",
+                ),
+            ],
+        )
+        ok_client = MagicMock()
+        ok_client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps([
+                            {
+                                "id": 0,
+                                "target_text": "等等，你确定这个本地视频配音工具不需要云服务器就能运行吗？",
+                                "emotion": "angry",
+                                "action": "shake_head",
+                                "keep_original": False,
+                                "self_check": {"semantic_complete": True, "omitted_info": ""},
+                            }
+                        ])
+                    )
+                )
+            ]
+        )
+        self.assertEqual(translation.translate_script(normal_script, ok_client), [0])
+        self.assertEqual(ok_client.chat.completions.create.call_count, 1)
+        seg0 = normal_script.segments[0]
+        self.assertEqual(seg0.emotion, "angry")
+        self.assertEqual(seg0.action, "shake_head")
+        self.assertFalse(seg0.keep_original)
+
+        repair_script = ProjectScript(
+            project_id="en_zh_repair",
+            source_lang="en",
+            glossary={"Beacon": "信标"},
+            media=MediaInfo(duration=20),
+            segments=[
+                Segment(
+                    id=0,
+                    start=0.0,
+                    end=4.0,
+                    speaker="SPEAKER_00",
+                    orig_text="Check the Beacon status before launching the mission.",
+                ),
+                Segment(
+                    id=1,
+                    start=4.2,
+                    end=7.0,
+                    speaker="SPEAKER_00",
+                    orig_text="Please check every single sensor on deck right now.",
+                ),
+                Segment(
+                    id=2,
+                    start=7.2,
+                    end=12.0,
+                    speaker="SPEAKER_00",
+                    orig_text="We need to verify every single audio track carefully before exporting the final film.",
+                ),
+                Segment(
+                    id=3,
+                    start=12.2,
+                    end=13.5,
+                    speaker="SPEAKER_00",
+                    orig_text="Oh...",
+                ),
+            ],
+        )
+        repair_client = MagicMock()
+        repair_client.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps([
+                                {
+                                    "id": 0,
+                                    "target_text": "在发射任务前先检查一下设备状态。",
+                                    "emotion": "angry",
+                                    "action": "point",
+                                    "keep_original": False,
+                                    "self_check": {"semantic_complete": True, "omitted_info": ""},
+                                },
+                                {
+                                    "id": 1,
+                                    "target_text": "（叹气）检查甲板。",
+                                    "emotion": "sad",
+                                    "action": "sigh",
+                                    "keep_original": True,
+                                    "self_check": {"semantic_complete": False, "omitted_info": "sensor"},
+                                },
+                                {
+                                    "id": 2,
+                                    "target_text": "导出前",
+                                    "emotion": "whisper",
+                                    "action": "nod",
+                                    "keep_original": False,
+                                    "self_check": {"semantic_complete": True, "omitted_info": ""},
+                                },
+                                {
+                                    "id": 3,
+                                    "target_text": "（停顿）",
+                                    "emotion": "sad",
+                                    "action": "sigh",
+                                    "keep_original": True,
+                                    "self_check": {"semantic_complete": False, "omitted_info": "tone"},
+                                },
+                            ])
+                        )
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps([
+                                {"id": 0, "target_text": "在启动任务前先检查信标状态。"},
+                                {"id": 1, "target_text": "请现在就检查甲板上的每一个传感器。"},
+                                {"id": 2, "target_text": "导出成片前我们需要仔细核对每一条音轨。"},
+                                {"id": 3, "target_text": "哦……"},
+                            ])
+                        )
+                    )
+                ]
+            ),
+        ]
+        self.assertEqual(translation.translate_script(repair_script, repair_client), [0, 1, 2, 3])
+        self.assertEqual(repair_client.chat.completions.create.call_count, 2)
+        s0, s1, s2, s3 = repair_script.segments
+        self.assertEqual((s0.emotion, s0.action, s0.keep_original), ("angry", "point", False))
+        # 上游 _is_non_speech 守卫会过滤长整句误标的 keep_original=True，仅短叹词保留原声
+        self.assertEqual((s1.emotion, s1.action, s1.keep_original), ("sad", "sigh", False))
+        self.assertEqual((s2.emotion, s2.action, s2.keep_original), ("whisper", "nod", False))
+        self.assertEqual((s3.emotion, s3.action, s3.keep_original), ("sad", "sigh", True))
+
+    def test_long_script_translation_uses_sliding_dialogue_window(self):
+        script = ProjectScript(
+            project_id="long_win",
+            source_lang="en",
+            media=MediaInfo(duration=200),
+            segments=[
+                Segment(
+                    id=i,
+                    start=i * 2.0,
+                    end=i * 2.0 + 1.5,
+                    speaker="SPEAKER_00",
+                    orig_text=f"Sentence number {i} is ready now.",
+                )
+                for i in range(65)
+            ],
+        )
+        client = MagicMock()
+        seen_payloads = []
+
+        def reply(**kwargs):
+            payload = json.loads(kwargs["messages"][-1]["content"])
+            seen_payloads.append(payload)
+            entries = [
+                {
+                    "id": line["id"],
+                    "target_text": f"第{line['id']}句已经准备好了。",
+                    "emotion": "neutral",
+                    "action": "idle",
+                    "keep_original": False,
+                    "self_check": {"semantic_complete": True, "omitted_info": ""},
+                }
+                for line in payload["lines"]
+            ]
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(entries)))]
+            )
+
+        client.chat.completions.create.side_effect = reply
+        with patch.object(translation, "WHOLE_DIALOGUE_MAX_SEGMENTS", 30):
+            translated_ids = translation.translate_script(script, client)
+
+        self.assertEqual(translated_ids, list(range(65)))
+        self.assertEqual(len(seen_payloads), 3)
+        for idx, payload in enumerate(seen_payloads):
+            self.assertEqual(payload["translation_mode"], "windowed_dialogue")
+            self.assertIn("dialogue_window", payload)
+            dialogue_lines = payload["dialogue"].splitlines()
+            self.assertLess(len(dialogue_lines), 65)
+            if idx == 1:
+                self.assertIn("[24] SPEAKER_00:", payload["dialogue"])
+                self.assertIn("[50] SPEAKER_00:", payload["dialogue"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
+    def test_automatic_reference_fallback_trims_transcript_to_window(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            project_dir = Path(temp) / "trim_ref"
+            project_dir.mkdir()
+            vocals = project_dir / "vocals.wav"
+            rate = 8000
+            with wave.open(str(vocals), "wb") as audio:
+                audio.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                audio.writeframes(bytes(13 * rate * 2))
+
+            en_words = [
+                AlignedWord(word=token, start=idx * 1.2, end=idx * 1.2 + 1.1, speaker="A")
+                for idx, token in enumerate(
+                    ["Alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"]
+                )
+            ]
+            en_text = " ".join(w.word for w in en_words)
+            en_script = ProjectScript(
+                project_id="trim_ref",
+                source_lang="en",
+                media=MediaInfo(duration=13.0, vocals_wav="/workspace/trim_ref/vocals.wav"),
+                segments=[
+                    Segment(
+                        id=0,
+                        start=0.0,
+                        end=12.0,
+                        speaker="A",
+                        orig_text=en_text,
+                        words=en_words,
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    )
+                ],
+            )
+            en_preview = references.automatic_reference(en_script, "A")
+            self.assertIsNotNone(en_preview)
+            assert en_preview is not None
+            self.assertEqual(en_preview.text, "Alpha bravo charlie delta")
+            self.assertNotIn("foxtrot", en_preview.text)
+            with wave.open(str(config.resolve_media_path(en_preview.wav)), "rb") as clip:
+                self.assertEqual(clip.getframerate(), 32000)
+                self.assertEqual(clip.getnframes(), round(4.7 * 32000))
+
+            cjk_tokens = ["今天", "天气", "真的", "非常", "不错", "我们", "一起", "出发", "去海边", "玩吧"]
+            cjk_words = [
+                AlignedWord(word=tok, start=idx * 1.2, end=idx * 1.2 + 1.1, speaker="A")
+                for idx, tok in enumerate(cjk_tokens)
+            ]
+            cjk_script = ProjectScript(
+                project_id="trim_ref",
+                source_lang="zh",
+                media=MediaInfo(duration=13.0, vocals_wav="/workspace/trim_ref/vocals.wav"),
+                segments=[
+                    Segment(
+                        id=0,
+                        start=0.0,
+                        end=12.0,
+                        speaker="A",
+                        orig_text="".join(cjk_tokens),
+                        words=cjk_words,
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    )
+                ],
+            )
+            cjk_preview = references.automatic_reference(cjk_script, "A")
+            self.assertIsNotNone(cjk_preview)
+            assert cjk_preview is not None
+            self.assertEqual(cjk_preview.text, "今天天气真的非常")
+            self.assertNotIn(" ", cjk_preview.text)
+
+    def test_suspicious_check_handles_non_ascii_latin_and_cyrillic(self):
+        fr_seg = Segment(
+            id=0,
+            start=0.0,
+            end=5.0,
+            speaker="A",
+            orig_text="今天天气真好，我们一起去河边散步吧，顺便买杯咖啡。",
+            target_lang="fr",
+        )
+        self.assertFalse(
+            translation._is_suspicious(
+                fr_seg,
+                "Allons nous promener près de la rivière et prenons un café.",
+            )
+        )
+        ru_seg = Segment(
+            id=1,
+            start=0.0,
+            end=5.0,
+            speaker="A",
+            orig_text="今天天气真好，我们一起去河边散步吧，顺便买杯咖啡。",
+            target_lang="ru",
+        )
+        self.assertFalse(
+            translation._is_suspicious(
+                ru_seg,
+                "Погода сегодня отличная, пойдём гулять к реке и купим кофе.",
+            )
+        )
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
+    def test_automatic_reference_fallback_respects_overlap_and_scans_subsequent_segments(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            project_dir = Path(temp) / "overlap_ref"
+            project_dir.mkdir()
+            vocals = project_dir / "vocals.wav"
+            rate = 8000
+            with wave.open(str(vocals), "wb") as audio:
+                audio.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                audio.writeframes(bytes(20 * rate * 2))
+
+            words0 = [
+                AlignedWord(word="Hello", start=0.0, end=2.0, speaker="A"),
+                AlignedWord(word="world", start=2.0, end=4.5, speaker="A"),
+            ]
+            script = ProjectScript(
+                project_id="overlap_ref",
+                source_lang="en",
+                media=MediaInfo(duration=20.0, vocals_wav="/workspace/overlap_ref/vocals.wav"),
+                segments=[
+                    Segment(
+                        id=0,
+                        start=0.0,
+                        end=4.5,
+                        speaker="A",
+                        orig_text="Hello world",
+                        words=words0,
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    ),
+                    Segment(
+                        id=1,
+                        start=1.0,
+                        end=3.5,
+                        speaker="B",
+                        orig_text="Interrupt",
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    ),
+                    Segment(
+                        id=2,
+                        start=10.0,
+                        end=14.2,
+                        speaker="A",
+                        orig_text="This later line is completely clear for reference.",
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    ),
+                ],
+            )
+            preview = references.automatic_reference(script, "A")
+            self.assertIsNotNone(preview)
+            assert preview is not None
+            self.assertEqual(preview.segment_ids, [2])
+            self.assertIn("completely clear", preview.text)

@@ -75,10 +75,50 @@ export interface paths {
         get: operations["get_project_script_api_projects__project_id__script_get"];
         /**
          * Put Project Script
-         * @description 校验并保存前端修改后的完整 ProjectScript。
+         * @description 校验并保存前端修改后的完整 ProjectScript，并记录去重历史快照。
          */
         put: operations["put_project_script_api_projects__project_id__script_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Project History
+         * @description 列出项目的历史快照元数据列表。
+         */
+        get: operations["get_project_history_api_projects__project_id__history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/history/{snapshot_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Restore Project History
+         * @description 回滚恢复项目到指定历史快照。
+         */
+        post: operations["post_restore_project_history_api_projects__project_id__history__snapshot_id__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -256,6 +296,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/subtitles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Project Subtitles
+         * @description 导出指定项目的 ASS 字幕文件（单语译文或双语对照）。
+         */
+        get: operations["download_project_subtitles_api_projects__project_id__subtitles_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/export/dirs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Export Dirs
+         * @description 返回项目工作区及本机常用推荐导出目录。
+         */
+        get: operations["get_export_dirs_api_export_dirs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/render": {
         parameters: {
             query?: never;
@@ -271,6 +351,50 @@ export interface paths {
          */
         post: operations["render_project_video_api_projects__project_id__render_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/voice-presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Voice Presets
+         * @description 列出跨项目全局音色预设库。
+         */
+        get: operations["get_voice_presets_api_voice_presets_get"];
+        put?: never;
+        /**
+         * Post Voice Preset
+         * @description 将当前角色音色配置及参考音频保存为跨项目预设。
+         */
+        post: operations["post_voice_preset_api_voice_presets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/voice-presets/{preset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Voice Preset
+         * @description 删除全局音色预设并清理其隔离参考音频文件。
+         */
+        delete: operations["remove_voice_preset_api_voice_presets__preset_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -443,6 +567,29 @@ export interface components {
             lang: string;
         };
         /**
+         * ExportDirOption
+         * @description 前端导出弹窗可选本机目录。
+         */
+        ExportDirOption: {
+            /** Label */
+            label: string;
+            /** Path */
+            path: string;
+        };
+        /**
+         * ExportDirsResponse
+         * @description 工作区与本机推荐导出目录列表。
+         */
+        ExportDirsResponse: {
+            /** Workspace Dir */
+            workspace_dir: string;
+            /**
+             * Suggested Dirs
+             * @default []
+             */
+            suggested_dirs: components["schemas"]["ExportDirOption"][];
+        };
+        /**
          * GpuDevice
          * @description 单张 NVIDIA GPU 显存状态（MiB）。
          */
@@ -507,6 +654,8 @@ export interface components {
             bgm_wav?: string | null;
             /** @description 影视四轨分离结果 */
             cinematic_stems?: components["schemas"]["CinematicStems"] | null;
+            /** @description 四轨分离背景子轨独立音量系数 */
+            stem_volumes?: components["schemas"]["StemVolumes"] | null;
             /**
              * Output Video
              * @description 最终混音成片 URL
@@ -523,6 +672,12 @@ export interface components {
              * @default 0.75
              */
             bgm_volume: number;
+            /**
+             * Auto Ducking
+             * @description 人声出现时是否自动闪避背景音乐
+             * @default true
+             */
+            auto_ducking: boolean;
         };
         /**
          * ParseRequest
@@ -682,6 +837,33 @@ export interface components {
              * @default false
              */
             burn_watermark: boolean;
+            /**
+             * Burn Subtitles
+             * @description 是否将 ASS 字幕烧录进成片画面：none / target / bilingual
+             * @default none
+             * @enum {string}
+             */
+            burn_subtitles: "none" | "target" | "bilingual";
+            /**
+             * Export Ass Sidecar
+             * @description 可选：同步导出同名外挂 ASS 字幕（target / bilingual）
+             */
+            export_ass_sidecar?: ("target" | "bilingual") | null;
+            /**
+             * Auto Ducking
+             * @description 是否启用 BGM 自动闪避；为空时沿用 script.media.auto_ducking
+             */
+            auto_ducking?: boolean | null;
+            /**
+             * Output Filename
+             * @description 可选自定义输出文件名（如 my_dub.mp4）
+             */
+            output_filename?: string | null;
+            /**
+             * Output Dir
+             * @description 可选本机额外保存目录绝对路径（支持 ~ 展开）
+             */
+            output_dir?: string | null;
         };
         /**
          * RenderResponse
@@ -696,6 +878,56 @@ export interface components {
             duration: number;
             /** Burn Watermark */
             burn_watermark: boolean;
+            /**
+             * Burn Subtitles
+             * @default none
+             * @enum {string}
+             */
+            burn_subtitles: "none" | "target" | "bilingual";
+            /**
+             * Auto Ducking
+             * @default true
+             */
+            auto_ducking: boolean;
+            /**
+             * Saved Path
+             * @default
+             */
+            saved_path: string;
+            /** Subtitle Url */
+            subtitle_url?: string | null;
+            /** Subtitle Saved Path */
+            subtitle_saved_path?: string | null;
+        };
+        /**
+         * ScriptSnapshotListResponse
+         * @description 项目历史快照列表响应。
+         */
+        ScriptSnapshotListResponse: {
+            /** Project Id */
+            project_id: string;
+            /**
+             * Snapshots
+             * @default []
+             */
+            snapshots: components["schemas"]["ScriptSnapshotMeta"][];
+        };
+        /**
+         * ScriptSnapshotMeta
+         * @description 剧本历史快照元数据。
+         */
+        ScriptSnapshotMeta: {
+            /** Snapshot Id */
+            snapshot_id: string;
+            /** Created At */
+            created_at: string;
+            /**
+             * Label
+             * @default 手动保存
+             */
+            label: string;
+            /** Segment Count */
+            segment_count: number;
         };
         /**
          * Segment
@@ -828,6 +1060,30 @@ export interface components {
             needs_reflection: boolean;
         };
         /**
+         * StemVolumes
+         * @description Banquet 四轨分离后各背景子轨独立音量系数（0.0 ~ 2.0）。
+         */
+        StemVolumes: {
+            /**
+             * Singing
+             * @description 歌声轨音量系数
+             * @default 1
+             */
+            singing: number;
+            /**
+             * Music
+             * @description 伴奏音乐轨音量系数
+             * @default 1
+             */
+            music: number;
+            /**
+             * Effects
+             * @description 环境与音效轨音量系数
+             * @default 1
+             */
+            effects: number;
+        };
+        /**
          * SynthesizeRequest
          * @description 批量或单句语音合成请求。
          */
@@ -919,6 +1175,77 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * VoicePreset
+         * @description 跨项目全局音色预设契约。
+         */
+        VoicePreset: {
+            /** Preset Id */
+            preset_id: string;
+            /** Name */
+            name: string;
+            /**
+             * Speaking Style
+             * @default
+             */
+            speaking_style: string;
+            /** Gpt Weights */
+            gpt_weights?: string | null;
+            /** Sovits Weights */
+            sovits_weights?: string | null;
+            /**
+             * Emotion Refs
+             * @default {}
+             */
+            emotion_refs: {
+                [key: string]: components["schemas"]["EmotionRef"];
+            };
+            /** Created At */
+            created_at: string;
+        };
+        /**
+         * VoicePresetCreateRequest
+         * @description 创建跨项目音色预设请求。
+         */
+        VoicePresetCreateRequest: {
+            /** Name */
+            name: string;
+            /**
+             * Speaking Style
+             * @default
+             */
+            speaking_style: string;
+            /** Gpt Weights */
+            gpt_weights?: string | null;
+            /** Sovits Weights */
+            sovits_weights?: string | null;
+            /**
+             * Emotion Refs
+             * @default {}
+             */
+            emotion_refs: {
+                [key: string]: components["schemas"]["EmotionRef"];
+            };
+        };
+        /**
+         * VoicePresetDeleteResponse
+         * @description 删除音色预设响应。
+         */
+        VoicePresetDeleteResponse: {
+            /** Deleted Id */
+            deleted_id: string;
+        };
+        /**
+         * VoicePresetListResponse
+         * @description 全局音色预设列表响应。
+         */
+        VoicePresetListResponse: {
+            /**
+             * Presets
+             * @default []
+             */
+            presets: components["schemas"]["VoicePreset"][];
         };
     };
     responses: never;
@@ -1034,6 +1361,69 @@ export interface operations {
                 "application/json": components["schemas"]["ProjectScript"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectScript"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_project_history_api_projects__project_id__history_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScriptSnapshotListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_restore_project_history_api_projects__project_id__history__snapshot_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                snapshot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -1353,6 +1743,59 @@ export interface operations {
             };
         };
     };
+    download_project_subtitles_api_projects__project_id__subtitles_get: {
+        parameters: {
+            query?: {
+                layout?: "target" | "bilingual";
+            };
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_export_dirs_api_export_dirs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportDirsResponse"];
+                };
+            };
+        };
+    };
     render_project_video_api_projects__project_id__render_post: {
         parameters: {
             query?: never;
@@ -1375,6 +1818,90 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RenderResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_voice_presets_api_voice_presets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoicePresetListResponse"];
+                };
+            };
+        };
+    };
+    post_voice_preset_api_voice_presets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VoicePresetCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoicePreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_voice_preset_api_voice_presets__preset_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoicePresetDeleteResponse"];
                 };
             };
             /** @description Validation Error */

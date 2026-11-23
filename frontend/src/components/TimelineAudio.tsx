@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
-import type { Segment } from "../types/script";
+import type { CinematicStems, Segment, StemVolumes } from "../types/script";
 
 const EMPTY_SEGMENTS: Segment[] = [];
 
@@ -97,7 +97,7 @@ function PreviewAudio({
     }
     if (audioGraph) {
       el.volume = 1;
-      audioGraph.gain.gain.value = clamped;
+      audioGraph.gain.gain.setTargetAtTime(clamped, audioGraph.ctx.currentTime, 0.03);
       if (playing && audioGraph.ctx.state === "suspended") {
         void audioGraph.ctx.resume().catch(() => {});
       }
@@ -119,17 +119,16 @@ export function useDubClips(time: number) {
         const src = getCacheBustedUrl(segment.tts_wav, versions[segment.id]) ?? segment.tts_wav;
         const slot = segment.end - segment.start;
         const rate = segment.applied_speed_factor == null ? segment.speed_factor : 1;
-        const audibleEnd = Math.min(segment.end, segment.start + (segment.actual_duration ?? slot) / rate);
-        return [
-          { segment, src, rate, end: audibleEnd },
-        ];
+        const audibleEnd = Math.min(
+          segment.end,
+          segment.start + (segment.actual_duration ?? slot) / rate,
+        );
+        return [{ segment, src, rate, end: audibleEnd }];
       }),
     [segments, versions],
   );
   return {
-    replacesSource: clips.some(
-      ({ segment, end }) => time >= segment.start && time < end,
-    ),
+    replacesSource: clips.some(({ segment, end }) => time >= segment.start && time < end),
     upcomingClips: clips.filter(({ segment, end }) => time >= segment.start - 0.5 && time < end),
   };
 }
@@ -141,6 +140,10 @@ export function TimelineAudio({
   dubMuted,
   vocals,
   bgm,
+  stems,
+  stemVolumes,
+  autoDucking = true,
+  replacesSource = false,
   muteVocals,
   muteBgm,
   bgmVolume,
@@ -151,23 +154,58 @@ export function TimelineAudio({
   dubMuted: boolean;
   vocals?: string | null;
   bgm?: string | null;
+  stems?: CinematicStems | null;
+  stemVolumes?: StemVolumes | null;
+  autoDucking?: boolean;
+  replacesSource?: boolean;
   muteVocals?: boolean;
   muteBgm?: boolean;
   bgmVolume?: number;
 }) {
+  const masterBgm = bgmVolume ?? 0.75;
+  const duckFactor = autoDucking && replacesSource && !dubMuted ? 0.45 : 1;
+  const sv = stemVolumes ?? { singing: 1, music: 1, effects: 1 };
+  const useStems = Boolean(stems?.singing && stems?.music && stems?.effects);
+
   return (
     <>
       {vocals && (
         <PreviewAudio src={vocals} time={time} playing={playing} muted={Boolean(muteVocals)} />
       )}
-      {bgm && (
-        <PreviewAudio
-          src={bgm}
-          time={time}
-          playing={playing}
-          muted={Boolean(muteBgm)}
-          volume={bgmVolume}
-        />
+      {useStems && stems ? (
+        <>
+          <PreviewAudio
+            src={stems.singing}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, sv.singing * masterBgm * duckFactor)}
+          />
+          <PreviewAudio
+            src={stems.music}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, sv.music * masterBgm * duckFactor)}
+          />
+          <PreviewAudio
+            src={stems.effects}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, sv.effects * masterBgm)}
+          />
+        </>
+      ) : (
+        bgm && (
+          <PreviewAudio
+            src={bgm}
+            time={time}
+            playing={playing}
+            muted={Boolean(muteBgm)}
+            volume={Math.min(2, masterBgm * duckFactor)}
+          />
+        )
       )}
       {clips.map(({ segment, src, rate }) => (
         <PreviewAudio

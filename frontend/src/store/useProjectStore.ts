@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { createDemoScriptCopy } from "../data/demoScript";
 import {
   ApiError,
+  restoreProjectSnapshot as apiRestoreProjectSnapshot,
   saveProjectScript as apiSaveProjectScript,
   synthesizeSegments as apiSynthesizeSegments,
   checkHealth,
@@ -16,6 +17,8 @@ import type {
   ProjectScript,
   Segment,
   SegmentPatch,
+  StemVolumes,
+  VoicePreset,
 } from "../types/script";
 import { synthesisIssues } from "../utils/synthesisIssues";
 
@@ -65,6 +68,9 @@ interface ProjectState {
   timelineZoom: number;
   /** 记录每个片段最后一次重合成的时间戳，用于音频防缓存 */
   audioVersionMap: Record<number, number>;
+  pastScripts: ProjectScript[];
+  futureScripts: ProjectScript[];
+  lastUndoMergeKey: { key: string; ts: number } | null;
 
   initWorkspace: () => Promise<void>;
   loadDemoProject: () => Promise<void>;
@@ -79,9 +85,21 @@ interface ProjectState {
   setTimelineZoom: (zoom: number) => void;
   toggleTrackState: (key: keyof TrackStates) => void;
   bumpAudioVersion: (segmentIds: number[]) => void;
-  updateSegmentLocal: (patch: SegmentPatch) => void;
+  commitHistoryCheckpoint: () => void;
+  undo: () => boolean;
+  redo: () => boolean;
+  updateSegmentLocal: (patch: SegmentPatch, options?: { skipHistory?: boolean }) => void;
   batchUpdateSegmentsLocal: (patches: SegmentPatch[]) => number[];
+  splitSegment: (segmentId: number, splitTime?: number) => number | null;
+  mergeSegmentWithNext: (segmentId: number) => boolean;
+  addSegment: (options?: { start?: number; end?: number; speaker?: string }) => number | null;
+  deleteSegment: (segmentId: number) => boolean;
+  confirmAllPendingReviews: () => number;
+  applyVoicePresetToCharacter: (speakerKey: string, preset: VoicePreset) => void;
+  restoreSnapshot: (snapshotId: string) => Promise<boolean>;
   updateBgmVolume: (volume: number) => void;
+  updateStemVolume: (stem: keyof StemVolumes, volume: number) => void;
+  updateAutoDucking: (enabled: boolean) => void;
   updateCharacter: (speakerKey: string, patch: Partial<CharacterConfig>) => void;
   addCharacter: (name: string) => string | null;
   mergeCharacters: (source: string, destination: string) => void;
@@ -114,11 +132,86 @@ function invalidateAudio(seg: Segment): Segment {
   };
 }
 
+const MAX_HISTORY_STEPS = 50;
+const UNDO_MERGE_WINDOW_MS = 800;
+
+function pushPastScript(past: ProjectScript[], snapshot: ProjectScript): ProjectScript[] {
+  const next = [...past, snapshot];
+  return next.length > MAX_HISTORY_STEPS ? next.slice(next.length - MAX_HISTORY_STEPS) : next;
+}
+
+const CJK_BOUNDARY_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/;
+
+function joinSegmentText(left: string, right: string): string {
+  const a = left.trim();
+  const b = right.trim();
+  if (!a) return b;
+  if (!b) return a;
+  if (CJK_BOUNDARY_RE.test(a[a.length - 1]) || CJK_BOUNDARY_RE.test(b[0])) {
+    return `${a}${b}`;
+  }
+  return `${a} ${b}`;
+}
+
+function splitOrigTextByWords(
+  origText: string,
+  words: Segment["words"],
+  splitWordIdx: number,
+  ratio: number,
+): [string, string] {
+  if (words.length > 0 && splitWordIdx > 0 && splitWordIdx < words.length && origText) {
+    const letters: Array<[number, string]> = [];
+    for (let i = 0; i < origText.length; i += 1) {
+      if (!/\s/.test(origText[i])) {
+        letters.push([i, origText[i]]);
+      }
+    }
+    const compact = letters.map(([, ch]) => ch).join("");
+    let cursor = 0;
+    const spans: Array<[number, number]> = [];
+    let aligned = true;
+    for (const w of words) {
+      const token = w.word.replace(/\s+/g, "");
+      if (!token || !compact.startsWith(token, cursor)) {
+        aligned = false;
+        break;
+      }
+      const startChar = letters[cursor][0];
+      cursor += token.length;
+      const endChar = letters[cursor - 1][0] + 1;
+      spans.push([startChar, endChar]);
+    }
+    if (aligned && cursor === compact.length) {
+      const leftEnd = spans[splitWordIdx - 1][1];
+      const rightStart = spans[splitWordIdx][0];
+      return [origText.slice(0, leftEnd).trim(), origText.slice(rightStart).trim()];
+    }
+  }
+  return splitTextNearRatio(origText, ratio);
+}
+
+function splitTextNearRatio(text: string, ratio: number): [string, string] {
+  const trimmed = text.trim();
+  if (trimmed.length < 2) {
+    return [trimmed, ""];
+  }
+  const clampedRatio = Math.max(0.15, Math.min(0.85, ratio));
+  const rawIdx = Math.round(trimmed.length * clampedRatio);
+  const spaceIdx = trimmed.indexOf(" ", Math.max(1, rawIdx - 4));
+  const splitIdx =
+    spaceIdx !== -1 && spaceIdx <= rawIdx + 6
+      ? spaceIdx
+      : Math.max(1, Math.min(trimmed.length - 1, rawIdx));
+  return [trimmed.slice(0, splitIdx).trim(), trimmed.slice(splitIdx).trim()];
+}
+
 function applyPatchToSegments(
   script: ProjectScript,
   patches: SegmentPatch[],
 ): { nextScript: ProjectScript; markedPendingIds: number[] } {
   const resynthFields: Array<keyof SegmentPatch & keyof Segment> = [
+    "start",
+    "end",
     "speaker",
     "target_text",
     "target_lang",
@@ -131,8 +224,9 @@ function applyPatchToSegments(
     patchMap.set(p.id, p);
   }
   const markedPendingIds: number[] = [];
+  let timingChanged = false;
 
-  const segments = script.segments.map((seg) => {
+  const nextSegments = script.segments.map((seg) => {
     const patch = patchMap.get(seg.id);
     if (!patch) {
       return seg;
@@ -141,6 +235,26 @@ function applyPatchToSegments(
     const cleanFields = Object.fromEntries(
       Object.entries(fields).filter(([, value]) => value !== undefined),
     ) as Partial<Segment>;
+    if (cleanFields.start !== undefined || cleanFields.end !== undefined) {
+      const nextStart = Math.max(0, Number((cleanFields.start ?? seg.start).toFixed(2)));
+      const nextEnd = Number((cleanFields.end ?? seg.end).toFixed(2));
+      if (nextEnd <= nextStart + 0.05) {
+        if (cleanFields.start !== undefined && cleanFields.end === undefined) {
+          cleanFields.start = Math.max(0, Number((nextEnd - 0.2).toFixed(2)));
+        } else if (cleanFields.end !== undefined && cleanFields.start === undefined) {
+          cleanFields.end = Number((nextStart + 0.2).toFixed(2));
+        } else {
+          cleanFields.start = seg.start;
+          cleanFields.end = seg.end;
+        }
+      } else {
+        cleanFields.start = nextStart;
+        cleanFields.end = nextEnd;
+      }
+      if (cleanFields.start !== seg.start || cleanFields.end !== seg.end) {
+        timingChanged = true;
+      }
+    }
     if (cleanFields.speaker !== undefined) {
       if (!Object.prototype.hasOwnProperty.call(script.characters, cleanFields.speaker)) return seg;
       cleanFields.speaker_needs_review ??= false;
@@ -155,6 +269,10 @@ function applyPatchToSegments(
     }
     return affectsAudio ? invalidateAudio(updated) : updated;
   });
+
+  const segments = timingChanged
+    ? [...nextSegments].sort((a, b) => a.start - b.start || a.id - b.id)
+    : nextSegments;
 
   return {
     nextScript: {
@@ -195,6 +313,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   trackStates: { ...DEFAULT_TRACK_STATES },
   timelineZoom: 72,
   audioVersionMap: {},
+  pastScripts: [],
+  futureScripts: [],
+  lastUndoMergeKey: null,
 
   initWorkspace: async () => {
     set({ backendStatus: "connecting", error: null });
@@ -232,6 +353,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           isPlaying: false,
           isLoading: false,
           isDirty: false,
+          pastScripts: [],
+          futureScripts: [],
+          lastUndoMergeKey: null,
           lastSyncMessage: "已载入项目 proj_demo_01",
         });
         return;
@@ -249,6 +373,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       isLoading: false,
       isDirty: false,
       audioVersionMap: {},
+      pastScripts: [],
+      futureScripts: [],
+      lastUndoMergeKey: null,
       lastSyncMessage: "已载入内置演示样例",
     });
   },
@@ -260,6 +387,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       currentTime: 0,
       isPlaying: false,
       isDirty: false,
+      pastScripts: [],
+      futureScripts: [],
+      lastUndoMergeKey: null,
       error: null,
       lastSyncMessage: null,
     }),
@@ -281,6 +411,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         isPlaying: false,
         isLoading: false,
         isDirty: false,
+        pastScripts: [],
+        futureScripts: [],
+        lastUndoMergeKey: null,
         backendStatus: "online",
         projectList: projects,
         lastSyncMessage: `已上传并初始化项目 ${uploaded.project_id}`,
@@ -302,6 +435,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           output_video: null,
           duration,
           bgm_volume: 0.75,
+          auto_ducking: true,
         },
         glossary: {},
         characters: {
@@ -346,6 +480,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         isPlaying: false,
         isLoading: false,
         isDirty: false,
+        pastScripts: [],
+        futureScripts: [],
+        lastUndoMergeKey: null,
         lastSyncMessage: `已导入本地媒体 ${file.name}（离线预览）`,
       });
     }
@@ -357,6 +494,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         state.script?.project_id === script.project_id &&
         state.selectedSegmentId != null &&
         script.segments.some((seg) => seg.id === state.selectedSegmentId);
+      const isDifferentProject = state.script?.project_id !== script.project_id;
       return {
         script,
         mode: script.mode,
@@ -365,6 +503,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           : (script.segments[0]?.id ?? null),
         error: null,
         isDirty: false,
+        ...(isDifferentProject
+          ? { pastScripts: [], futureScripts: [], lastUndoMergeKey: null }
+          : { futureScripts: [], lastUndoMergeKey: null }),
       };
     }),
 
@@ -373,6 +514,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       mode,
       isDirty: Boolean(state.script),
       script: state.script ? { ...state.script, mode } : null,
+      ...(state.script
+        ? {
+            pastScripts: pushPastScript(state.pastScripts, state.script),
+            futureScripts: [],
+            lastUndoMergeKey: null,
+          }
+        : {}),
     })),
 
   selectSegment: (segmentId) => set({ selectedSegmentId: segmentId }),
@@ -422,15 +570,94 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return { audioVersionMap: next };
     }),
 
-  updateSegmentLocal: (patch) =>
+  commitHistoryCheckpoint: () =>
+    set((state) => {
+      if (!state.script) {
+        return state;
+      }
+      return {
+        pastScripts: pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: null,
+      };
+    }),
+
+  undo: () => {
+    const state = get();
+    if (!state.script || state.pastScripts.length === 0) {
+      return false;
+    }
+    const prev = state.pastScripts[state.pastScripts.length - 1];
+    const nextPast = state.pastScripts.slice(0, -1);
+    const keepSelection =
+      state.selectedSegmentId != null &&
+      prev.segments.some((seg) => seg.id === state.selectedSegmentId);
+    set({
+      script: prev,
+      mode: prev.mode,
+      selectedSegmentId: keepSelection ? state.selectedSegmentId : (prev.segments[0]?.id ?? null),
+      pastScripts: nextPast,
+      futureScripts: [state.script, ...state.futureScripts].slice(0, MAX_HISTORY_STEPS),
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: "已撤销上一步修改",
+    });
+    return true;
+  },
+
+  redo: () => {
+    const state = get();
+    if (!state.script || state.futureScripts.length === 0) {
+      return false;
+    }
+    const next = state.futureScripts[0];
+    const remainingFuture = state.futureScripts.slice(1);
+    const keepSelection =
+      state.selectedSegmentId != null &&
+      next.segments.some((seg) => seg.id === state.selectedSegmentId);
+    set({
+      script: next,
+      mode: next.mode,
+      selectedSegmentId: keepSelection ? state.selectedSegmentId : (next.segments[0]?.id ?? null),
+      pastScripts: pushPastScript(state.pastScripts, state.script),
+      futureScripts: remainingFuture,
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: "已重做修改",
+    });
+    return true;
+  },
+
+  updateSegmentLocal: (patch, options) =>
     set((state) => {
       if (!state.script) {
         return state;
       }
       const { nextScript } = applyPatchToSegments(state.script, [patch]);
+      if (options?.skipHistory) {
+        return {
+          script: nextScript,
+          isDirty: true,
+        };
+      }
+      const fieldKeys = Object.keys(patch)
+        .filter((k) => k !== "id")
+        .sort()
+        .join(",");
+      const mergeKey = `seg:${patch.id}:${fieldKeys}`;
+      const now = Date.now();
+      const canCoalesce =
+        state.lastUndoMergeKey !== null &&
+        state.lastUndoMergeKey.key === mergeKey &&
+        now - state.lastUndoMergeKey.ts < UNDO_MERGE_WINDOW_MS;
       return {
         script: nextScript,
         isDirty: true,
+        pastScripts: canCoalesce
+          ? state.pastScripts
+          : pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: { key: mergeKey, ts: now },
       };
     }),
 
@@ -443,8 +670,344 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({
       script: nextScript,
       isDirty: true,
+      pastScripts: pushPastScript(state.pastScripts, state.script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
     });
     return markedPendingIds;
+  },
+
+  splitSegment: (segmentId, splitTime) => {
+    const state = get();
+    const script = state.script;
+    if (!script) {
+      return null;
+    }
+    const seg = script.segments.find((item) => item.id === segmentId);
+    if (!seg || seg.end - seg.start < 0.4) {
+      set({ lastSyncMessage: "片段时长不足 0.4s，无法分割" });
+      return null;
+    }
+    const candidate =
+      splitTime !== undefined && splitTime > seg.start + 0.15 && splitTime < seg.end - 0.15
+        ? Number(splitTime.toFixed(2))
+        : Number(((seg.start + seg.end) / 2).toFixed(2));
+    if (candidate <= seg.start + 0.1 || candidate >= seg.end - 0.1) {
+      set({ lastSyncMessage: "请将播放头置于片段内部后再分割" });
+      return null;
+    }
+
+    const ratio = (candidate - seg.start) / Math.max(0.1, seg.end - seg.start);
+    const [leftTarget, rightTarget] = splitTextNearRatio(seg.target_text, ratio);
+    const getWordMid = (w: (typeof seg.words)[number]): number | null => {
+      if (w.start != null && w.end != null) return (w.start + w.end) / 2;
+      if (w.start != null) return w.start;
+      if (w.end != null) return w.end;
+      return null;
+    };
+    const rawSplitIdx = seg.words.findIndex((w) => {
+      const mid = getWordMid(w);
+      return mid !== null && mid >= candidate;
+    });
+    const splitIdx =
+      rawSplitIdx !== -1
+        ? rawSplitIdx
+        : Math.max(1, Math.min(seg.words.length - 1, Math.round(seg.words.length * ratio)));
+    const leftWords = seg.words.slice(0, splitIdx);
+    const rightWords = seg.words.slice(splitIdx);
+    const [leftOrig, rightOrig] = splitOrigTextByWords(seg.orig_text, seg.words, splitIdx, ratio);
+
+    const newId = Math.max(-1, ...script.segments.map((item) => item.id)) + 1;
+    const leftSeg = invalidateAudio({
+      ...seg,
+      end: candidate,
+      orig_text: leftOrig,
+      target_text: leftTarget || seg.target_text,
+      words: leftWords,
+      alignment_needs_review: true,
+    });
+    const rightSeg = invalidateAudio({
+      ...seg,
+      id: newId,
+      start: candidate,
+      orig_text: rightOrig,
+      target_text: rightTarget || "（续）",
+      words: rightWords,
+      alignment_needs_review: true,
+    });
+    const segments = script.segments
+      .map((item) => (item.id === segmentId ? leftSeg : item))
+      .concat(rightSeg)
+      .sort((a, b) => a.start - b.start || a.id - b.id);
+
+    set({
+      script: { ...script, segments },
+      selectedSegmentId: newId,
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: `已在 ${candidate.toFixed(2)}s 分割片段 #${segmentId}`,
+    });
+    return newId;
+  },
+
+  mergeSegmentWithNext: (segmentId) => {
+    const state = get();
+    const script = state.script;
+    if (!script) {
+      return false;
+    }
+    const sorted = [...script.segments].sort((a, b) => a.start - b.start || a.id - b.id);
+    const idx = sorted.findIndex((item) => item.id === segmentId);
+    if (idx === -1 || idx >= sorted.length - 1) {
+      set({ lastSyncMessage: "当前片段后方没有可合并的片段" });
+      return false;
+    }
+    const curr = sorted[idx];
+    const next = sorted[idx + 1];
+    const merged = invalidateAudio({
+      ...curr,
+      start: Number(Math.min(curr.start, next.start).toFixed(2)),
+      end: Number(Math.max(curr.end, next.end).toFixed(2)),
+      orig_text: joinSegmentText(curr.orig_text, next.orig_text),
+      target_text: joinSegmentText(curr.target_text, next.target_text),
+      words: [...curr.words, ...next.words],
+      alignment_needs_review: Boolean(curr.alignment_needs_review || next.alignment_needs_review),
+      speaker_needs_review: Boolean(
+        curr.speaker_needs_review || next.speaker_needs_review || curr.speaker !== next.speaker,
+      ),
+    });
+    const segments = sorted
+      .filter((item) => item.id !== next.id)
+      .map((item) => (item.id === curr.id ? merged : item));
+
+    set({
+      script: { ...script, segments },
+      selectedSegmentId: curr.id,
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: `已合并片段 #${curr.id} 与 #${next.id}`,
+    });
+    return true;
+  },
+
+  addSegment: (options) => {
+    const state = get();
+    const script = state.script;
+    if (!script) {
+      return null;
+    }
+    const sorted = [...script.segments].sort((a, b) => a.start - b.start || a.id - b.id);
+    const selectedSeg = sorted.find((s) => s.id === state.selectedSegmentId);
+    let characters = script.characters;
+    const speaker =
+      options?.speaker ?? selectedSeg?.speaker ?? Object.keys(script.characters)[0] ?? "SPEAKER_00";
+    if (!characters[speaker]) {
+      characters = {
+        ...characters,
+        [speaker]: {
+          display_name: speaker,
+          speaking_style: "",
+          color: "#5B8DEF",
+          gpt_weights: null,
+          sovits_weights: null,
+          emotion_refs: {},
+          avatar: null,
+        },
+      };
+    }
+
+    let start = Math.max(0, Number((options?.start ?? state.currentTime).toFixed(2)));
+    for (const seg of sorted) {
+      if (seg.start < start + 0.27 && seg.end > start - 0.05) {
+        start = Number((seg.end + 0.05).toFixed(2));
+      }
+    }
+    const following = sorted.find((seg) => seg.start > start);
+    const defaultEnd =
+      options?.end !== undefined
+        ? Math.max(start + 0.2, Number(options.end.toFixed(2)))
+        : Number(
+            (following ? Math.min(start + 2.0, following.start - 0.02) : start + 2.0).toFixed(2),
+          );
+    const end = Math.max(start + 0.25, defaultEnd);
+    const newId = Math.max(-1, ...script.segments.map((item) => item.id)) + 1;
+    const newSeg: Segment = {
+      id: newId,
+      start,
+      end,
+      speaker,
+      orig_text: "",
+      words: [],
+      alignment_needs_review: true,
+      speaker_needs_review: false,
+      target_text: "新台词片段",
+      target_lang: selectedSeg?.target_lang ?? "zh",
+      emotion: "neutral",
+      action: null,
+      keep_original: false,
+      speed_factor: 1.0,
+      tts_wav: null,
+      applied_speed_factor: null,
+      actual_duration: null,
+      status: "pending",
+    };
+
+    const segments = [...script.segments, newSeg].sort((a, b) => a.start - b.start || a.id - b.id);
+    set({
+      script: {
+        ...script,
+        characters,
+        media: {
+          ...script.media,
+          duration: Math.max(script.media.duration, end),
+        },
+        segments,
+      },
+      selectedSegmentId: newId,
+      currentTime: start,
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: `已在 ${start.toFixed(2)}s 新增片段 #${newId}`,
+    });
+    return newId;
+  },
+
+  deleteSegment: (segmentId) => {
+    const state = get();
+    const script = state.script;
+    if (!script) {
+      return false;
+    }
+    const idx = script.segments.findIndex((item) => item.id === segmentId);
+    if (idx === -1) {
+      return false;
+    }
+    const segments = script.segments.filter((item) => item.id !== segmentId);
+    const nextSelected = segments[idx]?.id ?? segments[idx - 1]?.id ?? null;
+    set({
+      script: { ...script, segments },
+      selectedSegmentId: nextSelected,
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: `已删除片段 #${segmentId}`,
+    });
+    return true;
+  },
+
+  confirmAllPendingReviews: () => {
+    const state = get();
+    const script = state.script;
+    if (!script) {
+      return 0;
+    }
+    let confirmed = 0;
+    const segments = script.segments.map((seg) => {
+      if (seg.alignment_needs_review || seg.speaker_needs_review) {
+        confirmed += 1;
+        return {
+          ...seg,
+          alignment_needs_review: false,
+          speaker_needs_review: false,
+        };
+      }
+      return seg;
+    });
+    if (confirmed === 0) {
+      return 0;
+    }
+    set({
+      script: { ...script, segments },
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: `已批量确认 ${confirmed} 条待校对片段`,
+    });
+    return confirmed;
+  },
+
+  applyVoicePresetToCharacter: (speakerKey, preset) => {
+    const state = get();
+    const script = state.script;
+    const previous = script?.characters[speakerKey];
+    if (!script || !previous) {
+      return;
+    }
+    const clonedRefs = Object.fromEntries(
+      Object.entries(preset.emotion_refs).map(([emo, ref]) => [emo, { ...ref }]),
+    ) as CharacterConfig["emotion_refs"];
+    const character: CharacterConfig = {
+      ...previous,
+      speaking_style: preset.speaking_style,
+      gpt_weights: preset.gpt_weights ?? null,
+      sovits_weights: preset.sovits_weights ?? null,
+      emotion_refs: clonedRefs,
+    };
+    const segments = script.segments.map((seg) =>
+      seg.speaker === speakerKey && !seg.keep_original ? invalidateAudio(seg) : seg,
+    );
+    set({
+      script: {
+        ...script,
+        characters: {
+          ...script.characters,
+          [speakerKey]: character,
+        },
+        segments,
+      },
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
+      isDirty: true,
+      lastSyncMessage: `已将预设“${preset.name}”应用到 ${previous.display_name || speakerKey}`,
+    });
+  },
+
+  restoreSnapshot: async (snapshotId) => {
+    const state = get();
+    const script = state.script;
+    if (!script) {
+      return false;
+    }
+    set({ isLoading: true, error: null });
+    try {
+      const restored = await apiRestoreProjectSnapshot(script.project_id, snapshotId);
+      const current = get();
+      if (current.script?.project_id !== script.project_id) {
+        set({ isLoading: false });
+        return false;
+      }
+      const prevScript = current.script;
+      current.bumpAudioVersion(restored.segments.map((seg) => seg.id));
+      set({
+        script: restored,
+        mode: restored.mode,
+        selectedSegmentId: restored.segments[0]?.id ?? null,
+        pastScripts: prevScript
+          ? pushPastScript(current.pastScripts, prevScript)
+          : current.pastScripts,
+        futureScripts: [],
+        lastUndoMergeKey: null,
+        isLoading: false,
+        isDirty: false,
+        lastSyncMessage: `已回滚恢复快照 ${snapshotId}`,
+      });
+      return true;
+    } catch (err) {
+      set({
+        isLoading: false,
+        error: err instanceof Error ? err.message : "恢复历史快照失败",
+      });
+      return false;
+    }
   },
 
   updateBgmVolume: (volume) =>
@@ -453,6 +1016,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         return state;
       }
       const clamped = Math.max(0, Math.min(2, Number(volume.toFixed(2))));
+      const now = Date.now();
+      const mergeKey = "media:bgm_volume";
+      const canCoalesce =
+        state.lastUndoMergeKey !== null &&
+        state.lastUndoMergeKey.key === mergeKey &&
+        now - state.lastUndoMergeKey.ts < UNDO_MERGE_WINDOW_MS;
       return {
         isDirty: true,
         script: {
@@ -462,6 +1031,68 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             bgm_volume: clamped,
           },
         },
+        pastScripts: canCoalesce
+          ? state.pastScripts
+          : pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: { key: mergeKey, ts: now },
+      };
+    }),
+
+  updateStemVolume: (stem, volume) =>
+    set((state) => {
+      if (!state.script) {
+        return state;
+      }
+      const clamped = Math.max(0, Math.min(2, Number(volume.toFixed(2))));
+      const current = state.script.media.stem_volumes ?? {
+        singing: 1,
+        music: 1,
+        effects: 1,
+      };
+      const now = Date.now();
+      const mergeKey = `media:stem:${stem}`;
+      const canCoalesce =
+        state.lastUndoMergeKey !== null &&
+        state.lastUndoMergeKey.key === mergeKey &&
+        now - state.lastUndoMergeKey.ts < UNDO_MERGE_WINDOW_MS;
+      return {
+        isDirty: true,
+        script: {
+          ...state.script,
+          media: {
+            ...state.script.media,
+            stem_volumes: {
+              ...current,
+              [stem]: clamped,
+            },
+          },
+        },
+        pastScripts: canCoalesce
+          ? state.pastScripts
+          : pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: { key: mergeKey, ts: now },
+      };
+    }),
+
+  updateAutoDucking: (enabled) =>
+    set((state) => {
+      if (!state.script) {
+        return state;
+      }
+      return {
+        isDirty: true,
+        script: {
+          ...state.script,
+          media: {
+            ...state.script.media,
+            auto_ducking: enabled,
+          },
+        },
+        pastScripts: pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: null,
       };
     }),
 
@@ -477,6 +1108,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         character.gpt_weights !== previous.gpt_weights ||
         character.sovits_weights !== previous.sovits_weights ||
         character.emotion_refs !== previous.emotion_refs;
+      const fieldKeys = Object.keys(patch).sort().join(",");
+      const mergeKey = `char:${speakerKey}:${fieldKeys}`;
+      const now = Date.now();
+      const canCoalesce =
+        state.lastUndoMergeKey !== null &&
+        state.lastUndoMergeKey.key === mergeKey &&
+        now - state.lastUndoMergeKey.ts < UNDO_MERGE_WINDOW_MS;
       return {
         isDirty: true,
         script: {
@@ -491,11 +1129,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
               )
             : script.segments,
         },
+        pastScripts: canCoalesce ? state.pastScripts : pushPastScript(state.pastScripts, script),
+        futureScripts: [],
+        lastUndoMergeKey: { key: mergeKey, ts: now },
       };
     }),
 
   addCharacter: (name) => {
-    const script = get().script;
+    const state = get();
+    const script = state.script;
     const displayName = name.trim();
     if (!script || !displayName) return null;
     let index = Object.keys(script.characters).length + 1;
@@ -518,6 +1160,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           },
         },
       },
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
     });
     return speaker;
   },
@@ -537,7 +1182,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const { nextScript } = applyPatchToSegments(script, patches);
       const characters = { ...nextScript.characters };
       delete characters[source];
-      return { isDirty: true, script: { ...nextScript, characters } };
+      return {
+        isDirty: true,
+        script: { ...nextScript, characters },
+        pastScripts: pushPastScript(state.pastScripts, script),
+        futureScripts: [],
+        lastUndoMergeKey: null,
+      };
     }),
 
   updateTranslationSettings: (sourceLang, glossary) =>
@@ -546,6 +1197,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         ? {
             script: { ...state.script, source_lang: sourceLang, glossary },
             isDirty: true,
+            pastScripts: pushPastScript(state.pastScripts, state.script),
+            futureScripts: [],
+            lastUndoMergeKey: null,
           }
         : state,
     ),
@@ -582,6 +1236,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         isPlaying: false,
         isLoading: false,
         isDirty: false,
+        pastScripts: [],
+        futureScripts: [],
+        lastUndoMergeKey: null,
         backendStatus: "online",
         lastSyncMessage: `已加载项目 ${projectId}`,
       });

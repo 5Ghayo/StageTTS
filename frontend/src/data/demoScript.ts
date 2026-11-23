@@ -14,6 +14,7 @@ export const DEMO_PROJECT_SCRIPT: ProjectScript = {
     output_video: null,
     duration: 18.5,
     bgm_volume: 0.75,
+    auto_ducking: true,
   },
   source_lang: "en",
   glossary: {},

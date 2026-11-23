@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import AsyncIterator, Dict, List
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
@@ -21,12 +24,15 @@ from backend.agent.tools import (
     load_project_script,
     project_task_guard,
     render_final_video,
+    restore_project_snapshot,
     save_project_script,
     synthesize_project,
 )
 from backend.schemas import (
     AgentChatRequest,
     AgentChatResponse,
+    ExportDirOption,
+    ExportDirsResponse,
     GpuStatusResponse,
     HealthResponse,
     MediaInfo,
@@ -39,13 +45,21 @@ from backend.schemas import (
     ReferenceUploadResponse,
     RenderRequest,
     RenderResponse,
+    ScriptSnapshotListResponse,
+    SubtitleLayout,
     SynthesizeRequest,
     SynthesizeResponse,
     TranslationResponse,
     UploadResponse,
+    VoicePreset,
+    VoicePresetCreateRequest,
+    VoicePresetDeleteResponse,
+    VoicePresetListResponse,
 )
+from backend.services.history import create_snapshot, list_snapshots
 from backend.services.media_mixer import check_ffmpeg_available
 from backend.services.references import automatic_reference, store_reference_audio
+from backend.services.subtitles import generate_ass_subtitles
 from backend.services.task_runner import (
     GpuBusyError,
     ParseWorkerError,
@@ -64,6 +78,11 @@ from backend.services.translation import (
 from backend.services.tts_client import (
     TTSServiceUnavailableError,
     check_tts_service,
+)
+from backend.services.voice_presets import (
+    create_voice_preset,
+    delete_voice_preset,
+    list_voice_presets,
 )
 
 # 确保挂载目录存在，避免 StaticFiles 初始化报错
@@ -219,14 +238,33 @@ def get_project_script(project_id: str) -> ProjectScript:
 
 @app.put("/api/projects/{project_id}/script", response_model=ProjectScript)
 def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript:
-    """校验并保存前端修改后的完整 ProjectScript。"""
+    """校验并保存前端修改后的完整 ProjectScript，并记录去重历史快照。"""
     safe_id = _validate_project_id(project_id)
     if payload.project_id != safe_id:
         raise ValueError(
             f"路径 project_id ({safe_id}) 与请求体 project_id ({payload.project_id}) 不一致"
         )
-    save_project_script(payload)
+    with project_task_guard(safe_id):
+        save_project_script(payload)
+        create_snapshot(payload, label="手动保存")
     return payload
+
+
+@app.get("/api/projects/{project_id}/history", response_model=ScriptSnapshotListResponse)
+def get_project_history(project_id: str) -> ScriptSnapshotListResponse:
+    """列出项目的历史快照元数据列表。"""
+    safe_id = _validate_project_id(project_id)
+    return ScriptSnapshotListResponse(
+        project_id=safe_id,
+        snapshots=list_snapshots(safe_id),
+    )
+
+
+@app.post("/api/projects/{project_id}/history/{snapshot_id}/restore", response_model=ProjectScript)
+def post_restore_project_history(project_id: str, snapshot_id: str) -> ProjectScript:
+    """回滚恢复项目到指定历史快照。"""
+    safe_id = _validate_project_id(project_id)
+    return restore_project_snapshot(safe_id, snapshot_id)
 
 
 @app.post("/api/projects/{project_id}/references", response_model=ReferenceUploadResponse)
@@ -256,11 +294,13 @@ def retranslate_project(project_id: str) -> TranslationResponse:
     safe_id = _validate_project_id(project_id)
     with project_task_guard(safe_id):
         script = load_project_script(safe_id)
+        pre_translate_snapshot = script.model_copy(deep=True)
         batch_errors: list[str] = []
         translated = translate_script(script, create_openai_client(), errors=batch_errors)
         if not translated and batch_errors:
             raise LLMServiceError(f"台词重译失败：{batch_errors[0]}")
         if translated:
+            create_snapshot(pre_translate_snapshot, label="重译前备份")
             save_project_script(script)
         return TranslationResponse(
             script=script,
@@ -372,6 +412,8 @@ def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
 
         input_path = _find_input_media(safe_id, existing_script)
         mode = existing_script.mode if existing_script else "video_dubbing"
+        if existing_script and existing_script.segments:
+            create_snapshot(existing_script, label="重新解析前")
 
         run_parse_worker(
             project_id=safe_id,
@@ -380,7 +422,9 @@ def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
             compute_type=req.compute_type,
             mode=mode,
         )
-        return load_project_script(safe_id)
+        parsed = load_project_script(safe_id)
+        create_snapshot(parsed, label="解析完成")
+        return parsed
 
 
 @app.post("/api/projects/{project_id}/synthesize", response_model=SynthesizeResponse)
@@ -400,11 +444,137 @@ def agent_chat(project_id: str, req: AgentChatRequest) -> AgentChatResponse:
     )
 
 
+@app.get("/api/projects/{project_id}/subtitles")
+def download_project_subtitles(
+    project_id: str,
+    layout: SubtitleLayout = "target",
+) -> Response:
+    """导出指定项目的 ASS 字幕文件（单语译文或双语对照）。"""
+    safe_id = _validate_project_id(project_id)
+    script = load_project_script(safe_id)
+    ass_content = generate_ass_subtitles(script, layout=layout)
+    return Response(
+        content=ass_content.encode("utf-8-sig"),
+        media_type="text/x-ssa; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_id}_{layout}.ass"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _xdg_user_dir(kind: str, home: Path) -> Path | None:
+    cmd = shutil.which("xdg-user-dir")
+    if not cmd:
+        return None
+    try:
+        proc = subprocess.run(
+            [cmd, kind],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        return None
+    try:
+        resolved = candidate.resolve()
+        if resolved == home.resolve():
+            return None
+    except OSError:
+        return None
+    return resolved
+
+
+def _discover_user_export_dirs() -> List[ExportDirOption]:
+    """按操作系统与本地化习惯探测可用的常用导出目录。"""
+    home = Path.home()
+    candidates: List[tuple[str, Path]] = []
+
+    if sys.platform == "darwin":
+        candidates.extend([
+            ("影片目录", home / "Movies"),
+            ("下载目录", home / "Downloads"),
+            ("桌面", home / "Desktop"),
+        ])
+    elif os.name == "nt":
+        candidates.extend([
+            ("视频目录", home / "Videos"),
+            ("下载目录", home / "Downloads"),
+            ("桌面", home / "Desktop"),
+        ])
+    else:
+        for label, xdg_key, fallbacks in (
+            ("视频目录", "VIDEOS", ("Videos", "视频")),
+            ("下载目录", "DOWNLOAD", ("Downloads", "下载")),
+            ("桌面", "DESKTOP", ("Desktop", "桌面")),
+        ):
+            xdg_dir = _xdg_user_dir(xdg_key, home)
+            if xdg_dir is not None:
+                candidates.append((label, xdg_dir))
+            for rel in fallbacks:
+                candidates.append((label, home / rel))
+
+    suggested: List[ExportDirOption] = []
+    seen: set[Path] = set()
+    for label, path in candidates:
+        if not path.is_dir():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        suggested.append(ExportDirOption(label=label, path=str(resolved)))
+    return suggested
+
+
+@app.get("/api/export/dirs", response_model=ExportDirsResponse)
+def get_export_dirs() -> ExportDirsResponse:
+    """返回项目工作区及本机常用推荐导出目录。"""
+    return ExportDirsResponse(
+        workspace_dir=str(config.WORKSPACE_DIR.resolve()),
+        suggested_dirs=_discover_user_export_dirs(),
+    )
+
+
 @app.post("/api/projects/{project_id}/render", response_model=RenderResponse)
 def render_project_video(project_id: str, req: RenderRequest) -> RenderResponse:
     """执行 pydub 毫秒拼轨与 FFmpeg 混音封装，导出 output.mp4（或虚拟舞台音频）。"""
     safe_id = _validate_project_id(project_id)
     return RenderResponse(
         project_id=safe_id,
-        **render_final_video(safe_id, burn_watermark=req.burn_watermark),
+        **render_final_video(
+            safe_id,
+            burn_watermark=req.burn_watermark,
+            burn_subtitles=req.burn_subtitles,
+            export_ass_sidecar=req.export_ass_sidecar,
+            auto_ducking=req.auto_ducking,
+            output_filename=req.output_filename,
+            output_dir=req.output_dir,
+        ),
     )
+
+
+@app.get("/api/voice-presets", response_model=VoicePresetListResponse)
+def get_voice_presets() -> VoicePresetListResponse:
+    """列出跨项目全局音色预设库。"""
+    return VoicePresetListResponse(presets=list_voice_presets())
+
+
+@app.post("/api/voice-presets", response_model=VoicePreset)
+def post_voice_preset(req: VoicePresetCreateRequest) -> VoicePreset:
+    """将当前角色音色配置及参考音频保存为跨项目预设。"""
+    return create_voice_preset(req)
+
+
+@app.delete("/api/voice-presets/{preset_id}", response_model=VoicePresetDeleteResponse)
+def remove_voice_preset(preset_id: str) -> VoicePresetDeleteResponse:
+    """删除全局音色预设并清理其隔离参考音频文件。"""
+    return VoicePresetDeleteResponse(deleted_id=delete_voice_preset(preset_id))
