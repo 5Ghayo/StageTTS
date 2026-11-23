@@ -206,7 +206,7 @@ export const TopMenuBar: React.FC = () => {
               <div className="flex items-center gap-0.5 rounded-[4px] bg-[#181818] p-0.5">
                 <button
                   type="button"
-                  disabled={pastCount === 0 || isLoading}
+                  disabled={pastCount === 0 || isLoading || isSynthesizing || isPipelineRunning}
                   onClick={() => undo()}
                   title="撤销 (Ctrl/Cmd+Z)"
                   className="flex h-6 w-6 items-center justify-center rounded-[3px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
@@ -215,7 +215,7 @@ export const TopMenuBar: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  disabled={futureCount === 0 || isLoading}
+                  disabled={futureCount === 0 || isLoading || isSynthesizing || isPipelineRunning}
                   onClick={() => redo()}
                   title="重做 (Ctrl/Cmd+Shift+Z)"
                   className="flex h-6 w-6 items-center justify-center rounded-[3px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
@@ -270,11 +270,18 @@ export const TopMenuBar: React.FC = () => {
                               type="button"
                               disabled={isLoading || isSynthesizing || isPipelineRunning}
                               onClick={() => {
-                                void restoreSnapshot(snap.snapshot_id).then(() => {
-                                  setHistoryOpen(false);
-                                  setActionToast(`已恢复快照：${snap.label}`);
-                                  window.setTimeout(() => setActionToast(null), 3500);
-                                });
+                                void (async () => {
+                                  const ok = await restoreSnapshot(snap.snapshot_id);
+                                  if (ok) {
+                                    setHistoryOpen(false);
+                                    setActionToast(`已恢复快照：${snap.label}`);
+                                    window.setTimeout(() => setActionToast(null), 3500);
+                                  } else {
+                                    setHistoryError(
+                                      useProjectStore.getState().error ?? "恢复历史快照失败",
+                                    );
+                                  }
+                                })();
                               }}
                               className="flex shrink-0 items-center gap-1 rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-1.5 py-0.5 text-[10px] text-primary transition-colors hover:bg-[#363636] disabled:opacity-40"
                             >

@@ -492,3 +492,89 @@ class DialogueWorkflowTest(unittest.TestCase):
             assert cjk_preview is not None
             self.assertEqual(cjk_preview.text, "今天天气真的非常")
             self.assertNotIn(" ", cjk_preview.text)
+
+    def test_suspicious_check_handles_non_ascii_latin_and_cyrillic(self):
+        fr_seg = Segment(
+            id=0,
+            start=0.0,
+            end=5.0,
+            speaker="A",
+            orig_text="今天天气真好，我们一起去河边散步吧，顺便买杯咖啡。",
+            target_lang="fr",
+        )
+        self.assertFalse(
+            translation._is_suspicious(
+                fr_seg,
+                "Allons nous promener près de la rivière et prenons un café.",
+            )
+        )
+        ru_seg = Segment(
+            id=1,
+            start=0.0,
+            end=5.0,
+            speaker="A",
+            orig_text="今天天气真好，我们一起去河边散步吧，顺便买杯咖啡。",
+            target_lang="ru",
+        )
+        self.assertFalse(
+            translation._is_suspicious(
+                ru_seg,
+                "Погода сегодня отличная, пойдём гулять к реке и купим кофе.",
+            )
+        )
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
+    def test_automatic_reference_fallback_respects_overlap_and_scans_subsequent_segments(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            project_dir = Path(temp) / "overlap_ref"
+            project_dir.mkdir()
+            vocals = project_dir / "vocals.wav"
+            rate = 8000
+            with wave.open(str(vocals), "wb") as audio:
+                audio.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                audio.writeframes(bytes(20 * rate * 2))
+
+            words0 = [
+                AlignedWord(word="Hello", start=0.0, end=2.0, speaker="A"),
+                AlignedWord(word="world", start=2.0, end=4.5, speaker="A"),
+            ]
+            script = ProjectScript(
+                project_id="overlap_ref",
+                source_lang="en",
+                media=MediaInfo(duration=20.0, vocals_wav="/workspace/overlap_ref/vocals.wav"),
+                segments=[
+                    Segment(
+                        id=0,
+                        start=0.0,
+                        end=4.5,
+                        speaker="A",
+                        orig_text="Hello world",
+                        words=words0,
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    ),
+                    Segment(
+                        id=1,
+                        start=1.0,
+                        end=3.5,
+                        speaker="B",
+                        orig_text="Interrupt",
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    ),
+                    Segment(
+                        id=2,
+                        start=10.0,
+                        end=14.2,
+                        speaker="A",
+                        orig_text="This later line is completely clear for reference.",
+                        alignment_needs_review=True,
+                        speaker_needs_review=False,
+                    ),
+                ],
+            )
+            preview = references.automatic_reference(script, "A")
+            self.assertIsNotNone(preview)
+            assert preview is not None
+            self.assertEqual(preview.segment_ids, [2])
+            self.assertIn("completely clear", preview.text)

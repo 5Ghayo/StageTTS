@@ -4,7 +4,7 @@ import { useState } from "react";
 import { getSubtitlesUrl } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
-import type { StemVolumes } from "../../types/script";
+import type { StemVolumes, SubtitleLayout } from "../../types/script";
 import { isSegmentOverflow, isSegmentTooShort } from "../../utils/synthesisIssues";
 import { CharacterPanel } from "./CharacterPanel";
 import { TranslationSettings } from "./TranslationSettings";
@@ -16,19 +16,50 @@ type DrawerSegmentFilter = "all" | "review" | "pending" | "issue";
  */
 export const AssetBinPanel: React.FC = () => {
   const script = useProjectStore((s) => s.script);
+  const backendStatus = useProjectStore((s) => s.backendStatus);
+  const isDirty = useProjectStore((s) => s.isDirty);
+  const isLoading = useProjectStore((s) => s.isLoading);
+  const isSynthesizing = useProjectStore((s) => s.isSynthesizing);
   const selectSegment = useProjectStore((s) => s.selectSegment);
   const setCurrentTime = useProjectStore((s) => s.setCurrentTime);
+  const saveProjectScript = useProjectStore((s) => s.saveProjectScript);
   const updateStemVolume = useProjectStore((s) => s.updateStemVolume);
   const updateAutoDucking = useProjectStore((s) => s.updateAutoDucking);
   const confirmAllPendingReviews = useProjectStore((s) => s.confirmAllPendingReviews);
 
   const leftDrawer = useWorkflowStore((s) => s.leftDrawer);
+  const isPipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
   const toggleLeftDrawer = useWorkflowStore((s) => s.toggleLeftDrawer);
   const [segmentFilter, setSegmentFilter] = useState<DrawerSegmentFilter>("all");
+  const [subNote, setSubNote] = useState<string | null>(null);
 
   if (!script || leftDrawer === "none") {
     return null;
   }
+
+  const editsDisabled = isLoading || isSynthesizing || isPipelineRunning;
+
+  const handleDownloadSubtitles = async (layout: SubtitleLayout) => {
+    if (backendStatus !== "online") {
+      setSubNote("离线模式暂不支持导出后端 ASS 字幕");
+      return;
+    }
+    setSubNote(null);
+    if (isDirty) {
+      await saveProjectScript();
+      const afterSave = useProjectStore.getState();
+      if (afterSave.error || afterSave.isDirty) {
+        setSubNote(afterSave.error ?? "请先保存修改后再导出字幕");
+        return;
+      }
+    }
+    const link = document.createElement("a");
+    link.href = getSubtitlesUrl(script.project_id, layout);
+    link.download = `${script.project_id}_${layout}.ass`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
 
   const reviewPendingCount = script.segments.filter(
     (seg) => seg.alignment_needs_review || seg.speaker_needs_review,
@@ -169,22 +200,25 @@ export const AssetBinPanel: React.FC = () => {
               <div className="flex items-center justify-between gap-2 pt-1 text-[11px]">
                 <span className="text-secondary">ASS 字幕导出</span>
                 <div className="flex items-center gap-1.5">
-                  <a
-                    href={getSubtitlesUrl(script.project_id, "target")}
-                    download={`${script.project_id}_target.ass`}
-                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary transition-colors hover:bg-[#363636]"
+                  <button
+                    type="button"
+                    disabled={editsDisabled || backendStatus !== "online"}
+                    onClick={() => void handleDownloadSubtitles("target")}
+                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary transition-colors hover:bg-[#363636] disabled:opacity-40"
                   >
                     单语
-                  </a>
-                  <a
-                    href={getSubtitlesUrl(script.project_id, "bilingual")}
-                    download={`${script.project_id}_bilingual.ass`}
-                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary transition-colors hover:bg-[#363636]"
+                  </button>
+                  <button
+                    type="button"
+                    disabled={editsDisabled || backendStatus !== "online"}
+                    onClick={() => void handleDownloadSubtitles("bilingual")}
+                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 text-primary transition-colors hover:bg-[#363636] disabled:opacity-40"
                   >
                     双语
-                  </a>
+                  </button>
                 </div>
               </div>
+              {subNote && <div className="text-[11px] text-status-warning">{subNote}</div>}
             </div>
 
             <div className="p-3.5">
@@ -193,8 +227,9 @@ export const AssetBinPanel: React.FC = () => {
                 {reviewPendingCount > 0 && (
                   <button
                     type="button"
+                    disabled={editsDisabled}
                     onClick={() => confirmAllPendingReviews()}
-                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 font-mono tabular-nums text-[10px] text-primary transition-colors hover:bg-[#363636]"
+                    className="rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-0.5 font-mono tabular-nums text-[10px] text-primary transition-colors hover:bg-[#363636] disabled:opacity-40"
                   >
                     确认全部待校对 ({reviewPendingCount})
                   </button>

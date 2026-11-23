@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from backend import config
 from backend.agent.tools import batch_update_segments, load_project_script, save_project_script
 from backend.main import app
-from backend.schemas import CharacterConfig, MediaInfo, ProjectScript, Segment
+from backend.schemas import CharacterConfig, EmotionRef, MediaInfo, ProjectScript, Segment
 
 
 def _sample_script(project_id: str = "proj_m2_test") -> ProjectScript:
@@ -136,9 +136,38 @@ class M2EditingHistoryPresetsTests(unittest.TestCase):
                 self.assertEqual(restore_res.status_code, 200)
                 self.assertEqual(restore_res.json()["segments"][0]["target_text"], "第 19 版台词")
 
-                # 非法快照 ID 应被拦截
+                # 非法快照 ID 应被拦截，且不会触发额外备份写入
                 bad_res = client.post("/api/projects/proj_hist/history/bad.snap!id/restore")
                 self.assertEqual(bad_res.status_code, 400)
+
+    def test_restore_oldest_snapshot_when_full_does_not_self_evict(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "workspace"
+            with patch.object(config, "WORKSPACE_DIR", workspace_dir):
+                client = TestClient(app)
+                script = _sample_script("proj_full_hist")
+                payload = script.model_dump(mode="json")
+
+                for step in range(1, 21):
+                    modified = json.loads(json.dumps(payload))
+                    modified["segments"][0]["target_text"] = f"第 {step} 版"
+                    res = client.put("/api/projects/proj_full_hist/script", json=modified)
+                    self.assertEqual(res.status_code, 200)
+
+                # 先保存第 21 版在本地 script.json（未创建第 21 条快照），模拟当前有新变更后恢复最旧快照 #1
+                latest = _sample_script("proj_full_hist")
+                latest.segments[0].target_text = "未保存前最新修改"
+                save_project_script(latest)
+
+                snaps = client.get("/api/projects/proj_full_hist/history").json()["snapshots"]
+                self.assertEqual(len(snaps), 20)
+                oldest_id = snaps[-1]["snapshot_id"]
+
+                restore_res = client.post(
+                    f"/api/projects/proj_full_hist/history/{oldest_id}/restore"
+                )
+                self.assertEqual(restore_res.status_code, 200, restore_res.text)
+                self.assertEqual(restore_res.json()["segments"][0]["target_text"], "第 1 版")
 
     def test_voice_presets_crud_and_isolated_audio_copy(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -214,3 +243,67 @@ class M2EditingHistoryPresetsTests(unittest.TestCase):
                 list_after = client.get("/api/voice-presets")
                 self.assertEqual(list_after.status_code, 200)
                 self.assertEqual(list_after.json()["presets"], [])
+
+    def test_voice_presets_rejects_arbitrary_path_and_preserves_referenced_audio_on_delete(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "workspace"
+            assets_dir = Path(tmp) / "assets"
+            outside_file = Path(tmp) / "secret.env"
+            outside_file.write_text("SECRET=123\n", encoding="utf-8")
+
+            src_ref_dir = workspace_dir / "proj_src" / "refs"
+            src_ref_dir.mkdir(parents=True, exist_ok=True)
+            bad_ext_file = src_ref_dir / "not_audio.txt"
+            bad_ext_file.write_text("plain text", encoding="utf-8")
+            good_wav = src_ref_dir / "ref.wav"
+            good_wav.write_bytes(b"RIFFvalidwav")
+
+            with (
+                patch.object(config, "WORKSPACE_DIR", workspace_dir),
+                patch.object(config, "ASSETS_DIR", assets_dir),
+            ):
+                client = TestClient(app)
+
+                for bad_wav in ("backend/.env", str(outside_file), "/workspace/proj_src/refs/not_audio.txt"):
+                    resp = client.post(
+                        "/api/voice-presets",
+                        json={
+                            "name": "越界预设",
+                            "emotion_refs": {
+                                "neutral": {"wav": bad_wav, "text": "hi", "lang": "zh"},
+                            },
+                        },
+                    )
+                    self.assertEqual(resp.status_code, 400, resp.text)
+
+                created = client.post(
+                    "/api/voice-presets",
+                    json={
+                        "name": "共享音色",
+                        "emotion_refs": {
+                            "neutral": {
+                                "wav": "/workspace/proj_src/refs/ref.wav",
+                                "text": "你好",
+                                "lang": "zh",
+                            },
+                        },
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                preset = created.json()
+                preset_id = preset["preset_id"]
+                copied_file = assets_dir / "refs" / "presets" / preset_id / "neutral.wav"
+                self.assertTrue(copied_file.is_file())
+
+                # 另一个项目引用了该预设音频，删除预设时不清理音频目录
+                consumer = _sample_script("proj_consumer")
+                consumer.characters["SPEAKER_00"].emotion_refs["neutral"] = EmotionRef(
+                    wav=preset["emotion_refs"]["neutral"]["wav"],
+                    text="你好",
+                    lang="zh",
+                )
+                save_project_script(consumer)
+
+                del_res = client.delete(f"/api/voice-presets/{preset_id}")
+                self.assertEqual(del_res.status_code, 200)
+                self.assertTrue(copied_file.is_file())

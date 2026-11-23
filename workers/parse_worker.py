@@ -223,6 +223,42 @@ def _extract_wav_and_probe(input_path: Path, work_wav: Path) -> float:
     return duration
 
 
+_ACTIVE_BANQUET_PROC: Optional[subprocess.Popen[str]] = None
+
+
+def _kill_banquet_tree(proc_obj: subprocess.Popen[str]) -> None:
+    pid = getattr(proc_obj, "pid", None)
+    real_pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+    if real_pid is None:
+        proc_obj.kill()
+        proc_obj.wait()
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(real_pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if proc_obj.poll() is None:
+            proc_obj.kill()
+    else:
+        try:
+            os.killpg(real_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc_obj.kill()
+    proc_obj.wait()
+
+
+def _handle_sigterm(_signum: int, _frame: Any) -> None:
+    proc_obj = _ACTIVE_BANQUET_PROC
+    if proc_obj is not None and proc_obj.poll() is None:
+        _kill_banquet_tree(proc_obj)
+    raise SystemExit(143)
+
+
 def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
     source_root, checkpoint = config.resolve_banquet_paths()
 
@@ -275,31 +311,7 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             target_device,
             *hop_args,
         ]
-        def _kill_banquet_tree(proc_obj: subprocess.Popen[str]) -> None:
-            pid = getattr(proc_obj, "pid", None)
-            real_pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
-            if real_pid is None:
-                proc_obj.kill()
-                proc_obj.wait()
-                return
-            if os.name == "nt":
-                try:
-                    subprocess.run(
-                        ["taskkill", "/T", "/F", "/PID", str(real_pid)],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                if proc_obj.poll() is None:
-                    proc_obj.kill()
-            else:
-                try:
-                    os.killpg(real_pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    proc_obj.kill()
-            proc_obj.wait()
-
+        global _ACTIVE_BANQUET_PROC
         output_lines: deque[str] = deque(maxlen=200)
         proc = subprocess.Popen(
             cmd,
@@ -312,6 +324,7 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             bufsize=1,
             start_new_session=os.name != "nt",
         )
+        _ACTIVE_BANQUET_PROC = proc
         reader = threading.Thread(target=_drain_banquet, args=(proc.stdout, output_lines), daemon=True)
         reader.start()
         try:
@@ -330,6 +343,7 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
         finally:
             if proc.stdout is not None:
                 proc.stdout.close()
+            _ACTIVE_BANQUET_PROC = None
         if returncode == 0:
             return
         detail = "\n".join(output_lines).strip()
@@ -348,7 +362,12 @@ def _ffmpeg_filter_help(filter_name: str) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return ""
-    return proc.stdout + proc.stderr if proc.returncode == 0 else ""
+    if proc.returncode != 0:
+        return ""
+    text = proc.stdout + proc.stderr
+    if "Unknown filter" in text or f"Filter {filter_name}" not in text:
+        return ""
+    return text
 
 
 def _ffmpeg_filter_has_option(help_text: str, option: str) -> bool:
@@ -738,6 +757,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
 
 def main() -> None:
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handle_sigterm)
     args = parse_args()
     try:
         run_pipeline(args)

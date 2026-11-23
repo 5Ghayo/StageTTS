@@ -64,7 +64,8 @@ def _resolve_gpt_sovits_python(raw: str, root: Optional[Path]) -> str:
     if cleaned:
         if cleaned.startswith("~") or "/" in cleaned or "\\" in cleaned:
             p = Path(cleaned).expanduser()
-            return str(p.resolve() if p.is_absolute() else (ROOT_DIR / p).resolve())
+            # Preserve virtualenv Python symlinks instead of dereferencing to base interpreter.
+            return os.path.abspath(p if p.is_absolute() else (ROOT_DIR / p))
         return cleaned
     if root is None:
         return ""
@@ -91,8 +92,9 @@ def _resolve_gpt_sovits_python(raw: str, root: Optional[Path]) -> str:
 def _resolve_env_parse_python(raw: str) -> str:
     cleaned = raw.strip()
     if cleaned:
-        if cleaned.startswith("~"):
-            return str(Path(cleaned).expanduser())
+        if cleaned.startswith("~") or "/" in cleaned or "\\" in cleaned:
+            p = Path(cleaned).expanduser()
+            return os.path.abspath(p if p.is_absolute() else (ROOT_DIR / p))
         return cleaned
     if shutil.which("python") is not None:
         return "python"

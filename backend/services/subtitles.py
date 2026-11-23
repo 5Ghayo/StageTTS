@@ -31,6 +31,7 @@ def _escape_ass_text(text: str) -> str:
     if not cleaned:
         return ""
     cleaned = cleaned.replace("{", "｛").replace("}", "｝")
+    cleaned = re.sub(r"\\([Nnh])", r"＼\1", cleaned)
     lines = [_SPACE_RE.sub(" ", line).strip() for line in _NEWLINE_RE.split(cleaned)]
     return r"\N".join(line for line in lines if line)
 
@@ -122,7 +123,11 @@ def generate_ass_subtitles(
         end_ts = _format_ass_time(end_sec)
 
         char = script.characters.get(seg.speaker)
-        speaker_name = (char.display_name if char else seg.speaker).replace(",", " ").strip() or seg.speaker
+        speaker_name = re.sub(
+            r"[\r\n,]+",
+            " ",
+            (char.display_name if char else seg.speaker),
+        ).strip() or seg.speaker
 
         orig_raw = seg.orig_text.strip()
         if layout == "bilingual" and orig_raw and orig_raw != primary_raw:

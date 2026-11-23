@@ -96,7 +96,7 @@ interface ProjectState {
   deleteSegment: (segmentId: number) => boolean;
   confirmAllPendingReviews: () => number;
   applyVoicePresetToCharacter: (speakerKey: string, preset: VoicePreset) => void;
-  restoreSnapshot: (snapshotId: string) => Promise<void>;
+  restoreSnapshot: (snapshotId: string) => Promise<boolean>;
   updateBgmVolume: (volume: number) => void;
   updateStemVolume: (stem: keyof StemVolumes, volume: number) => void;
   updateAutoDucking: (enabled: boolean) => void;
@@ -138,6 +138,56 @@ const UNDO_MERGE_WINDOW_MS = 800;
 function pushPastScript(past: ProjectScript[], snapshot: ProjectScript): ProjectScript[] {
   const next = [...past, snapshot];
   return next.length > MAX_HISTORY_STEPS ? next.slice(next.length - MAX_HISTORY_STEPS) : next;
+}
+
+const CJK_BOUNDARY_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/;
+
+function joinSegmentText(left: string, right: string): string {
+  const a = left.trim();
+  const b = right.trim();
+  if (!a) return b;
+  if (!b) return a;
+  if (CJK_BOUNDARY_RE.test(a[a.length - 1]) || CJK_BOUNDARY_RE.test(b[0])) {
+    return `${a}${b}`;
+  }
+  return `${a} ${b}`;
+}
+
+function splitOrigTextByWords(
+  origText: string,
+  words: Segment["words"],
+  splitWordIdx: number,
+  ratio: number,
+): [string, string] {
+  if (words.length > 0 && splitWordIdx > 0 && splitWordIdx < words.length && origText) {
+    const letters: Array<[number, string]> = [];
+    for (let i = 0; i < origText.length; i += 1) {
+      if (!/\s/.test(origText[i])) {
+        letters.push([i, origText[i]]);
+      }
+    }
+    const compact = letters.map(([, ch]) => ch).join("");
+    let cursor = 0;
+    const spans: Array<[number, number]> = [];
+    let aligned = true;
+    for (const w of words) {
+      const token = w.word.replace(/\s+/g, "");
+      if (!token || !compact.startsWith(token, cursor)) {
+        aligned = false;
+        break;
+      }
+      const startChar = letters[cursor][0];
+      cursor += token.length;
+      const endChar = letters[cursor - 1][0] + 1;
+      spans.push([startChar, endChar]);
+    }
+    if (aligned && cursor === compact.length) {
+      const leftEnd = spans[splitWordIdx - 1][1];
+      const rightStart = spans[splitWordIdx][0];
+      return [origText.slice(0, leftEnd).trim(), origText.slice(rightStart).trim()];
+    }
+  }
+  return splitTextNearRatio(origText, ratio);
 }
 
 function splitTextNearRatio(text: string, ratio: number): [string, string] {
@@ -455,7 +505,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         isDirty: false,
         ...(isDifferentProject
           ? { pastScripts: [], futureScripts: [], lastUndoMergeKey: null }
-          : {}),
+          : { futureScripts: [], lastUndoMergeKey: null }),
       };
     }),
 
@@ -464,6 +514,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       mode,
       isDirty: Boolean(state.script),
       script: state.script ? { ...state.script, mode } : null,
+      ...(state.script
+        ? {
+            pastScripts: pushPastScript(state.pastScripts, state.script),
+            futureScripts: [],
+            lastUndoMergeKey: null,
+          }
+        : {}),
     })),
 
   selectSegment: (segmentId) => set({ selectedSegmentId: segmentId }),
@@ -642,18 +699,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     const ratio = (candidate - seg.start) / Math.max(0.1, seg.end - seg.start);
     const [leftTarget, rightTarget] = splitTextNearRatio(seg.target_text, ratio);
-    const getWordMid = (w: (typeof seg.words)[number]) => {
+    const getWordMid = (w: (typeof seg.words)[number]): number | null => {
       if (w.start != null && w.end != null) return (w.start + w.end) / 2;
       if (w.start != null) return w.start;
       if (w.end != null) return w.end;
-      return candidate;
+      return null;
     };
-    const leftWords = seg.words.filter((w) => getWordMid(w) < candidate);
-    const rightWords = seg.words.filter((w) => getWordMid(w) >= candidate);
-    const [leftOrig, rightOrig] =
-      seg.words.length > 0 && leftWords.length > 0 && rightWords.length > 0
-        ? [leftWords.map((w) => w.word).join(" "), rightWords.map((w) => w.word).join(" ")]
-        : splitTextNearRatio(seg.orig_text, ratio);
+    const rawSplitIdx = seg.words.findIndex((w) => {
+      const mid = getWordMid(w);
+      return mid !== null && mid >= candidate;
+    });
+    const splitIdx =
+      rawSplitIdx !== -1
+        ? rawSplitIdx
+        : Math.max(1, Math.min(seg.words.length - 1, Math.round(seg.words.length * ratio)));
+    const leftWords = seg.words.slice(0, splitIdx);
+    const rightWords = seg.words.slice(splitIdx);
+    const [leftOrig, rightOrig] = splitOrigTextByWords(seg.orig_text, seg.words, splitIdx, ratio);
 
     const newId = Math.max(-1, ...script.segments.map((item) => item.id)) + 1;
     const leftSeg = invalidateAudio({
@@ -708,9 +770,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ...curr,
       start: Number(Math.min(curr.start, next.start).toFixed(2)),
       end: Number(Math.max(curr.end, next.end).toFixed(2)),
-      orig_text: [curr.orig_text, next.orig_text].filter(Boolean).join(" ").trim(),
-      target_text: [curr.target_text, next.target_text].filter(Boolean).join(" ").trim(),
-      words: [...curr.words, ...next.words].sort((a, b) => (a.start ?? 0) - (b.start ?? 0)),
+      orig_text: joinSegmentText(curr.orig_text, next.orig_text),
+      target_text: joinSegmentText(curr.target_text, next.target_text),
+      words: [...curr.words, ...next.words],
       alignment_needs_review: Boolean(curr.alignment_needs_review || next.alignment_needs_review),
       speaker_needs_review: Boolean(
         curr.speaker_needs_review || next.speaker_needs_review || curr.speaker !== next.speaker,
@@ -760,11 +822,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     let start = Math.max(0, Number((options?.start ?? state.currentTime).toFixed(2)));
     for (const seg of sorted) {
-      if (start >= seg.start - 0.05 && start < seg.end) {
+      if (seg.start < start + 0.27 && seg.end > start - 0.05) {
         start = Number((seg.end + 0.05).toFixed(2));
       }
     }
-    const following = sorted.find((seg) => seg.start > start + 0.25);
+    const following = sorted.find((seg) => seg.start > start);
     const defaultEnd =
       options?.end !== undefined
         ? Math.max(start + 0.2, Number(options.end.toFixed(2)))
@@ -879,12 +941,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!script || !previous) {
       return;
     }
+    const clonedRefs = Object.fromEntries(
+      Object.entries(preset.emotion_refs).map(([emo, ref]) => [emo, { ...ref }]),
+    ) as CharacterConfig["emotion_refs"];
     const character: CharacterConfig = {
       ...previous,
       speaking_style: preset.speaking_style,
       gpt_weights: preset.gpt_weights ?? null,
       sovits_weights: preset.sovits_weights ?? null,
-      emotion_refs: preset.emotion_refs,
+      emotion_refs: clonedRefs,
     };
     const segments = script.segments.map((seg) =>
       seg.speaker === speakerKey && !seg.keep_original ? invalidateAudio(seg) : seg,
@@ -910,27 +975,38 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const state = get();
     const script = state.script;
     if (!script) {
-      return;
+      return false;
     }
     set({ isLoading: true, error: null });
     try {
       const restored = await apiRestoreProjectSnapshot(script.project_id, snapshotId);
+      const current = get();
+      if (current.script?.project_id !== script.project_id) {
+        set({ isLoading: false });
+        return false;
+      }
+      const prevScript = current.script;
+      current.bumpAudioVersion(restored.segments.map((seg) => seg.id));
       set({
         script: restored,
         mode: restored.mode,
         selectedSegmentId: restored.segments[0]?.id ?? null,
-        pastScripts: pushPastScript(state.pastScripts, script),
+        pastScripts: prevScript
+          ? pushPastScript(current.pastScripts, prevScript)
+          : current.pastScripts,
         futureScripts: [],
         lastUndoMergeKey: null,
         isLoading: false,
         isDirty: false,
         lastSyncMessage: `已回滚恢复快照 ${snapshotId}`,
       });
+      return true;
     } catch (err) {
       set({
         isLoading: false,
         error: err instanceof Error ? err.message : "恢复历史快照失败",
       });
+      return false;
     }
   },
 
@@ -940,6 +1016,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         return state;
       }
       const clamped = Math.max(0, Math.min(2, Number(volume.toFixed(2))));
+      const now = Date.now();
+      const mergeKey = "media:bgm_volume";
+      const canCoalesce =
+        state.lastUndoMergeKey !== null &&
+        state.lastUndoMergeKey.key === mergeKey &&
+        now - state.lastUndoMergeKey.ts < UNDO_MERGE_WINDOW_MS;
       return {
         isDirty: true,
         script: {
@@ -949,6 +1031,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             bgm_volume: clamped,
           },
         },
+        pastScripts: canCoalesce
+          ? state.pastScripts
+          : pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: { key: mergeKey, ts: now },
       };
     }),
 
@@ -963,6 +1050,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         music: 1,
         effects: 1,
       };
+      const now = Date.now();
+      const mergeKey = `media:stem:${stem}`;
+      const canCoalesce =
+        state.lastUndoMergeKey !== null &&
+        state.lastUndoMergeKey.key === mergeKey &&
+        now - state.lastUndoMergeKey.ts < UNDO_MERGE_WINDOW_MS;
       return {
         isDirty: true,
         script: {
@@ -975,6 +1068,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             },
           },
         },
+        pastScripts: canCoalesce
+          ? state.pastScripts
+          : pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: { key: mergeKey, ts: now },
       };
     }),
 
@@ -992,6 +1090,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             auto_ducking: enabled,
           },
         },
+        pastScripts: pushPastScript(state.pastScripts, state.script),
+        futureScripts: [],
+        lastUndoMergeKey: null,
       };
     }),
 
@@ -1007,6 +1108,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         character.gpt_weights !== previous.gpt_weights ||
         character.sovits_weights !== previous.sovits_weights ||
         character.emotion_refs !== previous.emotion_refs;
+      const fieldKeys = Object.keys(patch).sort().join(",");
+      const mergeKey = `char:${speakerKey}:${fieldKeys}`;
+      const now = Date.now();
+      const canCoalesce =
+        state.lastUndoMergeKey !== null &&
+        state.lastUndoMergeKey.key === mergeKey &&
+        now - state.lastUndoMergeKey.ts < UNDO_MERGE_WINDOW_MS;
       return {
         isDirty: true,
         script: {
@@ -1021,11 +1129,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
               )
             : script.segments,
         },
+        pastScripts: canCoalesce ? state.pastScripts : pushPastScript(state.pastScripts, script),
+        futureScripts: [],
+        lastUndoMergeKey: { key: mergeKey, ts: now },
       };
     }),
 
   addCharacter: (name) => {
-    const script = get().script;
+    const state = get();
+    const script = state.script;
     const displayName = name.trim();
     if (!script || !displayName) return null;
     let index = Object.keys(script.characters).length + 1;
@@ -1048,6 +1160,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           },
         },
       },
+      pastScripts: pushPastScript(state.pastScripts, script),
+      futureScripts: [],
+      lastUndoMergeKey: null,
     });
     return speaker;
   },
@@ -1067,7 +1182,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const { nextScript } = applyPatchToSegments(script, patches);
       const characters = { ...nextScript.characters };
       delete characters[source];
-      return { isDirty: true, script: { ...nextScript, characters } };
+      return {
+        isDirty: true,
+        script: { ...nextScript, characters },
+        pastScripts: pushPastScript(state.pastScripts, script),
+        futureScripts: [],
+        lastUndoMergeKey: null,
+      };
     }),
 
   updateTranslationSettings: (sourceLang, glossary) =>
@@ -1076,6 +1197,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         ? {
             script: { ...state.script, source_lang: sourceLang, glossary },
             isDirty: true,
+            pastScripts: pushPastScript(state.pastScripts, state.script),
+            futureScripts: [],
+            lastUndoMergeKey: null,
           }
         : state,
     ),

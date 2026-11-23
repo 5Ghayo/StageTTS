@@ -65,10 +65,14 @@ export const VideoPreview: React.FC = () => {
   const video = useSyncedMedia<HTMLVideoElement>(videoSrc, currentTime, isPlaying);
   const { replacesSource, upcomingClips } = useDubClips(currentTime);
   const bgm = script?.media.bgm_wav;
+  const stems = script?.media.cinematic_stems;
   const vocals = bgm || !videoSrc || videoSrc !== source ? script?.media.vocals_wav : null;
   const muteSource = trackStates.dubSolo || replacesSource;
   const muteVideo =
-    trackStates.videoMuted || muteSource || Boolean(vocals || bgm) || trackStates.vocalsMuted;
+    trackStates.videoMuted ||
+    muteSource ||
+    Boolean(vocals || bgm || stems) ||
+    trackStates.vocalsMuted;
 
   return (
     <div className="flex h-full flex-col bg-[#222222] text-[12px]">
@@ -246,7 +250,7 @@ export const VideoPreview: React.FC = () => {
             aria-label="伴奏音量"
             type="range"
             min={0}
-            max={1.5}
+            max={2}
             step={0.05}
             value={script?.media.bgm_volume ?? 0.75}
             onChange={(e) => updateBgmVolume(Number(e.target.value))}

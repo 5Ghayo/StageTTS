@@ -17,7 +17,7 @@ WHOLE_DIALOGUE_MAX_SEGMENTS = 80
 WINDOW_CONTEXT_MARGIN = 20
 _CJK_LANGS = {"zh", "ja", "yue", "ko"}
 _CJK_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
-_ASCII_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*")
+_NON_CJK_WORD_RE = re.compile(r"[^\W_]+(?:['-][^\W_]+)*")
 _ASCII_GLOSSARY_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\s\-']*[A-Za-z0-9]|[A-Za-z0-9]")
 CONTEXT_INSTRUCTIONS = (
     "先通读完整对白理解剧情、角色关系和前后语气，再按原句 id 还原译文。"
@@ -164,13 +164,18 @@ def _self_check_flags(entry: dict) -> tuple[bool, str]:
     return complete is not False, omitted
 
 
+def _count_non_cjk_words(text: str) -> int:
+    cleaned = _CJK_CHAR_RE.sub(" ", text)
+    return len(_NON_CJK_WORD_RE.findall(cleaned))
+
+
 def _is_suspicious(seg: Segment, text: str, glossary: dict[str, str] | None = None) -> bool:
     """启发式判断是否可能摘要化/漏译或遗漏术语表规定译法；只触发一次 repair。"""
     source = seg.orig_text.strip()
     candidate = text.strip()
     target_cjk = seg.target_lang.removeprefix("all_").split("-")[0] in _CJK_LANGS
     src_cjk = len(_CJK_CHAR_RE.findall(source))
-    src_words = len(_ASCII_WORD_RE.findall(source))
+    src_words = _count_non_cjk_words(source)
     compact_src = re.sub(r"\s+", "", source)
     compact_cand = re.sub(r"\s+", "", candidate)
 
@@ -180,7 +185,7 @@ def _is_suspicious(seg: Segment, text: str, glossary: dict[str, str] | None = No
         if src_cjk < 12 and src_words >= 6 and len(compact_cand) <= max(2, int(src_words * 0.60)):
             return True
     else:
-        cand_words = len(_ASCII_WORD_RE.findall(candidate))
+        cand_words = _count_non_cjk_words(candidate)
         if src_cjk >= 10 and cand_words <= max(2, int(len(compact_src) * 0.25)):
             return True
         if src_cjk < 10 and src_words >= 6 and cand_words <= max(2, int(src_words * 0.35)):
@@ -303,7 +308,8 @@ def translate_script(
         else:
             batch_payload = context.whole_dialogue_payload(batch, full_segments=segments)
         if log:
-            log(f"调用导演 LLM 通读全文并翻译片段 #{batch[0].id}..#{batch[-1].id}（{len(batch)} 条）")
+            mode_label = "按滑动窗口上下文翻译" if use_window else "通读全文并翻译"
+            log(f"调用导演 LLM {mode_label}片段 #{batch[0].id}..#{batch[-1].id}（{len(batch)} 条）")
         try:
             entries = complete_dialogue(client, DIRECTOR_TRANSLATE_PROMPT, batch_payload)
         except (OpenAIError, ValueError, IndexError, json.JSONDecodeError) as exc:

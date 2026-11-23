@@ -54,6 +54,14 @@ function ReferenceEditor({
   const updateCharacter = useProjectStore((s) => s.updateCharacter);
   const audioUrl = referenceUrl(draft.wav);
 
+  const boundRef = character.emotion_refs[emotion];
+  const boundWav = boundRef?.wav ?? "";
+  const boundText = boundRef?.text ?? "";
+  const boundLang = boundRef?.lang ?? script.source_lang ?? "";
+  useEffect(() => {
+    setDraft({ wav: boundWav, text: boundText, lang: boundLang });
+  }, [boundWav, boundText, boundLang]);
+
   async function loadAudio(file?: File) {
     setInFlight(true);
     setMessage("");
@@ -352,6 +360,8 @@ function VoicePresetLibrary({
   busy: boolean;
 }) {
   const backendStatus = useProjectStore((s) => s.backendStatus);
+  const script = useProjectStore((s) => s.script);
+  const isDirty = useProjectStore((s) => s.isDirty);
   const applyVoicePresetToCharacter = useProjectStore((s) => s.applyVoicePresetToCharacter);
   const [presets, setPresets] = useState<VoicePreset[]>([]);
   const [presetName, setPresetName] = useState("");
@@ -399,12 +409,26 @@ function VoicePresetLibrary({
     }
   };
 
-  const handleDeletePreset = async (presetId: string) => {
+  const handleDeletePreset = async (preset: VoicePreset) => {
+    const prefix = `/assets/refs/presets/${preset.preset_id}/`;
+    const referencedLocally = Object.values(script?.characters ?? {}).some((char) =>
+      Object.values(char.emotion_refs).some((ref) => ref?.wav.startsWith(prefix)),
+    );
+    const confirmMsg = referencedLocally
+      ? `确定删除预设“${preset.name}”吗？${
+          isDirty
+            ? "当前项目有未保存修改正在引用该预设音频，建议先保存项目再删除。"
+            : "删除后预设列表中将移除，但已保存项目引用的音频会自动保留。"
+        }`
+      : `确定删除跨项目预设“${preset.name}”吗？`;
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
     setLoading(true);
     setNote("");
     try {
-      await deleteVoicePreset(presetId);
-      setPresets((prev) => prev.filter((item) => item.preset_id !== presetId));
+      await deleteVoicePreset(preset.preset_id);
+      setPresets((prev) => prev.filter((item) => item.preset_id !== preset.preset_id));
     } catch (err) {
       setNote(err instanceof Error ? err.message : "删除预设失败");
     } finally {
@@ -448,7 +472,7 @@ function VoicePresetLibrary({
                 <div className="truncate font-medium text-primary">{preset.name}</div>
                 <div className="truncate font-mono tabular-nums text-[10px] text-muted">
                   参考音 {Object.keys(preset.emotion_refs).length} 项
-                  {preset.gpt_weights ? " · 含权重" : ""}
+                  {preset.gpt_weights || preset.sovits_weights ? " · 含权重" : ""}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
@@ -466,7 +490,7 @@ function VoicePresetLibrary({
                 <button
                   type="button"
                   disabled={busy || loading}
-                  onClick={() => void handleDeletePreset(preset.preset_id)}
+                  onClick={() => void handleDeletePreset(preset)}
                   className="rounded bg-[#2C2C2C] px-2 py-1.5 text-status-error hover:bg-[#3A2828] disabled:opacity-40"
                 >
                   删除

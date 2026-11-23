@@ -216,7 +216,13 @@ function Ensure-NodePath {
         $nodeVersions = Join-Path (Join-Path $nvmDir "versions") "node"
         if (Test-Path $nodeVersions -PathType Container) {
             $latestNode = Get-ChildItem -Path $nodeVersions -Directory -ErrorAction SilentlyContinue |
-                Sort-Object Name | Select-Object -Last 1
+                Sort-Object {
+                    $parts = ($_.Name -replace '^v', '') -split '\.'
+                    $maj = if ($parts.Length -gt 0 -and ($parts[0] -as [int]) -ne $null) { [int]$parts[0] } else { 0 }
+                    $min = if ($parts.Length -gt 1 -and ($parts[1] -as [int]) -ne $null) { [int]$parts[1] } else { 0 }
+                    $pat = if ($parts.Length -gt 2 -and ($parts[2] -as [int]) -ne $null) { [int]$parts[2] } else { 0 }
+                    '{0:D5}.{1:D5}.{2:D5}' -f $maj, $min, $pat
+                } | Select-Object -Last 1
             if ($latestNode) {
                 Add-PathIfPresent (Join-Path $latestNode.FullName "bin")
             }
@@ -479,6 +485,7 @@ function Test-HttpEndpoint {
     param([string]$Url)
     try {
         $req = [System.Net.WebRequest]::Create($Url)
+        $req.Proxy = $null
         $req.Timeout = 1000
         $req.Method = "GET"
         $resp = $req.GetResponse()
@@ -620,12 +627,12 @@ from backend import config
 
 parse_py = config.ENV_PARSE_PYTHON
 parse_ok = Path(parse_py).is_file() or shutil.which(parse_py) is not None
-tts_py = Path(config.GPT_SOVITS_PYTHON) if config.GPT_SOVITS_PYTHON else None
+tts_cmd = config.GPT_SOVITS_PYTHON.strip()
+tts_py_ok = bool(tts_cmd and (Path(tts_cmd).is_file() or shutil.which(tts_cmd) is not None))
 tts_ok = bool(
     config.GPT_SOVITS_ROOT
     and (config.GPT_SOVITS_ROOT / "api_v2.py").is_file()
-    and tts_py
-    and tts_py.is_file()
+    and tts_py_ok
 )
 print(
     f"ffmpeg={shutil.which('ffmpeg') is not None} | "
@@ -701,7 +708,20 @@ print(
     # 8. 输出就绪摘要
     $HealthSummary = ""
     try {
-        $health = Invoke-RestMethod -Uri "http://${BackendProbeHost}:${BackendPort}/api/health" -TimeoutSec 3
+        $healthReq = [System.Net.WebRequest]::Create("http://${BackendProbeHost}:${BackendPort}/api/health")
+        $healthReq.Proxy = $null
+        $healthReq.Timeout = 3000
+        $healthResp = $healthReq.GetResponse()
+        try {
+            $reader = New-Object System.IO.StreamReader($healthResp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+            try {
+                $health = $reader.ReadToEnd() | ConvertFrom-Json
+            } finally {
+                $reader.Dispose()
+            }
+        } finally {
+            $healthResp.Close()
+        }
         $r = $health.readiness
         $HealthSummary = "status=$($health.status) | ffmpeg=$($r.ffmpeg) | banquet=$($r.banquet_configured) | llm=$($r.llm_configured) | hf_token=$($r.hf_token_configured) | tts_auto_manage=$($r.tts_auto_manage)"
     } catch {

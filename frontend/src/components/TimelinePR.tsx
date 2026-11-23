@@ -3,6 +3,7 @@ import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import { useProjectStore } from "../store/useProjectStore";
+import { useWorkflowStore } from "../store/useWorkflowStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
 import { isSegmentOverflow, isSegmentTooShort } from "../utils/synthesisIssues";
@@ -33,7 +34,10 @@ export const TimelinePR: React.FC = () => {
   const isPlaying = useProjectStore((s) => s.isPlaying);
   const timelineZoom = useProjectStore((s) => s.timelineZoom);
   const trackStates = useProjectStore((s) => s.trackStates);
+  const isLoading = useProjectStore((s) => s.isLoading);
   const isSynthesizing = useProjectStore((s) => s.isSynthesizing);
+  const pipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
+  const editsDisabled = isLoading || isSynthesizing || pipelineRunning;
 
   const selectSegment = useProjectStore((s) => s.selectSegment);
   const setCurrentTime = useProjectStore((s) => s.setCurrentTime);
@@ -49,6 +53,8 @@ export const TimelinePR: React.FC = () => {
 
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const activeDragCleanupRef = useRef<(() => void) | null>(null);
+  const justDraggedRef = useRef(false);
   const [waveReady, setWaveReady] = useState(false);
   const [segmentFilter, setSegmentFilter] = useState<TimelineFilter>("all");
   const [dragInfo, setDragInfo] = useState<{
@@ -141,6 +147,14 @@ export const TimelinePR: React.FC = () => {
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
+  // 组件卸载时清理未结束的拖拽窗口事件监听
+  useEffect(() => {
+    return () => {
+      activeDragCleanupRef.current?.();
+      activeDragCleanupRef.current = null;
+    };
+  }, []);
+
   // 播放时自动跟随播放头进入可视区域
   useEffect(() => {
     if (!isPlaying) {
@@ -214,6 +228,10 @@ export const TimelinePR: React.FC = () => {
   ) => {
     e.stopPropagation();
     e.preventDefault();
+    if (editsDisabled) {
+      return;
+    }
+    activeDragCleanupRef.current?.();
     const idx = sortedSegments.findIndex((item) => item.id === seg.id);
     const prevEnd = idx > 0 ? sortedSegments[idx - 1].end : 0;
     const nextStart =
@@ -221,9 +239,14 @@ export const TimelinePR: React.FC = () => {
     const minDuration = 0.2;
     const originX = e.clientX;
     const initialEdgeTime = edge === "start" ? seg.start : seg.end;
-    const minAllowed = edge === "start" ? Math.max(0, prevEnd) : seg.start + minDuration;
+    const minAllowed =
+      edge === "start"
+        ? Math.min(seg.start, Math.max(0, seg.end - minDuration), Math.max(0, prevEnd))
+        : seg.start + minDuration;
     const maxAllowed =
-      edge === "start" ? seg.end - minDuration : Math.max(seg.start + minDuration, nextStart);
+      edge === "start"
+        ? Math.max(minAllowed, seg.end - minDuration)
+        : Math.max(seg.start + minDuration, seg.end, nextStart);
 
     const snapTime = (raw: number): number => {
       const quantized = Math.round(raw / 0.05) * 0.05;
@@ -243,7 +266,7 @@ export const TimelinePR: React.FC = () => {
     };
 
     selectSegment(seg.id);
-    commitHistoryCheckpoint();
+    let committed = false;
     setDragInfo({
       segmentId: seg.id,
       edge,
@@ -254,6 +277,10 @@ export const TimelinePR: React.FC = () => {
     const onPointerMove = (moveEvent: PointerEvent) => {
       const dx = moveEvent.clientX - originX;
       const snapped = snapTime(initialEdgeTime + dx / timelineZoom);
+      if (!committed && snapped !== Number(initialEdgeTime.toFixed(2))) {
+        commitHistoryCheckpoint();
+        committed = true;
+      }
       const nextDuration =
         edge === "start"
           ? Number((seg.end - snapped).toFixed(2))
@@ -270,13 +297,27 @@ export const TimelinePR: React.FC = () => {
       );
     };
 
-    const onPointerUp = () => {
+    const cleanup = () => {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
+      if (activeDragCleanupRef.current === cleanup) {
+        activeDragCleanupRef.current = null;
+      }
       setDragInfo(null);
     };
 
+    const onPointerUp = () => {
+      if (committed) {
+        justDraggedRef.current = true;
+        window.setTimeout(() => {
+          justDraggedRef.current = false;
+        }, 0);
+      }
+      cleanup();
+    };
+
+    activeDragCleanupRef.current = cleanup;
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
@@ -328,16 +369,21 @@ export const TimelinePR: React.FC = () => {
           <div className="flex items-center gap-1 rounded-[4px] bg-[#181818] p-0.5">
             <button
               type="button"
+              disabled={editsDisabled}
               onClick={() => addSegment()}
               title="在播放头位置新增片段"
-              className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary"
+              className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
             >
               <Plus className="h-3 w-3" strokeWidth={1.5} />
               <span className="hidden sm:inline">新增</span>
             </button>
             <button
               type="button"
-              disabled={!selectedSegment || selectedSegment.end - selectedSegment.start < 0.4}
+              disabled={
+                editsDisabled ||
+                !selectedSegment ||
+                selectedSegment.end - selectedSegment.start < 0.4
+              }
               onClick={() => selectedSegment && splitSegment(selectedSegment.id, currentTime)}
               title="分割选中片段（按播放头位置或中点）"
               className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
@@ -347,7 +393,7 @@ export const TimelinePR: React.FC = () => {
             </button>
             <button
               type="button"
-              disabled={!selectedSegment}
+              disabled={editsDisabled || !selectedSegment}
               onClick={() => selectedSegment && mergeSegmentWithNext(selectedSegment.id)}
               title="与下一个片段合并"
               className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
@@ -357,7 +403,7 @@ export const TimelinePR: React.FC = () => {
             </button>
             <button
               type="button"
-              disabled={!selectedSegment}
+              disabled={editsDisabled || !selectedSegment}
               onClick={() => selectedSegment && deleteSegment(selectedSegment.id)}
               title="删除选中片段"
               className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-status-error disabled:opacity-35"
@@ -583,6 +629,9 @@ export const TimelinePR: React.FC = () => {
                     tabIndex={0}
                     title={tooltip}
                     onClick={() => {
+                      if (justDraggedRef.current) {
+                        return;
+                      }
                       selectSegment(seg.id);
                       setCurrentTime(seg.start);
                     }}

@@ -8,7 +8,7 @@ import {
   getSubtitlesUrl,
   renderVideo,
 } from "../../services/api";
-import { useProjectStore } from "../../store/useProjectStore";
+import { getCacheBustedUrl, useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 import type {
   RenderResponse,
@@ -28,10 +28,13 @@ interface SaveFilePickerWindow {
     suggestedName?: string;
     types?: Array<{ description?: string; accept: Record<string, string[]> }>;
   }) => Promise<{
-    createWritable: () => Promise<{
-      write: (data: Blob) => Promise<void>;
-      close: () => Promise<void>;
-    }>;
+    createWritable: () => Promise<
+      {
+        write: (data: Blob) => Promise<void>;
+        close: () => Promise<void>;
+        abort?: () => Promise<void>;
+      } & WritableStream<Uint8Array>
+    >;
   }>;
 }
 
@@ -65,6 +68,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
   const [isExporting, setIsExporting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [result, setResult] = useState<RenderResponse | null>(null);
+  const [exportStamp, setExportStamp] = useState<number>(0);
 
   useEffect(() => {
     if (!open || !projectId) {
@@ -74,12 +78,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
     setErrorMsg(null);
     setResult(null);
     setFilename(defaultFilename(projectId, Boolean(isAudioOnly)));
-    if (backendStatus === "online") {
-      void fetchExportDirs()
-        .then((data) => setDirOptions(data))
-        .catch(() => setDirOptions(null));
+  }, [open, projectId, isAudioOnly, setIsPlaying]);
+
+  useEffect(() => {
+    if (!open || !projectId || backendStatus !== "online") {
+      return;
     }
-  }, [open, projectId, isAudioOnly, backendStatus, setIsPlaying]);
+    void fetchExportDirs()
+      .then((data) => setDirOptions(data))
+      .catch(() => setDirOptions(null));
+  }, [open, projectId, backendStatus]);
 
   useEffect(() => {
     if (!open) {
@@ -106,6 +114,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
   const handleSaveAs = async (url: string, suggestedName: string) => {
     const picker = (window as unknown as SaveFilePickerWindow).showSaveFilePicker;
     if (picker) {
+      let writable:
+        | ({
+            write: (data: Blob) => Promise<void>;
+            close: () => Promise<void>;
+            abort?: () => Promise<void>;
+          } & WritableStream<Uint8Array>)
+        | null = null;
       try {
         const isWav = suggestedName.endsWith(".wav");
         const handle = await picker({
@@ -121,15 +136,24 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
         if (!resp.ok) {
           throw new Error("读取导出文件失败");
         }
-        const blob = await resp.blob();
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
+        writable = await handle.createWritable();
+        if (resp.body) {
+          await resp.body.pipeTo(writable);
+        } else {
+          const blob = await resp.blob();
+          await writable.write(blob);
+          await writable.close();
+        }
         return;
       } catch (err) {
+        if (writable?.abort) {
+          await writable.abort().catch(() => {});
+        }
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
         }
+        setErrorMsg(err instanceof Error ? err.message : "另存为写入失败，请检查磁盘空间或权限");
+        return;
       }
     }
     const link = document.createElement("a");
@@ -161,8 +185,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
         }
       }
       const res = await renderVideo(script.project_id, {
-        burn_watermark: pipelineConfig.burnWatermark,
-        burn_subtitles: pipelineConfig.burnSubtitles,
+        burn_watermark: isAudioOnly ? false : pipelineConfig.burnWatermark,
+        burn_subtitles: isAudioOnly ? "none" : pipelineConfig.burnSubtitles,
         export_ass_sidecar: sidecar === "none" ? null : sidecar,
         auto_ducking: autoDucking,
         output_filename: filename.trim() || null,
@@ -178,6 +202,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
             }
           : state,
       );
+      setExportStamp(Date.now());
       setResult(res);
       appendLog(
         "env_backend",
@@ -482,7 +507,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
                   type="button"
                   onClick={() =>
                     void handleSaveAs(
-                      result.output_video,
+                      getCacheBustedUrl(result.output_video, exportStamp) ?? result.output_video,
                       result.output_video.split("/").pop() || "output.mp4",
                     )
                   }
@@ -492,7 +517,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
                   <span>另存为 / 下载成片</span>
                 </button>
                 <a
-                  href={result.output_video}
+                  href={getCacheBustedUrl(result.output_video, exportStamp) ?? result.output_video}
                   target="_blank"
                   rel="noreferrer"
                   className="flex h-7 items-center gap-1 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 text-[11px] text-primary hover:bg-[#363636]"
@@ -502,7 +527,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ open, onClose, onExpor
                 </a>
                 {result.subtitle_url ? (
                   <a
-                    href={result.subtitle_url}
+                    href={
+                      getCacheBustedUrl(result.subtitle_url, exportStamp) ?? result.subtitle_url
+                    }
                     download={result.subtitle_url.split("/").pop() || "subtitles.ass"}
                     className="flex h-7 items-center rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 text-[11px] text-primary hover:bg-[#363636]"
                   >

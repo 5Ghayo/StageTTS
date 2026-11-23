@@ -186,16 +186,21 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
         for seg in ordered:
             if seg.speaker != speaker or seg.speaker_needs_review or not seg.orig_text.strip():
                 continue
-            aligned_window = _aligned_fallback_window(seg, ordered, speaker)
-            if aligned_window is not None:
-                w_start, w_end, transcript = aligned_window
-                windows.append((w_start, w_end, transcript, [seg.id]))
-                break
+            if _word_char_spans(seg.orig_text, seg.words) is not None:
+                aligned_window = _aligned_fallback_window(seg, ordered, speaker)
+                if aligned_window is not None:
+                    w_start, w_end, transcript = aligned_window
+                    windows.append((w_start, w_end, transcript, [seg.id]))
+                continue
             duration = min(5.0, max(0.0, seg.end - seg.start))
             if duration >= MIN_REFERENCE_SECONDS:
                 end = round(seg.start + duration, 3)
-                windows.append((seg.start, end, _trimmed_transcript(seg, seg.start, end), [seg.id]))
-                break
+                overlaps_other = any(
+                    item.start < end and item.end > seg.start and item.speaker != speaker
+                    for item in ordered
+                )
+                if not overlaps_other:
+                    windows.append((seg.start, end, _trimmed_transcript(seg, seg.start, end), [seg.id]))
     if not windows:
         return None
 

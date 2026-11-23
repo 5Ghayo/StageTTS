@@ -24,7 +24,7 @@ usage() {
 StageTTS 一键启动脚本
 
 用法:
-  ./start.sh [选项]
+  ./scripts/start.sh [选项]
 
 选项:
   --no-open    启动后不自动打开浏览器
@@ -209,9 +209,11 @@ import socket, sys
 host = sys.argv[1]
 port = int(sys.argv[2])
 probe_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    s.settimeout(0.5)
-    sys.exit(0 if s.connect_ex((probe_host, port)) == 0 else 1)
+try:
+    with socket.create_connection((probe_host, port), timeout=0.5):
+        sys.exit(0)
+except OSError:
+    sys.exit(1)
 PY
 }
 
@@ -223,12 +225,12 @@ from backend import config
 
 parse_py = config.ENV_PARSE_PYTHON
 parse_ok = Path(parse_py).is_file() or shutil.which(parse_py) is not None
-tts_py = Path(config.GPT_SOVITS_PYTHON) if config.GPT_SOVITS_PYTHON else None
+tts_cmd = config.GPT_SOVITS_PYTHON.strip()
+tts_py_ok = bool(tts_cmd and (Path(tts_cmd).is_file() or shutil.which(tts_cmd) is not None))
 tts_ok = bool(
     config.GPT_SOVITS_ROOT
     and (config.GPT_SOVITS_ROOT / "api_v2.py").is_file()
-    and tts_py
-    and tts_py.is_file()
+    and tts_py_ok
 )
 print(
     f"ffmpeg={shutil.which('ffmpeg') is not None} | "
@@ -317,6 +319,27 @@ stop_proc_tree() {
         kill -TERM "$child" >/dev/null 2>&1 || true
       fi
     done
+    local child_waited=0
+    local any_alive=1
+    while ((child_waited < 20)); do
+      any_alive=0
+      for child in $descendants; do
+        if kill -0 "$child" >/dev/null 2>&1; then
+          any_alive=1
+          break
+        fi
+      done
+      [[ "$any_alive" -eq 0 ]] && break
+      sleep 0.1
+      ((child_waited += 1))
+    done
+    if [[ "$any_alive" -eq 1 ]]; then
+      for child in $descendants; do
+        if kill -0 "$child" >/dev/null 2>&1; then
+          kill -KILL "$child" >/dev/null 2>&1 || true
+        fi
+      done
+    fi
   fi
   wait "$pid" >/dev/null 2>&1 || true
 }
@@ -347,12 +370,14 @@ wait_for_http() {
   local label="$4"
   local log_file="$5"
 
-  "$BACKEND_PYTHON" - "$url" "$timeout_sec" "$pid" <<'PY'
+  local status=0
+  "$BACKEND_PYTHON" - "$url" "$timeout_sec" "$pid" <<'PY' || status=$?
 import os, sys, time, urllib.request, urllib.error
 
 url = sys.argv[1]
 deadline = time.time() + float(sys.argv[2])
 pid = int(sys.argv[3])
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 while time.time() < deadline:
     try:
@@ -360,7 +385,7 @@ while time.time() < deadline:
     except OSError:
         sys.exit(2)
     try:
-        with urllib.request.urlopen(url, timeout=1.0) as resp:
+        with opener.open(url, timeout=1.0) as resp:
             if resp.status < 500:
                 sys.exit(0)
     except (urllib.error.URLError, TimeoutError, OSError):
@@ -369,7 +394,6 @@ while time.time() < deadline:
 
 sys.exit(1)
 PY
-  local status=$?
   if [[ $status -eq 0 ]]; then
     return 0
   elif [[ $status -eq 2 ]]; then
@@ -412,7 +436,8 @@ wait_for_http "http://$FRONTEND_PROBE_HOST:$FRONTEND_PORT/" 25 "$FRONTEND_PID" "
 # 8. 输出就绪摘要
 HEALTH_SUMMARY="$("$BACKEND_PYTHON" - "http://$BACKEND_PROBE_HOST:$BACKEND_PORT/api/health" <<'PY'
 import json, sys, urllib.request
-with urllib.request.urlopen(sys.argv[1], timeout=3.0) as resp:
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(sys.argv[1], timeout=3.0) as resp:
     data = json.loads(resp.read().decode("utf-8"))
 r = data.get("readiness", {})
 print(

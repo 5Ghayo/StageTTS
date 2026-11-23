@@ -97,7 +97,7 @@ function PreviewAudio({
     }
     if (audioGraph) {
       el.volume = 1;
-      audioGraph.gain.gain.value = clamped;
+      audioGraph.gain.gain.setTargetAtTime(clamped, audioGraph.ctx.currentTime, 0.03);
       if (playing && audioGraph.ctx.state === "suspended") {
         void audioGraph.ctx.resume().catch(() => {});
       }

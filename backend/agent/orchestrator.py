@@ -21,6 +21,11 @@ from backend.schemas import (
 from backend.services.translation import create_openai_client
 from backend.services.tts_client import TTSServiceUnavailableError
 
+_TOOL_ALLOWED_ARGS: Dict[str, set[str]] = {
+    item["function"]["name"]: set(item["function"]["parameters"].get("properties", {}).keys())
+    for item in TOOLS_SCHEMA
+}
+
 
 def _summarize_tool_result(tool_name: str, result: Dict[str, Any]) -> str:
     if tool_name == "query_script":
@@ -59,6 +64,9 @@ def run_agent_chat(
         "mode": script.mode,
         "duration": script.media.duration,
         "bgm_volume": script.media.bgm_volume,
+        "has_cinematic_stems": script.media.cinematic_stems is not None,
+        "stem_volumes": script.media.stem_volumes.model_dump() if script.media.stem_volumes else None,
+        "auto_ducking": script.media.auto_ducking,
         "characters": {
             key: char.display_name for key, char in script.characters.items()
         },
@@ -143,6 +151,10 @@ def run_agent_chat(
 
                 if func is None:
                     raise ValueError(f"禁止调用未授权工具: {tool_name}")
+                allowed = _TOOL_ALLOWED_ARGS.get(tool_name, set())
+                extra = set(args) - allowed
+                if extra:
+                    raise ValueError(f"工具 {tool_name} 包含未声明参数: {sorted(extra)}")
 
                 if tool_name == "synthesize_segments":
                     raw_ids = args.get("segment_ids")

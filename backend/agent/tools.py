@@ -167,12 +167,12 @@ def batch_update_segments(
 def restore_project_snapshot(project_id: str, snapshot_id: str) -> ProjectScript:
     """将项目回滚恢复至指定历史快照，并在覆盖前备份当前剧本。"""
     with project_task_guard(project_id):
+        restored = load_snapshot_script(project_id, snapshot_id)
         try:
             current_script = load_project_script(project_id)
             create_snapshot(current_script, label="恢复快照前备份")
         except FileNotFoundError:
             pass
-        restored = load_snapshot_script(project_id, snapshot_id)
         save_project_script(restored)
         return restored
 
@@ -272,12 +272,27 @@ def render_final_video(
     return result
 
 
+def _render_final_video_tool(
+    project_id: str,
+    burn_watermark: bool = False,
+    burn_subtitles: SubtitleBurnMode = "none",
+    auto_ducking: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """面向 Agent 的受限成片导出工具，禁止覆写宿主任意目录或文件名。"""
+    return render_final_video(
+        project_id=project_id,
+        burn_watermark=burn_watermark,
+        burn_subtitles=burn_subtitles,
+        auto_ducking=auto_ducking,
+    )
+
+
 TOOL_REGISTRY: Dict[str, Callable[..., Dict[str, Any]]] = {
     "query_script": query_script,
     "batch_update_segments": batch_update_segments,
     "synthesize_segments": synthesize_segments,
     "update_mix_settings": update_mix_settings,
-    "render_final_video": render_final_video,
+    "render_final_video": _render_final_video_tool,
 }
 
 

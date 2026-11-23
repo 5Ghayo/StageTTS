@@ -229,9 +229,9 @@ def _build_vocal_track(script: ProjectScript, project_dir: Path) -> Path:
     return dubbed_path
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=16)
 def _ffmpeg_filter_help(filter_name: str) -> str:
-    """查询本机 FFmpeg 滤镜帮助文本。"""
+    """查询本机 FFmpeg 滤镜帮助文本，若滤镜不存在则返回空字符串。"""
     try:
         probe = subprocess.run(
             ["ffmpeg", "-hide_banner", "-h", f"filter={filter_name}"],
@@ -242,7 +242,12 @@ def _ffmpeg_filter_help(filter_name: str) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return ""
-    return probe.stdout + probe.stderr if probe.returncode == 0 else ""
+    if probe.returncode != 0:
+        return ""
+    text = probe.stdout + probe.stderr
+    if "Unknown filter" in text or f"Filter {filter_name}" not in text:
+        return ""
+    return text
 
 
 def _ffmpeg_has_filter(filter_name: str) -> bool:
@@ -397,11 +402,9 @@ def _run_ffmpeg_cmd(cmd: List[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _escape_ffmpeg_filter_path(path: Path) -> str:
-    """转义 FFmpeg filtergraph 文件路径参数（如 ass=filename='...'）。"""
+    """转义单引号包裹的 FFmpeg filtergraph 文件路径参数（如 ass=filename='...'）。"""
     text = path.resolve().as_posix()
-    for ch in ("\\", "'", ":", ",", "[", "]"):
-        text = text.replace(ch, f"\\{ch}")
-    return text
+    return text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "'\\\\\\''")
 
 
 def _build_drawtext_filter() -> str:
@@ -428,7 +431,14 @@ def _sanitize_output_filename(raw_name: Optional[str], expected_ext: str) -> str
     cleaned = (raw_name or "").strip()
     if not cleaned:
         return f"output{expected_ext}"
-    if "/" in cleaned or "\\" in cleaned or ".." in cleaned or any(ch in '<>:"|?*' for ch in cleaned) or cleaned in {".", ".."}:
+    if (
+        "/" in cleaned
+        or "\\" in cleaned
+        or ".." in cleaned
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned)
+        or any(ch in '<>:"|?*' for ch in cleaned)
+        or cleaned in {".", ".."}
+    ):
         raise ValueError("输出文件名不能包含路径分隔符或非法字符")
     suffix = Path(cleaned).suffix.lower()
     if not suffix:
@@ -436,7 +446,13 @@ def _sanitize_output_filename(raw_name: Optional[str], expected_ext: str) -> str
     elif suffix != expected_ext:
         raise ValueError(f"当前模式导出文件后缀必须为 {expected_ext}")
     stem = Path(cleaned).stem
-    if not stem or stem.endswith((" ", ".")) or _WINDOWS_RESERVED_STEM_RE.match(stem):
+    first_part = cleaned.split(".", 1)[0].rstrip(" ")
+    if (
+        not stem
+        or stem.endswith((" ", "."))
+        or _WINDOWS_RESERVED_STEM_RE.match(stem)
+        or _WINDOWS_RESERVED_STEM_RE.match(first_part)
+    ):
         raise ValueError("输出文件名不能使用系统保留名称或以空格/点结尾")
     return cleaned
 
@@ -499,45 +515,65 @@ def mix_and_render(
             f"未找到源视频文件 ({script.media.source_video})，无法封装 output.mp4"
         )
     target_filename = _sanitize_output_filename(output_filename, ".wav" if is_audio_export else ".mp4")
+    if not is_audio_export and burn_subtitles != "none" and not _ffmpeg_has_filter("ass"):
+        raise RuntimeError("当前 FFmpeg 未编译 libass (ass) 滤镜，无法烧录 ASS 硬字幕。")
 
     project_dir: Path = config.WORKSPACE_DIR / script.project_id
     project_dir.mkdir(parents=True, exist_ok=True)
+    stems_paths, bgm_path = _resolve_background_tracks(script)
+    output_path = (project_dir / target_filename).resolve()
+    protected_paths = {
+        (project_dir / "vocals.wav").resolve(),
+        (project_dir / "bgm.wav").resolve(),
+        (project_dir / "dubbed_vocals.wav").resolve(),
+    }
+    if source_video_path is not None:
+        protected_paths.add(source_video_path.resolve())
+    if bgm_path is not None:
+        protected_paths.add(bgm_path.resolve())
+    if stems_paths is not None:
+        protected_paths.update(p.resolve() for p in stems_paths)
+    if Path(target_filename).stem.lower() == "input" or output_path in protected_paths:
+        raise ValueError(f"输出文件名 {target_filename} 与项目源文件或分轨文件冲突，请更换文件名")
+
     dubbed_vocals_path = _build_vocal_track(script, project_dir)
     vocal_sr = _probe_wav_sample_rate(dubbed_vocals_path, default=44100)
-    stems_paths, bgm_path = _resolve_background_tracks(script)
 
     # 模式 B 虚拟舞台若无源视频文件，导出完整混音音频
     if is_audio_export:
-        output_wav = project_dir / target_filename
-        if stems_paths is not None or bgm_path is not None:
-            cmd = ["ffmpeg", "-y", "-i", str(dubbed_vocals_path)]
-            if stems_paths is not None:
-                for p in stems_paths:
-                    cmd.extend(["-i", str(p)])
-                bg_inputs: Tuple[int, ...] = (1, 2, 3)
+        output_wav = output_path
+        with tempfile.TemporaryDirectory(dir=project_dir, prefix=".stagetts_render_") as render_tmp:
+            tmp_wav = Path(render_tmp) / target_filename
+            if stems_paths is not None or bgm_path is not None:
+                cmd = ["ffmpeg", "-y", "-i", str(dubbed_vocals_path)]
+                if stems_paths is not None:
+                    for p in stems_paths:
+                        cmd.extend(["-i", str(p)])
+                    bg_inputs: Tuple[int, ...] = (1, 2, 3)
+                else:
+                    assert bgm_path is not None
+                    cmd.extend(["-i", str(bgm_path)])
+                    bg_inputs = (1,)
+                chains, out_label, _ = _build_audio_mix_graph(
+                    vocal_idx=0,
+                    bg_inputs=bg_inputs,
+                    sample_rate=vocal_sr,
+                    script=script,
+                    auto_ducking=auto_ducking,
+                )
+                cmd.extend(["-filter_complex", ";".join(chains), "-map", out_label, str(tmp_wav)])
+                proc = _run_ffmpeg_cmd(cmd)
+                if proc.returncode != 0:
+                    raise RuntimeError(f"FFmpeg 音频混音失败: {proc.stderr[-600:]}")
             else:
-                assert bgm_path is not None
-                cmd.extend(["-i", str(bgm_path)])
-                bg_inputs = (1,)
-            chains, out_label, _ = _build_audio_mix_graph(
-                vocal_idx=0,
-                bg_inputs=bg_inputs,
-                sample_rate=vocal_sr,
-                script=script,
-                auto_ducking=auto_ducking,
-            )
-            cmd.extend(["-filter_complex", ";".join(chains), "-map", out_label, str(output_wav)])
-            proc = _run_ffmpeg_cmd(cmd)
-            if proc.returncode != 0:
-                raise RuntimeError(f"FFmpeg 音频混音失败: {proc.stderr[-600:]}")
-        else:
-            shutil.copyfile(dubbed_vocals_path, output_wav)
+                shutil.copyfile(dubbed_vocals_path, tmp_wav)
+            tmp_wav.replace(output_wav)
 
         out_duration = probe_media_duration(output_wav) or script.media.duration
         return f"/workspace/{script.project_id}/{target_filename}", out_duration
 
     assert source_video_path is not None
-    output_mp4 = project_dir / target_filename
+    output_mp4 = output_path
     base_inputs: List[str] = ["ffmpeg", "-y", "-i", str(source_video_path), "-i", str(dubbed_vocals_path)]
     if stems_paths is not None:
         for p in stems_paths:
@@ -566,10 +602,12 @@ def mix_and_render(
         audio_filter = None
         audio_map = ["-map", "0:v:0", "-map", "1:a:0"]
 
-    with tempfile.TemporaryDirectory(prefix="stagetts_sub_") as sub_tmp:
+    with tempfile.TemporaryDirectory(dir=project_dir, prefix=".stagetts_render_") as render_tmp:
+        render_dir = Path(render_tmp)
+        tmp_mp4 = render_dir / target_filename
         video_filters: List[str] = []
         if burn_subtitles != "none":
-            ass_path = write_ass_file(script, burn_subtitles, Path(sub_tmp) / "subtitles.ass")
+            ass_path = write_ass_file(script, burn_subtitles, render_dir / "subtitles.ass")
             video_filters.append(f"ass=filename='{_escape_ffmpeg_filter_path(ass_path)}'")
         if burn_watermark:
             video_filters.append(_build_drawtext_filter())
@@ -579,7 +617,7 @@ def mix_and_render(
             if audio_filter:
                 cmd.extend(["-filter_complex", audio_filter])
             cmd.extend(audio_map)
-            cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output_mp4)])
+            cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp_mp4)])
             proc = _run_ffmpeg_cmd(cmd)
             if proc.returncode != 0:
                 raise RuntimeError(f"FFmpeg 无损封装失败: {proc.stderr[-600:]}")
@@ -592,12 +630,13 @@ def mix_and_render(
                 cmd.extend(audio_map)
                 cmd.extend(["-vf", vf_expr])
                 cmd.extend(video_codec_args)
-                cmd.extend(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output_mp4)])
+                cmd.extend(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp_mp4)])
                 proc = _run_ffmpeg_cmd(cmd)
                 if proc.returncode == 0:
                     break
             else:
                 raise RuntimeError(f"FFmpeg 视频重编码导出失败: {proc.stderr[-600:]}")
+        tmp_mp4.replace(output_mp4)
 
     out_duration = probe_media_duration(output_mp4) or script.media.duration
     return f"/workspace/{script.project_id}/{target_filename}", out_duration
@@ -615,10 +654,17 @@ def export_project_deliverables(
 ) -> Dict[str, Any]:
     """导出成片与可选外挂 ASS 字幕，并按需原子落盘至用户指定本机目录。"""
     target_dir = _resolve_export_dir(output_dir)
+    has_source_video = bool(
+        script.media.source_video and config.resolve_media_path(script.media.source_video).is_file()
+    )
+    is_audio_export = script.mode == "virtual_stage" and not has_source_video
+    effective_watermark = False if is_audio_export else burn_watermark
+    effective_burn_subtitles: SubtitleBurnMode = "none" if is_audio_export else burn_subtitles
+
     output_url, duration = mix_and_render(
         script,
-        burn_watermark=burn_watermark,
-        burn_subtitles=burn_subtitles,
+        burn_watermark=effective_watermark,
+        burn_subtitles=effective_burn_subtitles,
         auto_ducking=auto_ducking,
         output_filename=output_filename,
     )
@@ -646,8 +692,8 @@ def export_project_deliverables(
     return {
         "output_video": output_url,
         "duration": duration,
-        "burn_watermark": burn_watermark,
-        "burn_subtitles": burn_subtitles,
+        "burn_watermark": effective_watermark,
+        "burn_subtitles": effective_burn_subtitles,
         "auto_ducking": resolve_effective_auto_ducking(script, auto_ducking),
         "saved_path": str(saved_path),
         "subtitle_url": subtitle_url,

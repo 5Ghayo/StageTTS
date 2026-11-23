@@ -7,12 +7,13 @@ import wave
 from array import array
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from backend import config
-from backend.agent import tools
+from backend.agent import orchestrator, tools
 from backend.main import app
 from backend.schemas import CharacterConfig, CinematicStems, MediaInfo, ProjectScript, Segment, StemVolumes
 from backend.services import media_mixer, subtitles
@@ -365,3 +366,102 @@ class SubtitlesAndMixingTest(unittest.TestCase):
                     json={"output_dir": "relative/exports"},
                 )
                 self.assertEqual(bad_dir.status_code, 400)
+
+    def test_ffmpeg_filter_detection_ass_escaping_and_overwrite_guards(self):
+        media_mixer._ffmpeg_filter_help.cache_clear()
+        self.assertFalse(media_mixer._ffmpeg_has_filter("nonexistent_filter_xyz"))
+
+        for bad_name in ("CON.part.mp4", "bad\x00name.mp4", "input.mp4", "dubbed_vocals.wav"):
+            if bad_name in {"CON.part.mp4", "bad\x00name.mp4"}:
+                with self.assertRaises(ValueError):
+                    media_mixer._sanitize_output_filename(bad_name, ".mp4")
+
+        with ExitStack() as stack:
+            temp = stack.enter_context(tempfile.TemporaryDirectory(prefix="a:b,c[1] O'Neil "))
+            workspace_dir = Path(temp) / "ws"
+            stack.enter_context(patch.object(config, "WORKSPACE_DIR", workspace_dir))
+            project_dir = workspace_dir / "quote_dir"
+            tts_dir = project_dir / "tts"
+            tts_dir.mkdir(parents=True)
+
+            input_mp4 = project_dir / "input.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=1.0",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo:d=1.0",
+                    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(input_mp4),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            _write_tone_wav(tts_dir / "seg_0000.wav", 0.8, rate=44100, channels=1, amplitude=6000)
+
+            script = ProjectScript(
+                project_id="quote_dir",
+                mode="video_dubbing",
+                media=MediaInfo(source_video="/workspace/quote_dir/input.mp4", duration=1.0),
+                characters={
+                    "SPEAKER_00": CharacterConfig(display_name="甲\n乙,丙"),
+                },
+                segments=[
+                    Segment(
+                        id=0, start=0.1, end=0.9, speaker="SPEAKER_00",
+                        orig_text="Line 1\\NLine 2",
+                        target_text="第一行\\N第二行",
+                        tts_wav="/workspace/quote_dir/tts/seg_0000.wav",
+                        status="ready",
+                    )
+                ],
+            )
+            ass_text = subtitles.generate_ass_subtitles(script, layout="bilingual")
+            self.assertIn(",Primary,甲 乙 丙,0,0,0,,第一行＼N第二行\\N{\\rSecondary}Line 1＼NLine 2", ass_text)
+
+            with self.assertRaises(ValueError):
+                media_mixer.mix_and_render(script, output_filename="input.mp4")
+
+            out_url, _dur = media_mixer.mix_and_render(
+                script,
+                burn_subtitles="target",
+                burn_watermark=True,
+            )
+            self.assertEqual(out_url, "/workspace/quote_dir/output.mp4")
+            self.assertTrue((project_dir / "output.mp4").is_file())
+
+    def test_agent_orchestrator_blocks_undeclared_render_output_dir(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "WORKSPACE_DIR", Path(temp)):
+            tools.save_project_script(
+                ProjectScript(project_id="agent_guard", mode="virtual_stage", media=MediaInfo(duration=2.0))
+            )
+            fake_client = MagicMock()
+            fake_client.chat.completions.create.side_effect = [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content="",
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="call_1",
+                                        function=SimpleNamespace(
+                                            name="render_final_video",
+                                            arguments='{"project_id": "agent_guard", "output_dir": "/tmp/evil"}',
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ]
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="已拒绝未授权参数。", tool_calls=[])
+                        )
+                    ]
+                ),
+            ]
+            with patch.object(orchestrator, "create_openai_client", return_value=fake_client):
+                res = orchestrator.run_agent_chat("agent_guard", "导出")
+            self.assertEqual(len(res.tool_logs), 1)
+            self.assertIn("未声明参数", res.tool_logs[0].result_summary)

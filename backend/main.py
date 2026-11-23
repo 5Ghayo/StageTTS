@@ -244,8 +244,9 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
         raise ValueError(
             f"路径 project_id ({safe_id}) 与请求体 project_id ({payload.project_id}) 不一致"
         )
-    save_project_script(payload)
-    create_snapshot(payload, label="手动保存")
+    with project_task_guard(safe_id):
+        save_project_script(payload)
+        create_snapshot(payload, label="手动保存")
     return payload
 
 

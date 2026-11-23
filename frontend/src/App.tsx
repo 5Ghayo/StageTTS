@@ -62,14 +62,19 @@ export const App: React.FC = () => {
   // 全局快捷键：Ctrl/Cmd+S 保存，Ctrl/Cmd+Z 撤销，Ctrl/Cmd+Shift+Z / Y 重做，Space 播放/暂停，← / → 切换片段
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!useProjectStore.getState().script) {
+      const state = useProjectStore.getState();
+      if (!state.script) {
         return;
       }
+      const busy =
+        state.isLoading || state.isSynthesizing || useWorkflowStore.getState().isPipelineRunning;
       const mod = e.ctrlKey || e.metaKey;
       const lowerKey = e.key.toLowerCase();
       if (mod && lowerKey === "s") {
         e.preventDefault();
-        void useProjectStore.getState().saveProjectScript();
+        if (!busy) {
+          void state.saveProjectScript();
+        }
         return;
       }
       const target = e.target as HTMLElement | null;
@@ -79,16 +84,21 @@ export const App: React.FC = () => {
       }
       if (mod && lowerKey === "z") {
         e.preventDefault();
+        if (busy) {
+          return;
+        }
         if (e.shiftKey) {
-          useProjectStore.getState().redo();
+          state.redo();
         } else {
-          useProjectStore.getState().undo();
+          state.undo();
         }
         return;
       }
       if (mod && !e.shiftKey && lowerKey === "y") {
         e.preventDefault();
-        useProjectStore.getState().redo();
+        if (!busy) {
+          state.redo();
+        }
         return;
       }
       if (e.code === "Space") {

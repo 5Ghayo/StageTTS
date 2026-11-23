@@ -1,3 +1,4 @@
+import os
 import signal
 import subprocess
 import tempfile
@@ -39,6 +40,21 @@ class CrossPlatformTest(unittest.TestCase):
                 config._resolve_gpt_sovits_python("~/custom/python3", root),
                 str(Path("~/custom/python3").expanduser()),
             )
+
+            base_bin = root / "base_python"
+            base_bin.touch()
+            venv_dir = root / "venv" / "bin"
+            venv_dir.mkdir(parents=True)
+            venv_python = venv_dir / "python"
+            try:
+                os.symlink(base_bin, venv_python)
+            except OSError:
+                pass
+            else:
+                self.assertEqual(
+                    config._resolve_gpt_sovits_python(str(venv_python), root),
+                    str(venv_python),
+                )
 
     def test_pick_ass_font_name_across_platforms(self):
         subtitles._pick_ass_font_name.cache_clear()

@@ -53,6 +53,8 @@ export const Inspector: React.FC = () => {
   const currentTime = useProjectStore((s) => s.currentTime);
 
   const [synthNote, setSynthNote] = useState<string | null>(null);
+  const [startDraft, setStartDraft] = useState("");
+  const [endDraft, setEndDraft] = useState("");
 
   // 自定义极简试听条状态
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -91,6 +93,15 @@ export const Inspector: React.FC = () => {
       sourceAudioRef.current?.pause();
     }
   }, [activeSegmentId]);
+
+  const segStart = segment?.start;
+  const segEnd = segment?.end;
+  useEffect(() => {
+    if (activeSegmentId !== null && segStart !== undefined && segEnd !== undefined) {
+      setStartDraft(segStart.toFixed(2));
+      setEndDraft(segEnd.toFixed(2));
+    }
+  }, [activeSegmentId, segStart, segEnd]);
 
   if (!script || !segment) {
     return (
@@ -163,6 +174,34 @@ export const Inspector: React.FC = () => {
     window.setTimeout(() => setSynthNote(null), 3500);
   };
 
+  const commitStartDraft = () => {
+    const trimmed = startDraft.trim();
+    const val = Number(trimmed);
+    if (!trimmed || !Number.isFinite(val) || val < 0 || segment.end - val < 0.2) {
+      setStartDraft(segment.start.toFixed(2));
+      return;
+    }
+    const rounded = Number(val.toFixed(2));
+    setStartDraft(rounded.toFixed(2));
+    if (rounded !== Number(segment.start.toFixed(2))) {
+      updateSegmentLocal({ id: segment.id, start: rounded });
+    }
+  };
+
+  const commitEndDraft = () => {
+    const trimmed = endDraft.trim();
+    const val = Number(trimmed);
+    if (!trimmed || !Number.isFinite(val) || val - segment.start < 0.2) {
+      setEndDraft(segment.end.toFixed(2));
+      return;
+    }
+    const rounded = Number(val.toFixed(2));
+    setEndDraft(rounded.toFixed(2));
+    if (rounded !== Number(segment.end.toFixed(2))) {
+      updateSegmentLocal({ id: segment.id, end: rounded });
+    }
+  };
+
   return (
     <div className="flex h-full flex-col justify-between overflow-hidden bg-[#222222] text-[12px]">
       <div className="flex-1 space-y-3 overflow-y-auto py-3 pl-3.5 pr-4">
@@ -233,12 +272,17 @@ export const Inspector: React.FC = () => {
                 step={0.05}
                 min={0}
                 disabled={editsDisabled}
-                value={Number(segment.start.toFixed(2))}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  if (!Number.isFinite(val) || val < 0) return;
-                  if (val >= segment.end - 0.1) return;
-                  updateSegmentLocal({ id: segment.id, start: Number(val.toFixed(2)) });
+                value={startDraft}
+                onChange={(e) => setStartDraft(e.target.value)}
+                onBlur={commitStartDraft}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    commitStartDraft();
+                    e.currentTarget.blur();
+                  } else if (e.key === "Escape") {
+                    setStartDraft(segment.start.toFixed(2));
+                    e.currentTarget.blur();
+                  }
                 }}
                 className="w-16 bg-transparent text-right font-mono tabular-nums text-primary outline-none"
               />
@@ -249,13 +293,19 @@ export const Inspector: React.FC = () => {
                 aria-label="片段结束时间"
                 type="number"
                 step={0.05}
-                min={Number((segment.start + 0.1).toFixed(2))}
+                min={Number((segment.start + 0.2).toFixed(2))}
                 disabled={editsDisabled}
-                value={Number(segment.end.toFixed(2))}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  if (!Number.isFinite(val) || val <= segment.start + 0.1) return;
-                  updateSegmentLocal({ id: segment.id, end: Number(val.toFixed(2)) });
+                value={endDraft}
+                onChange={(e) => setEndDraft(e.target.value)}
+                onBlur={commitEndDraft}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    commitEndDraft();
+                    e.currentTarget.blur();
+                  } else if (e.key === "Escape") {
+                    setEndDraft(segment.end.toFixed(2));
+                    e.currentTarget.blur();
+                  }
                 }}
                 className="w-16 bg-transparent text-right font-mono tabular-nums text-primary outline-none"
               />
