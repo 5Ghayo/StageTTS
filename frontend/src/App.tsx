@@ -59,14 +59,36 @@ export const App: React.FC = () => {
     return () => cancelAnimationFrame(rafId);
   }, [isPlaying]);
 
-  // 全局快捷键：Space 播放/暂停，← / → 切换片段
+  // 全局快捷键：Ctrl/Cmd+S 保存，Ctrl/Cmd+Z 撤销，Ctrl/Cmd+Shift+Z / Y 重做，Space 播放/暂停，← / → 切换片段
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      if (!useProjectStore.getState().script) {
         return;
       }
-      if (!useProjectStore.getState().script) {
+      const mod = e.ctrlKey || e.metaKey;
+      const lowerKey = e.key.toLowerCase();
+      if (mod && lowerKey === "s") {
+        e.preventDefault();
+        void useProjectStore.getState().saveProjectScript();
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
+        return;
+      }
+      if (mod && lowerKey === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          useProjectStore.getState().redo();
+        } else {
+          useProjectStore.getState().undo();
+        }
+        return;
+      }
+      if (mod && !e.shiftKey && lowerKey === "y") {
+        e.preventDefault();
+        useProjectStore.getState().redo();
         return;
       }
       if (e.code === "Space") {

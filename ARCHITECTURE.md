@@ -212,7 +212,12 @@
 | `POST` | `/api/projects/upload` | 创建项目并上传源视频/音频 | `multipart/form-data` (`file`, `mode?`, `project_id?`) | `{ "project_id": "...", "media_url": "..." }` |
 | `POST` | `/api/projects/{project_id}/parse` | 触发 `env_parse` 子进程解析并生成 `script.json`（受单任务锁保护） | `ParseRequest`（含目标语种和识别精度） | `ProjectScript` |
 | `GET` | `/api/projects/{project_id}/script` | 读取指定项目的 `script.json` | — | `ProjectScript` |
-| `PUT` | `/api/projects/{project_id}/script` | 保存前端修改后的完整 `ProjectScript`（Pydantic 校验后落盘） | `ProjectScript` | `ProjectScript` |
+| `PUT` | `/api/projects/{project_id}/script` | 保存前端修改后的完整 `ProjectScript`（Pydantic 校验后落盘，并自动保存历史快照） | `ProjectScript` | `ProjectScript` |
+| `GET` | `/api/projects/{project_id}/history` | 列出项目最近的历史快照列表（最多 20 条，倒序） | — | `ScriptSnapshotListResponse` |
+| `POST` | `/api/projects/{project_id}/history/{snapshot_id}/restore` | 将项目回滚恢复至指定历史快照（同时保留当前版本快照） | — | `ProjectScript` |
+| `GET` | `/api/voice-presets` | 列出全局跨项目音色预设库 | — | `VoicePresetListResponse` |
+| `POST` | `/api/voice-presets` | 将当前角色音色（权重与情绪参考音频）另存为跨项目预设并复制参考音频 | `VoicePresetCreateRequest` | `VoicePreset` |
+| `DELETE` | `/api/voice-presets/{preset_id}` | 删除指定全局音色预设并清理其隔离参考音频 | — | `VoicePresetDeleteResponse` |
 | `POST` | `/api/projects/{project_id}/references` | 上传 3–10 秒音频并转换为 WAV | `multipart/form-data` (`file`) | `{ wav }` |
 | `POST` | `/api/projects/{project_id}/characters/{speaker}/reference-preview` | 从同角色已校对原声生成试听 | — | `ReferencePreview` |
 | `POST` | `/api/projects/{project_id}/translate` | 按当前术语与角色设置重译，保留失败的台词 | — | `TranslationResponse` |
@@ -233,7 +238,7 @@
 | 工具名 | 参数签名 | 返回值结构 | 副作用 |
 | :--- | :--- | :--- | :--- |
 | `query_script` | `project_id: str`, `start_sec: float \| None = None`, `end_sec: float \| None = None`, `speaker: str \| None = None` | `{ "count": int, "segments": list[dict] }` | 只读查询 `script.json`，不写盘 |
-| `batch_update_segments` | `project_id: str`, `updates: list[SegmentPatch]`（含 `id` 及可选 `speaker` / `target_text` / `emotion` / `action` / `keep_original` / `speed_factor`） | `{ "updated_ids": list[int], "marked_pending_ids": list[int] }` | 修改指定片段字段；若修改了 `speaker`/`target_text`/`emotion`/`keep_original`，自动将 `status` 置为 `"pending"` 并持久化 `script.json` |
+| `batch_update_segments` | `project_id: str`, `updates: list[SegmentPatch]`（含 `id` 及可选 `start` / `end` / `speaker` / `orig_text` / `target_text` / `emotion` / `action` / `keep_original` / `speed_factor`） | `{ "updated_ids": list[int], "marked_pending_ids": list[int] }` | 修改指定片段字段；若修改了 `start`/`end`/`speaker`/`target_text`/`target_lang`/`emotion`/`keep_original`/`speed_factor`，自动将 `status` 置为 `"pending"` 并持久化 `script.json`（修改前保存历史快照） |
 | `synthesize_segments` | `project_id: str`, `segment_ids: list[int] \| None = None`（为 `None` 时合成全部 `status != "ready"` 且 `keep_original == false` 的片段） | `{ "synthesized_ids": list[int], "overflow_segments": list[SegmentDurationCheck], "errors": list[str] }` | 按角色分组配音，执行时长闭环并返回最终剩余超长 |
 | `update_mix_settings` | `project_id: str`, `bgm_volume: float \| None = None`, `singing_volume: float \| None = None`, `music_volume: float \| None = None`, `effects_volume: float \| None = None`, `auto_ducking: bool \| None = None` | `{ "bgm_volume": float, "stem_volumes": StemVolumes \| null, "auto_ducking": bool }` | 更新背景混音主音量、四轨子音量与自动闪避开关并持久化 `script.json` |
 | `render_final_video` | `project_id: str`, `burn_watermark: bool = False`, `burn_subtitles: SubtitleBurnMode = "none"`, `auto_ducking: bool \| None = None` | `{ "output_video": str, "duration": float, "burn_watermark": bool, "burn_subtitles": SubtitleBurnMode, "auto_ducking": bool }` | 触发 `pydub` 拼轨与 FFmpeg 混音封装（支持 ASS 硬字幕烧录与自动闪避），写回 `media.output_video` 并持久化 `script.json` |

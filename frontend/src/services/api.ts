@@ -13,10 +13,15 @@ import type {
   ReferenceUploadResponse,
   RenderRequest,
   RenderResponse,
+  ScriptSnapshotListResponse,
   SubtitleLayout,
   SynthesizeResponse,
   TranslationResponse,
   UploadResponse,
+  VoicePreset,
+  VoicePresetCreateRequest,
+  VoicePresetDeleteResponse,
+  VoicePresetListResponse,
 } from "../types/script";
 
 export type { ExportDirsResponse, GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
@@ -238,6 +243,45 @@ export function renderVideo(
         burn_subtitles: "none",
         ...options,
       },
+    }),
+  );
+}
+
+export function fetchProjectHistory(projectId: string): Promise<ScriptSnapshotListResponse> {
+  return unwrap(
+    apiClient.GET("/api/projects/{project_id}/history", {
+      params: { path: { project_id: projectId } },
+    }),
+  );
+}
+
+export function restoreProjectSnapshot(
+  projectId: string,
+  snapshotId: string,
+): Promise<ProjectScript> {
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/history/{snapshot_id}/restore", {
+      params: { path: { project_id: projectId, snapshot_id: snapshotId } },
+    }),
+  );
+}
+
+export function fetchVoicePresets(): Promise<VoicePresetListResponse> {
+  return unwrap(apiClient.GET("/api/voice-presets"));
+}
+
+export function createVoicePreset(payload: VoicePresetCreateRequest): Promise<VoicePreset> {
+  return unwrap(
+    apiClient.POST("/api/voice-presets", {
+      body: payload,
+    }),
+  );
+}
+
+export function deleteVoicePreset(presetId: string): Promise<VoicePresetDeleteResponse> {
+  return unwrap(
+    apiClient.DELETE("/api/voice-presets/{preset_id}", {
+      params: { path: { preset_id: presetId } },
     }),
   );
 }

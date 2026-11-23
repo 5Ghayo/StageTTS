@@ -4,17 +4,22 @@ import {
   Cpu,
   Download,
   Film,
+  History,
   Mic,
   Play,
+  Redo2,
+  RotateCcw,
   Save,
   Sparkles,
+  Undo2,
   Workflow,
 } from "lucide-react";
 import type React from "react";
-import { useState } from "react";
-import { type GpuDevice, fetchGpuStatus } from "../../services/api";
+import { useEffect, useRef, useState } from "react";
+import { type GpuDevice, fetchGpuStatus, fetchProjectHistory } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
+import type { ScriptSnapshotMeta } from "../../types/script";
 import type { WorkspacePreset } from "../../types/workflow";
 import { ExportModal } from "../modals/ExportModal";
 
@@ -53,8 +58,13 @@ export const TopMenuBar: React.FC = () => {
   const isDirty = useProjectStore((s) => s.isDirty);
   const isLoading = useProjectStore((s) => s.isLoading);
   const isSynthesizing = useProjectStore((s) => s.isSynthesizing);
+  const pastCount = useProjectStore((s) => s.pastScripts.length);
+  const futureCount = useProjectStore((s) => s.futureScripts.length);
   const saveProjectScript = useProjectStore((s) => s.saveProjectScript);
   const synthesizeSegment = useProjectStore((s) => s.synthesizeSegment);
+  const undo = useProjectStore((s) => s.undo);
+  const redo = useProjectStore((s) => s.redo);
+  const restoreSnapshot = useProjectStore((s) => s.restoreSnapshot);
 
   const workspacePreset = useWorkflowStore((s) => s.workspacePreset);
   const setWorkspacePreset = useWorkflowStore((s) => s.setWorkspacePreset);
@@ -64,6 +74,47 @@ export const TopMenuBar: React.FC = () => {
 
   const [actionToast, setActionToast] = useState<string | null>(null);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [snapshots, setSnapshots] = useState<ScriptSnapshotMeta[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const historyPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!historyOpen) {
+      return;
+    }
+    const handleOutside = (e: MouseEvent) => {
+      if (historyPopoverRef.current && !historyPopoverRef.current.contains(e.target as Node)) {
+        setHistoryOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handleOutside);
+    return () => window.removeEventListener("mousedown", handleOutside);
+  }, [historyOpen]);
+
+  const toggleHistoryMenu = async () => {
+    const nextOpen = !historyOpen;
+    setHistoryOpen(nextOpen);
+    if (!nextOpen || !script) {
+      return;
+    }
+    if (backendStatus !== "online") {
+      setSnapshots([]);
+      setHistoryError("离线模式暂不支持读取后端历史快照");
+      return;
+    }
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const res = await fetchProjectHistory(script.project_id);
+      setSnapshots(res.snapshots);
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : "读取历史快照失败");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
 
   const { data: gpuData } = useQuery({
     queryKey: ["gpu-status"],
@@ -136,20 +187,108 @@ export const TopMenuBar: React.FC = () => {
           </span>
 
           {script && (
-            <button
-              type="button"
-              disabled={isLoading}
-              onClick={() => void saveProjectScript()}
-              title="保存剧本修改"
-              className="flex h-7 items-center gap-1.5 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 py-1 text-[12px] text-primary transition-colors hover:bg-[#363636] disabled:opacity-50"
-            >
-              {isDirty ? (
-                <span className="h-1.5 w-1.5 rounded-full bg-status-warning" />
-              ) : (
-                <Save className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
-              )}
-              <span>{isDirty ? "保存*" : "保存"}</span>
-            </button>
+            <>
+              <button
+                type="button"
+                disabled={isLoading}
+                onClick={() => void saveProjectScript()}
+                title="保存剧本修改 (Ctrl/Cmd+S)"
+                className="flex h-7 items-center gap-1.5 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2.5 py-1 text-[12px] text-primary transition-colors hover:bg-[#363636] disabled:opacity-50"
+              >
+                {isDirty ? (
+                  <span className="h-1.5 w-1.5 rounded-full bg-status-warning" />
+                ) : (
+                  <Save className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />
+                )}
+                <span>{isDirty ? "保存*" : "保存"}</span>
+              </button>
+
+              <div className="flex items-center gap-0.5 rounded-[4px] bg-[#181818] p-0.5">
+                <button
+                  type="button"
+                  disabled={pastCount === 0 || isLoading}
+                  onClick={() => undo()}
+                  title="撤销 (Ctrl/Cmd+Z)"
+                  className="flex h-6 w-6 items-center justify-center rounded-[3px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
+                >
+                  <Undo2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                </button>
+                <button
+                  type="button"
+                  disabled={futureCount === 0 || isLoading}
+                  onClick={() => redo()}
+                  title="重做 (Ctrl/Cmd+Shift+Z)"
+                  className="flex h-6 w-6 items-center justify-center rounded-[3px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
+                >
+                  <Redo2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                </button>
+              </div>
+
+              <div className="relative" ref={historyPopoverRef}>
+                <button
+                  type="button"
+                  disabled={isLoading || isPipelineRunning}
+                  onClick={() => void toggleHistoryMenu()}
+                  title="查看并恢复服务端历史快照"
+                  className="flex h-7 items-center gap-1 rounded-[4px] border border-white/[0.08] bg-[#2C2C2C] px-2 py-1 text-[11px] text-secondary transition-colors hover:bg-[#363636] hover:text-primary disabled:opacity-50"
+                >
+                  <History className="h-3.5 w-3.5" strokeWidth={1.5} />
+                  <span>快照</span>
+                </button>
+
+                {historyOpen && (
+                  <div className="absolute left-0 top-8 z-50 w-72 rounded-[4px] border border-white/[0.10] bg-[#222222] p-2 text-[11px]">
+                    <div className="mb-1.5 flex items-center justify-between border-b border-white/[0.06] pb-1.5">
+                      <span className="font-medium text-primary">历史快照（最多保留 20 条）</span>
+                      <span className="font-mono tabular-nums text-[10px] text-muted">
+                        {snapshots.length} 条
+                      </span>
+                    </div>
+                    {historyLoading ? (
+                      <div className="py-3 text-center text-muted">加载中...</div>
+                    ) : historyError ? (
+                      <div className="py-2 text-status-warning">{historyError}</div>
+                    ) : snapshots.length === 0 ? (
+                      <div className="py-3 text-center text-muted">
+                        暂无快照，点击“保存”后将自动记录
+                      </div>
+                    ) : (
+                      <ul className="max-h-64 space-y-1 overflow-y-auto">
+                        {snapshots.map((snap) => (
+                          <li
+                            key={snap.snapshot_id}
+                            className="flex items-center justify-between gap-2 rounded-[3px] bg-[#181818] px-2 py-1.5"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate font-medium text-primary">{snap.label}</div>
+                              <div className="truncate font-mono tabular-nums text-[10px] text-muted">
+                                {new Date(snap.created_at).toLocaleString()} · {snap.segment_count}{" "}
+                                句
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={isLoading || isSynthesizing || isPipelineRunning}
+                              onClick={() => {
+                                void restoreSnapshot(snap.snapshot_id).then(() => {
+                                  setHistoryOpen(false);
+                                  setActionToast(`已恢复快照：${snap.label}`);
+                                  window.setTimeout(() => setActionToast(null), 3500);
+                                });
+                              }}
+                              className="flex shrink-0 items-center gap-1 rounded-[3px] border border-white/[0.08] bg-[#2C2C2C] px-1.5 py-0.5 text-[10px] text-primary transition-colors hover:bg-[#363636] disabled:opacity-40"
+                            >
+                              <RotateCcw className="h-3 w-3" strokeWidth={1.5} />
+                              <span>恢复</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
 

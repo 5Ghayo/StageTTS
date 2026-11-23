@@ -132,6 +132,15 @@ class ProjectScript(BaseModel):
     )
     segments: List[Segment] = Field(default_factory=list, json_schema_extra={"default": []})
 
+    @model_validator(mode="after")
+    def _validate_unique_segment_ids(self) -> "ProjectScript":
+        seen: set[int] = set()
+        for seg in self.segments:
+            if seg.id in seen:
+                raise ValueError(f"Duplicate segment id: {seg.id}")
+            seen.add(seg.id)
+        return self
+
 
 # ---------------------------------------------------------------------------
 # REST API 与 Agent 工具请求/响应模型
@@ -218,6 +227,8 @@ class SegmentPatch(BaseModel):
     """单句或批量更新字段补丁（仅提供需修改的字段）。"""
 
     id: int = Field(ge=0)
+    start: Optional[float] = Field(default=None, ge=0.0)
+    end: Optional[float] = Field(default=None, gt=0.0)
     speaker: Optional[str] = None
     orig_text: Optional[str] = None
     alignment_needs_review: Optional[bool] = None
@@ -357,3 +368,61 @@ class RenderResponse(BaseModel):
     saved_path: str = ""
     subtitle_url: Optional[str] = None
     subtitle_saved_path: Optional[str] = None
+
+
+class ScriptSnapshotMeta(BaseModel):
+    """剧本历史快照元数据。"""
+
+    snapshot_id: str
+    created_at: str
+    label: str = "手动保存"
+    segment_count: int = Field(ge=0)
+
+
+class ScriptSnapshotListResponse(BaseModel):
+    """项目历史快照列表响应。"""
+
+    project_id: str
+    snapshots: List[ScriptSnapshotMeta] = Field(
+        default_factory=list, json_schema_extra={"default": []},
+    )
+
+
+class VoicePreset(BaseModel):
+    """跨项目全局音色预设契约。"""
+
+    preset_id: str
+    name: str = Field(min_length=1)
+    speaking_style: str = ""
+    gpt_weights: Optional[str] = None
+    sovits_weights: Optional[str] = None
+    emotion_refs: Dict[EmotionType, EmotionRef] = Field(
+        default_factory=dict, json_schema_extra={"default": {}},
+    )
+    created_at: str
+
+
+class VoicePresetCreateRequest(BaseModel):
+    """创建跨项目音色预设请求。"""
+
+    name: str = Field(min_length=1, max_length=80)
+    speaking_style: str = ""
+    gpt_weights: Optional[str] = None
+    sovits_weights: Optional[str] = None
+    emotion_refs: Dict[EmotionType, EmotionRef] = Field(
+        default_factory=dict, json_schema_extra={"default": {}},
+    )
+
+
+class VoicePresetListResponse(BaseModel):
+    """全局音色预设列表响应。"""
+
+    presets: List[VoicePreset] = Field(
+        default_factory=list, json_schema_extra={"default": []},
+    )
+
+
+class VoicePresetDeleteResponse(BaseModel):
+    """删除音色预设响应。"""
+
+    deleted_id: str

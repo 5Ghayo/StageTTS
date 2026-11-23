@@ -21,6 +21,7 @@ from backend.schemas import (
     SubtitleLayout,
     SynthesizeResponse,
 )
+from backend.services.history import create_snapshot, load_snapshot_script
 from backend.services.media_mixer import export_project_deliverables
 from backend.services.synthesis import synthesize_with_duration_check
 from backend.services.task_runner import GpuBusyError, gpu_task_guard
@@ -105,11 +106,22 @@ def batch_update_segments(
     """应用片段补丁，并将影响音频的片段标为待合成。"""
     with project_task_guard(project_id):
         script = load_project_script(project_id)
+        pre_edit_script = script.model_copy(deep=True)
         seg_map = {seg.id: seg for seg in script.segments}
         updated_ids: List[int] = []
         marked_pending_ids: List[int] = []
+        timing_changed = False
 
-        resynth_fields = {"speaker", "target_text", "target_lang", "emotion", "keep_original", "speed_factor"}
+        resynth_fields = {
+            "start",
+            "end",
+            "speaker",
+            "target_text",
+            "target_lang",
+            "emotion",
+            "keep_original",
+            "speed_factor",
+        }
 
         for raw_patch in updates:
             patch = SegmentPatch.model_validate(raw_patch)
@@ -117,6 +129,12 @@ def batch_update_segments(
                 raise KeyError(f"片段 ID {patch.id} 不存在于项目 {project_id}")
             seg = seg_map[patch.id]
             patch_data = patch.model_dump(exclude={"id"}, exclude_none=True)
+            new_start = float(patch_data.get("start", seg.start))
+            new_end = float(patch_data.get("end", seg.end))
+            if new_end <= new_start:
+                raise ValueError(
+                    f"片段 {seg.id}: 结束时间 ({new_end}) 必须大于开始时间 ({new_start})"
+                )
             if "speaker" in patch_data:
                 if patch_data["speaker"] not in script.characters:
                     raise ValueError("请先新建要指派的角色")
@@ -127,6 +145,8 @@ def batch_update_segments(
             for field_name, value in patch_data.items():
                 if getattr(seg, field_name) != value:
                     setattr(seg, field_name, value)
+                    if field_name in {"start", "end"}:
+                        timing_changed = True
                     if field_name in resynth_fields:
                         needs_resynth = True
             updated_ids.append(seg.id)
@@ -135,8 +155,26 @@ def batch_update_segments(
             if needs_resynth and not seg.keep_original:
                 marked_pending_ids.append(seg.id)
 
+        if timing_changed:
+            script.segments.sort(key=lambda item: (item.start, item.id))
+
+        if updated_ids:
+            create_snapshot(pre_edit_script, label="Agent 批量修改前")
         save_project_script(script)
     return {"updated_ids": updated_ids, "marked_pending_ids": marked_pending_ids}
+
+
+def restore_project_snapshot(project_id: str, snapshot_id: str) -> ProjectScript:
+    """将项目回滚恢复至指定历史快照，并在覆盖前备份当前剧本。"""
+    with project_task_guard(project_id):
+        try:
+            current_script = load_project_script(project_id)
+            create_snapshot(current_script, label="恢复快照前备份")
+        except FileNotFoundError:
+            pass
+        restored = load_snapshot_script(project_id, snapshot_id)
+        save_project_script(restored)
+        return restored
 
 
 def synthesize_project(
@@ -281,6 +319,8 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
                             "type": "object",
                             "properties": {
                                 "id": {"type": "integer", "description": "片段 ID"},
+                                "start": {"type": "number", "description": "起始时间（秒）"},
+                                "end": {"type": "number", "description": "结束时间（秒）"},
                                 "speaker": {"type": "string"},
                                 "target_text": {"type": "string"},
                                 "target_lang": {"type": "string"},

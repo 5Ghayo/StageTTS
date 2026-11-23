@@ -75,10 +75,50 @@ export interface paths {
         get: operations["get_project_script_api_projects__project_id__script_get"];
         /**
          * Put Project Script
-         * @description 校验并保存前端修改后的完整 ProjectScript。
+         * @description 校验并保存前端修改后的完整 ProjectScript，并记录去重历史快照。
          */
         put: operations["put_project_script_api_projects__project_id__script_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Project History
+         * @description 列出项目的历史快照元数据列表。
+         */
+        get: operations["get_project_history_api_projects__project_id__history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/history/{snapshot_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Restore Project History
+         * @description 回滚恢复项目到指定历史快照。
+         */
+        post: operations["post_restore_project_history_api_projects__project_id__history__snapshot_id__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -311,6 +351,50 @@ export interface paths {
          */
         post: operations["render_project_video_api_projects__project_id__render_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/voice-presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Voice Presets
+         * @description 列出跨项目全局音色预设库。
+         */
+        get: operations["get_voice_presets_api_voice_presets_get"];
+        put?: never;
+        /**
+         * Post Voice Preset
+         * @description 将当前角色音色配置及参考音频保存为跨项目预设。
+         */
+        post: operations["post_voice_preset_api_voice_presets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/voice-presets/{preset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Voice Preset
+         * @description 删除全局音色预设并清理其隔离参考音频文件。
+         */
+        delete: operations["remove_voice_preset_api_voice_presets__preset_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -816,6 +900,36 @@ export interface components {
             subtitle_saved_path?: string | null;
         };
         /**
+         * ScriptSnapshotListResponse
+         * @description 项目历史快照列表响应。
+         */
+        ScriptSnapshotListResponse: {
+            /** Project Id */
+            project_id: string;
+            /**
+             * Snapshots
+             * @default []
+             */
+            snapshots: components["schemas"]["ScriptSnapshotMeta"][];
+        };
+        /**
+         * ScriptSnapshotMeta
+         * @description 剧本历史快照元数据。
+         */
+        ScriptSnapshotMeta: {
+            /** Snapshot Id */
+            snapshot_id: string;
+            /** Created At */
+            created_at: string;
+            /**
+             * Label
+             * @default 手动保存
+             */
+            label: string;
+            /** Segment Count */
+            segment_count: number;
+        };
+        /**
          * Segment
          * @description 时间轴单句台词片段。
          */
@@ -1062,6 +1176,77 @@ export interface components {
             /** Context */
             ctx?: Record<string, never>;
         };
+        /**
+         * VoicePreset
+         * @description 跨项目全局音色预设契约。
+         */
+        VoicePreset: {
+            /** Preset Id */
+            preset_id: string;
+            /** Name */
+            name: string;
+            /**
+             * Speaking Style
+             * @default
+             */
+            speaking_style: string;
+            /** Gpt Weights */
+            gpt_weights?: string | null;
+            /** Sovits Weights */
+            sovits_weights?: string | null;
+            /**
+             * Emotion Refs
+             * @default {}
+             */
+            emotion_refs: {
+                [key: string]: components["schemas"]["EmotionRef"];
+            };
+            /** Created At */
+            created_at: string;
+        };
+        /**
+         * VoicePresetCreateRequest
+         * @description 创建跨项目音色预设请求。
+         */
+        VoicePresetCreateRequest: {
+            /** Name */
+            name: string;
+            /**
+             * Speaking Style
+             * @default
+             */
+            speaking_style: string;
+            /** Gpt Weights */
+            gpt_weights?: string | null;
+            /** Sovits Weights */
+            sovits_weights?: string | null;
+            /**
+             * Emotion Refs
+             * @default {}
+             */
+            emotion_refs: {
+                [key: string]: components["schemas"]["EmotionRef"];
+            };
+        };
+        /**
+         * VoicePresetDeleteResponse
+         * @description 删除音色预设响应。
+         */
+        VoicePresetDeleteResponse: {
+            /** Deleted Id */
+            deleted_id: string;
+        };
+        /**
+         * VoicePresetListResponse
+         * @description 全局音色预设列表响应。
+         */
+        VoicePresetListResponse: {
+            /**
+             * Presets
+             * @default []
+             */
+            presets: components["schemas"]["VoicePreset"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -1176,6 +1361,69 @@ export interface operations {
                 "application/json": components["schemas"]["ProjectScript"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectScript"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_project_history_api_projects__project_id__history_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScriptSnapshotListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_restore_project_history_api_projects__project_id__history__snapshot_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                snapshot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -1570,6 +1818,90 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RenderResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_voice_presets_api_voice_presets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoicePresetListResponse"];
+                };
+            };
+        };
+    };
+    post_voice_preset_api_voice_presets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VoicePresetCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoicePreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_voice_preset_api_voice_presets__preset_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoicePresetDeleteResponse"];
                 };
             };
             /** @description Validation Error */

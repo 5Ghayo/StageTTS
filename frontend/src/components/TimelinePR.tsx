@@ -1,11 +1,13 @@
-import { AlertCircle, ZoomIn, ZoomOut } from "lucide-react";
+import { AlertCircle, GitMerge, Plus, Scissors, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 import type React from "react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
-import { isSegmentOverflow } from "../utils/synthesisIssues";
+import { isSegmentOverflow, isSegmentTooShort } from "../utils/synthesisIssues";
+
+type TimelineFilter = "all" | "review" | "pending" | "issue";
 
 function formatShortTime(sec: number): string {
   const mins = Math.floor(sec / 60);
@@ -28,6 +30,7 @@ export const TimelinePR: React.FC = () => {
   const script = useProjectStore((s) => s.script);
   const selectedSegmentId = useProjectStore((s) => s.selectedSegmentId);
   const currentTime = useProjectStore((s) => s.currentTime);
+  const isPlaying = useProjectStore((s) => s.isPlaying);
   const timelineZoom = useProjectStore((s) => s.timelineZoom);
   const trackStates = useProjectStore((s) => s.trackStates);
   const isSynthesizing = useProjectStore((s) => s.isSynthesizing);
@@ -37,15 +40,36 @@ export const TimelinePR: React.FC = () => {
   const setTimelineZoom = useProjectStore((s) => s.setTimelineZoom);
   const toggleTrackState = useProjectStore((s) => s.toggleTrackState);
   const synthesizeSegment = useProjectStore((s) => s.synthesizeSegment);
+  const commitHistoryCheckpoint = useProjectStore((s) => s.commitHistoryCheckpoint);
+  const updateSegmentLocal = useProjectStore((s) => s.updateSegmentLocal);
+  const splitSegment = useProjectStore((s) => s.splitSegment);
+  const mergeSegmentWithNext = useProjectStore((s) => s.mergeSegmentWithNext);
+  const addSegment = useProjectStore((s) => s.addSegment);
+  const deleteSegment = useProjectStore((s) => s.deleteSegment);
 
   const waveContainerRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [waveReady, setWaveReady] = useState(false);
+  const [segmentFilter, setSegmentFilter] = useState<TimelineFilter>("all");
+  const [dragInfo, setDragInfo] = useState<{
+    segmentId: number;
+    edge: "start" | "end";
+    time: number;
+    duration: number;
+  } | null>(null);
 
-  const duration = Math.max(10, script?.media.duration ?? 18.5);
+  const maxSegmentEnd = useMemo(() => {
+    if (!script?.segments.length) return 0;
+    return Math.max(...script.segments.map((seg) => seg.end));
+  }, [script?.segments]);
+
+  const duration = Math.max(10, script?.media.duration ?? 18.5, maxSegmentEnd);
   const trackWidthPx = Math.max(760, Math.ceil(duration * timelineZoom) + 80);
 
   useEffect(() => {
     const container = waveContainerRef.current;
     const vocalsUrl = script?.media.vocals_wav;
+    setWaveReady(false);
     if (!container || !vocalsUrl) {
       return;
     }
@@ -61,8 +85,21 @@ export const TimelinePR: React.FC = () => {
         interact: false,
         normalize: true,
       });
-      ws.on("error", () => {});
-      void ws.load(vocalsUrl).catch(() => {});
+      ws.on("ready", () => {
+        if (!destroyed) {
+          setWaveReady(true);
+        }
+      });
+      ws.on("error", () => {
+        if (!destroyed) {
+          setWaveReady(false);
+        }
+      });
+      void ws.load(vocalsUrl).catch(() => {
+        if (!destroyed) {
+          setWaveReady(false);
+        }
+      });
     } catch {
       // ignore offline audio fallback
     }
@@ -73,6 +110,51 @@ export const TimelinePR: React.FC = () => {
       }
     };
   }, [script?.media.vocals_wav]);
+
+  // Ctrl/Cmd/Alt + 滚轮：以指针位置为中心缩放时间轴
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) {
+      return;
+    }
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey || e.altKey)) {
+        return;
+      }
+      e.preventDefault();
+      const state = useProjectStore.getState();
+      const oldZoom = state.timelineZoom;
+      const delta = e.deltaY < 0 ? 12 : -12;
+      const nextZoom = Math.max(30, Math.min(180, Math.round(oldZoom + delta)));
+      if (nextZoom === oldZoom) {
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const offsetInView = Math.max(0, e.clientX - rect.left);
+      const timeAtPointer = (el.scrollLeft + offsetInView) / oldZoom;
+      state.setTimelineZoom(nextZoom);
+      requestAnimationFrame(() => {
+        el.scrollLeft = Math.max(0, timeAtPointer * nextZoom - offsetInView);
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // 播放时自动跟随播放头进入可视区域
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+    const el = scrollContainerRef.current;
+    if (!el) {
+      return;
+    }
+    const playheadX = currentTime * timelineZoom;
+    if (playheadX < el.scrollLeft + 24 || playheadX > el.scrollLeft + el.clientWidth - 48) {
+      el.scrollLeft = Math.max(0, playheadX - el.clientWidth * 0.3);
+    }
+  }, [currentTime, isPlaying, timelineZoom]);
 
   const tickMarks = useMemo(() => {
     const step = timelineZoom >= 90 ? 1 : 2;
@@ -105,6 +187,19 @@ export const TimelinePR: React.FC = () => {
   const pendingCount = script.segments.filter(
     (seg) => !seg.keep_original && seg.status !== "ready",
   ).length;
+  const sortedSegments = [...script.segments].sort((a, b) => a.start - b.start || a.id - b.id);
+  const selectedSegment = script.segments.find((seg) => seg.id === selectedSegmentId) ?? null;
+
+  const matchesFilter = (seg: (typeof script.segments)[number]) => {
+    if (segmentFilter === "all") return true;
+    if (segmentFilter === "review") {
+      return Boolean(seg.alignment_needs_review || seg.speaker_needs_review);
+    }
+    if (segmentFilter === "pending") {
+      return !seg.keep_original && seg.status !== "ready";
+    }
+    return seg.status === "error" || isSegmentOverflow(seg) || isSegmentTooShort(seg);
+  };
 
   const handleRulerSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -112,19 +207,165 @@ export const TimelinePR: React.FC = () => {
     setCurrentTime(offsetX / timelineZoom);
   };
 
+  const beginEdgeResize = (
+    e: React.PointerEvent<HTMLDivElement>,
+    seg: (typeof script.segments)[number],
+    edge: "start" | "end",
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const idx = sortedSegments.findIndex((item) => item.id === seg.id);
+    const prevEnd = idx > 0 ? sortedSegments[idx - 1].end : 0;
+    const nextStart =
+      idx >= 0 && idx < sortedSegments.length - 1 ? sortedSegments[idx + 1].start : duration + 30;
+    const minDuration = 0.2;
+    const originX = e.clientX;
+    const initialEdgeTime = edge === "start" ? seg.start : seg.end;
+    const minAllowed = edge === "start" ? Math.max(0, prevEnd) : seg.start + minDuration;
+    const maxAllowed =
+      edge === "start" ? seg.end - minDuration : Math.max(seg.start + minDuration, nextStart);
+
+    const snapTime = (raw: number): number => {
+      const quantized = Math.round(raw / 0.05) * 0.05;
+      const clamped = Math.max(minAllowed, Math.min(maxAllowed, quantized));
+      const snapTargets = [currentTime, Math.round(clamped), prevEnd, nextStart];
+      let best = clamped;
+      let bestDist = 0.08;
+      for (const target of snapTargets) {
+        if (target < minAllowed || target > maxAllowed) continue;
+        const dist = Math.abs(target - clamped);
+        if (dist <= bestDist) {
+          bestDist = dist;
+          best = target;
+        }
+      }
+      return Number(best.toFixed(2));
+    };
+
+    selectSegment(seg.id);
+    commitHistoryCheckpoint();
+    setDragInfo({
+      segmentId: seg.id,
+      edge,
+      time: initialEdgeTime,
+      duration: Number((seg.end - seg.start).toFixed(2)),
+    });
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - originX;
+      const snapped = snapTime(initialEdgeTime + dx / timelineZoom);
+      const nextDuration =
+        edge === "start"
+          ? Number((seg.end - snapped).toFixed(2))
+          : Number((snapped - seg.start).toFixed(2));
+      setDragInfo({
+        segmentId: seg.id,
+        edge,
+        time: snapped,
+        duration: nextDuration,
+      });
+      updateSegmentLocal(
+        edge === "start" ? { id: seg.id, start: snapped } : { id: seg.id, end: snapped },
+        { skipHistory: true },
+      );
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      setDragInfo(null);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+  };
+
   return (
     <div className="flex h-full select-none flex-col bg-[#222222] text-[12px]">
       {/* 紧凑工具条（右侧留足 pr-4，避免 + 按钮贴边裁切） */}
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] bg-[#222222] pl-3.5 pr-4">
-        <div className="flex min-w-0 items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2">
           <span className="shrink-0 text-[13px] font-medium text-primary">时间轴</span>
           <span className="truncate font-mono tabular-nums text-[11px] text-secondary">
             <span className="text-primary">{formatShortTime(currentTime)}</span> /{" "}
             {formatShortTime(duration)}
           </span>
+          {dragInfo && (
+            <span className="shrink-0 rounded-[3px] bg-[#181818] px-1.5 py-0.5 font-mono tabular-nums text-[10px] text-primary">
+              #{dragInfo.segmentId} {dragInfo.edge === "start" ? "入点" : "出点"}{" "}
+              {dragInfo.time.toFixed(2)}s · {dragInfo.duration.toFixed(2)}s
+            </span>
+          )}
         </div>
 
-        <div className="flex shrink-0 items-center gap-3">
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="hidden items-center gap-0.5 rounded-[4px] bg-[#181818] p-0.5 text-[10px] lg:flex">
+            {(
+              [
+                { id: "all", label: "全部" },
+                { id: "review", label: "待校对" },
+                { id: "pending", label: "待合成" },
+                { id: "issue", label: "异常" },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setSegmentFilter(tab.id)}
+                className={`rounded-[3px] px-1.5 py-0.5 transition-colors ${
+                  segmentFilter === tab.id
+                    ? "bg-[#333333] text-[#FFFFFF]"
+                    : "text-secondary hover:text-primary"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1 rounded-[4px] bg-[#181818] p-0.5">
+            <button
+              type="button"
+              onClick={() => addSegment()}
+              title="在播放头位置新增片段"
+              className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary"
+            >
+              <Plus className="h-3 w-3" strokeWidth={1.5} />
+              <span className="hidden sm:inline">新增</span>
+            </button>
+            <button
+              type="button"
+              disabled={!selectedSegment || selectedSegment.end - selectedSegment.start < 0.4}
+              onClick={() => selectedSegment && splitSegment(selectedSegment.id, currentTime)}
+              title="分割选中片段（按播放头位置或中点）"
+              className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
+            >
+              <Scissors className="h-3 w-3" strokeWidth={1.5} />
+              <span className="hidden sm:inline">分割</span>
+            </button>
+            <button
+              type="button"
+              disabled={!selectedSegment}
+              onClick={() => selectedSegment && mergeSegmentWithNext(selectedSegment.id)}
+              title="与下一个片段合并"
+              className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-primary disabled:opacity-35"
+            >
+              <GitMerge className="h-3 w-3" strokeWidth={1.5} />
+              <span className="hidden md:inline">合并</span>
+            </button>
+            <button
+              type="button"
+              disabled={!selectedSegment}
+              onClick={() => selectedSegment && deleteSegment(selectedSegment.id)}
+              title="删除选中片段"
+              className="flex h-6 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-secondary transition-colors hover:bg-[#333333] hover:text-status-error disabled:opacity-35"
+            >
+              <Trash2 className="h-3 w-3" strokeWidth={1.5} />
+            </button>
+          </div>
+
           {/* 次操作按钮：#2C2C2C 灰底 + 极淡边框 + 6px #D4933D 琥珀色圆点 */}
           <button
             type="button"
@@ -269,7 +510,10 @@ export const TimelinePR: React.FC = () => {
         </div>
 
         {/* 右侧可滚动轨道画布（#161616 深灰井） */}
-        <div className="relative flex-1 overflow-x-auto overflow-y-hidden bg-[#161616] pl-2.5">
+        <div
+          ref={scrollContainerRef}
+          className="relative flex-1 overflow-x-auto overflow-y-hidden bg-[#161616] pl-2.5"
+        >
           <div className="relative min-h-full" style={{ width: `${trackWidthPx}px` }}>
             {/* 贯穿所有轨道的极淡垂直虚线时间网格（rgba(255,255,255,0.05)） */}
             <div className="pointer-events-none absolute inset-x-0 bottom-0 top-6 z-0">
@@ -326,17 +570,28 @@ export const TimelinePR: React.FC = () => {
                 const speakerAccent = normalizeSpeakerColor(character?.color);
                 const slotDuration = Math.max(0.2, seg.end - seg.start);
                 const left = seg.start * timelineZoom;
-                const width = Math.max(80, slotDuration * timelineZoom);
+                const width = Math.max(6, slotDuration * timelineZoom);
                 const isSelected = seg.id === selectedSegmentId;
                 const isOverflow = isSegmentOverflow(seg);
+                const isDimmed = !matchesFilter(seg);
+                const tooltip = `#${seg.id} ${character?.display_name ?? seg.speaker} (${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s)\n${seg.target_text}`;
 
                 return (
-                  <button
+                  <div
                     key={seg.id}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
+                    title={tooltip}
                     onClick={() => {
                       selectSegment(seg.id);
                       setCurrentTime(seg.start);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        selectSegment(seg.id);
+                        setCurrentTime(seg.start);
+                      }
                     }}
                     style={{
                       left: `${left}px`,
@@ -344,47 +599,96 @@ export const TimelinePR: React.FC = () => {
                       borderColor: isSelected ? speakerAccent : "transparent",
                       borderLeftColor: speakerAccent,
                     }}
-                    className={`absolute inset-y-1.5 flex flex-col justify-between overflow-hidden rounded-[4px] border border-l-[3px] px-2 py-1 text-left transition-colors ${
-                      isSelected ? "bg-[#333333]" : "bg-[#2A2A2A] hover:bg-[#303030]"
-                    }`}
+                    className={`group absolute inset-y-1.5 flex cursor-pointer flex-col justify-between overflow-hidden rounded-[4px] border border-l-[3px] text-left transition-colors ${
+                      width >= 76 ? "px-2 py-1" : width >= 32 ? "px-1 py-1" : "px-0.5 py-1"
+                    } ${
+                      isSelected ? "z-10 bg-[#333333]" : "bg-[#2A2A2A] hover:bg-[#303030]"
+                    } ${isDimmed ? "opacity-25" : ""}`}
                   >
-                    <div className="flex items-center justify-between gap-1 text-[10px] leading-tight">
-                      <span className="truncate font-medium text-secondary">
-                        <span className="font-mono tabular-nums">#{seg.id}</span>{" "}
-                        {character?.display_name ?? seg.speaker}
-                      </span>
-                      <span
-                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                          seg.status === "ready"
-                            ? "bg-status-ready"
-                            : seg.status === "pending"
-                              ? "bg-status-warning"
-                              : "bg-status-error"
-                        }`}
-                      />
-                    </div>
+                    <div
+                      onPointerDown={(e) => beginEdgeResize(e, seg, "start")}
+                      title="拖拽调整入点"
+                      className="absolute inset-y-0 left-0 z-20 w-1.5 cursor-ew-resize bg-transparent transition-colors group-hover:bg-white/[0.12]"
+                    />
+                    <div
+                      onPointerDown={(e) => beginEdgeResize(e, seg, "end")}
+                      title="拖拽调整出点"
+                      className="absolute inset-y-0 right-0 z-20 w-1.5 cursor-ew-resize bg-transparent transition-colors group-hover:bg-white/[0.12]"
+                    />
 
-                    <p className="truncate text-[11px] leading-tight text-primary">
-                      {seg.target_text}
-                    </p>
+                    {width < 32 ? (
+                      <div className="flex h-full items-center justify-center">
+                        <span
+                          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                            seg.status === "ready"
+                              ? "bg-status-ready"
+                              : seg.status === "pending"
+                                ? "bg-status-warning"
+                                : "bg-status-error"
+                          }`}
+                        />
+                      </div>
+                    ) : width < 76 ? (
+                      <>
+                        <div className="flex items-center justify-between gap-0.5 text-[10px] leading-tight">
+                          <span className="truncate font-mono tabular-nums text-secondary">
+                            #{seg.id}
+                          </span>
+                          <span
+                            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                              seg.status === "ready"
+                                ? "bg-status-ready"
+                                : seg.status === "pending"
+                                  ? "bg-status-warning"
+                                  : "bg-status-error"
+                            }`}
+                          />
+                        </div>
+                        <p className="truncate text-[10px] leading-tight text-primary">
+                          {seg.target_text}
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between gap-1 text-[10px] leading-tight">
+                          <span className="truncate font-medium text-secondary">
+                            <span className="font-mono tabular-nums">#{seg.id}</span>{" "}
+                            {character?.display_name ?? seg.speaker}
+                          </span>
+                          <span
+                            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                              seg.status === "ready"
+                                ? "bg-status-ready"
+                                : seg.status === "pending"
+                                  ? "bg-status-warning"
+                                  : "bg-status-error"
+                            }`}
+                          />
+                        </div>
 
-                    <div className="flex items-center gap-1 text-[10px] leading-none">
-                      <span className="rounded-[3px] bg-black/25 px-1 py-0.5 text-secondary">
-                        {EMOTION_LABELS[seg.emotion]}
-                      </span>
-                      {seg.keep_original && (
-                        <span className="rounded-[3px] bg-black/25 px-1 py-0.5 text-status-ready">
-                          原声
-                        </span>
-                      )}
-                      {isOverflow && (
-                        <span className="flex items-center gap-0.5 rounded-[3px] bg-black/25 px-1 py-0.5 text-status-error">
-                          <AlertCircle className="h-2.5 w-2.5" strokeWidth={1.5} />
-                          超时
-                        </span>
-                      )}
-                    </div>
-                  </button>
+                        <p className="truncate text-[11px] leading-tight text-primary">
+                          {seg.target_text}
+                        </p>
+
+                        <div className="flex items-center gap-1 text-[10px] leading-none">
+                          <span className="rounded-[3px] bg-black/25 px-1 py-0.5 text-secondary">
+                            {EMOTION_LABELS[seg.emotion]}
+                          </span>
+                          {seg.keep_original && (
+                            <span className="rounded-[3px] bg-black/25 px-1 py-0.5 text-status-ready">
+                              原声
+                            </span>
+                          )}
+                          {isOverflow && (
+                            <span className="flex items-center gap-0.5 rounded-[3px] bg-black/25 px-1 py-0.5 text-status-error">
+                              <AlertCircle className="h-2.5 w-2.5" strokeWidth={1.5} />
+                              超时
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -400,20 +704,22 @@ export const TimelinePR: React.FC = () => {
                 className="pointer-events-none absolute inset-0 opacity-85"
                 style={{ width: `${duration * timelineZoom}px` }}
               />
-              <div
-                style={{ width: `${duration * timelineZoom}px` }}
-                className="pointer-events-none flex h-full items-center justify-between px-1"
-              >
-                {fallbackWaveBars.map((bar, i) => (
-                  <div
-                    key={`wave-bar-${i}-${bar.height}`}
-                    className={`w-[2px] rounded-[1px] ${
-                      bar.active ? "bg-[#B0B8C1]/65" : "bg-[#6E7681]/50"
-                    }`}
-                    style={{ height: `${bar.height}px` }}
-                  />
-                ))}
-              </div>
+              {!waveReady && (
+                <div
+                  style={{ width: `${duration * timelineZoom}px` }}
+                  className="pointer-events-none flex h-full items-center justify-between px-1"
+                >
+                  {fallbackWaveBars.map((bar, i) => (
+                    <div
+                      key={`wave-bar-${i}-${bar.height}`}
+                      className={`w-[2px] rounded-[1px] ${
+                        bar.active ? "bg-[#B0B8C1]/65" : "bg-[#6E7681]/50"
+                      }`}
+                      style={{ height: `${bar.height}px` }}
+                    />
+                  ))}
+                </div>
+              )}
               {/* 极淡 BGM 增益参考虚线 */}
               <div
                 className="pointer-events-none absolute left-0 border-t border-dashed border-white/[0.14]"

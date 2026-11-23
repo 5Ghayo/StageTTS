@@ -1,8 +1,20 @@
-import { useState } from "react";
-import { previewAutomaticReference, uploadReference } from "../../services/api";
+import { useCallback, useEffect, useState } from "react";
+import {
+  createVoicePreset,
+  deleteVoicePreset,
+  fetchVoicePresets,
+  previewAutomaticReference,
+  uploadReference,
+} from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
-import type { CharacterConfig, EmotionRef, EmotionType, ProjectScript } from "../../types/script";
+import type {
+  CharacterConfig,
+  EmotionRef,
+  EmotionType,
+  ProjectScript,
+  VoicePreset,
+} from "../../types/script";
 
 const emotions: Record<EmotionType, string> = {
   neutral: "平淡",
@@ -246,6 +258,7 @@ function SpeakerEditor({
           />
         </label>
       </details>
+      <VoicePresetLibrary speaker={speaker} character={character} busy={busy} />
       <details className="space-y-2 border-t border-white/10 pt-2">
         <summary className="cursor-pointer text-primary">说话人校对 · {segments.length} 句</summary>
         {segments.length > 0 && (
@@ -326,6 +339,144 @@ function SpeakerEditor({
         </div>
       </details>
     </div>
+  );
+}
+
+function VoicePresetLibrary({
+  speaker,
+  character,
+  busy,
+}: {
+  speaker: string;
+  character: CharacterConfig;
+  busy: boolean;
+}) {
+  const backendStatus = useProjectStore((s) => s.backendStatus);
+  const applyVoicePresetToCharacter = useProjectStore((s) => s.applyVoicePresetToCharacter);
+  const [presets, setPresets] = useState<VoicePreset[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [note, setNote] = useState("");
+
+  const loadPresets = useCallback(async () => {
+    if (backendStatus !== "online") {
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetchVoicePresets();
+      setPresets(res.presets);
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "加载音色预设失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [backendStatus]);
+
+  useEffect(() => {
+    void loadPresets();
+  }, [loadPresets]);
+
+  const handleSavePreset = async () => {
+    const cleanName = presetName.trim() || character.display_name || speaker;
+    setLoading(true);
+    setNote("");
+    try {
+      const created = await createVoicePreset({
+        name: cleanName,
+        speaking_style: character.speaking_style ?? "",
+        gpt_weights: character.gpt_weights ?? null,
+        sovits_weights: character.sovits_weights ?? null,
+        emotion_refs: character.emotion_refs,
+      });
+      setPresets((prev) => [created, ...prev]);
+      setPresetName("");
+      setNote(`已保存跨项目预设“${created.name}”`);
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "保存音色预设失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeletePreset = async (presetId: string) => {
+    setLoading(true);
+    setNote("");
+    try {
+      await deleteVoicePreset(presetId);
+      setPresets((prev) => prev.filter((item) => item.preset_id !== presetId));
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "删除预设失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <details className="space-y-2 border-t border-white/10 pt-2">
+      <summary className="cursor-pointer text-primary">跨项目音色预设库 ({presets.length})</summary>
+      <div className="flex gap-1">
+        <input
+          className={field}
+          aria-label="预设名称"
+          placeholder={`预设名（默认 ${character.display_name || speaker}）`}
+          value={presetName}
+          onChange={(e) => setPresetName(e.target.value)}
+        />
+        <button
+          className={`${button} shrink-0`}
+          type="button"
+          disabled={busy || loading || backendStatus !== "online"}
+          onClick={() => void handleSavePreset()}
+        >
+          存为预设
+        </button>
+      </div>
+      {note && <div className="text-[11px] text-secondary">{note}</div>}
+      {presets.length === 0 ? (
+        <div className="text-[11px] text-muted">
+          {backendStatus === "online" ? "暂无全局音色预设" : "连接后端后可使用跨项目预设库"}
+        </div>
+      ) : (
+        <ul className="max-h-40 space-y-1 overflow-y-auto">
+          {presets.map((preset) => (
+            <li
+              key={preset.preset_id}
+              className="flex items-center justify-between gap-1 rounded bg-[#181818] px-2 py-1 text-[11px]"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-primary">{preset.name}</div>
+                <div className="truncate font-mono tabular-nums text-[10px] text-muted">
+                  参考音 {Object.keys(preset.emotion_refs).length} 项
+                  {preset.gpt_weights ? " · 含权重" : ""}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  disabled={busy || loading}
+                  onClick={() => {
+                    applyVoicePresetToCharacter(speaker, preset);
+                    setNote(`已套用预设“${preset.name}”`);
+                  }}
+                  className={button}
+                >
+                  套用
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || loading}
+                  onClick={() => void handleDeletePreset(preset.preset_id)}
+                  className="rounded bg-[#2C2C2C] px-2 py-1.5 text-status-error hover:bg-[#3A2828] disabled:opacity-40"
+                >
+                  删除
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
   );
 }
 

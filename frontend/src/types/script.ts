@@ -25,6 +25,8 @@ export type SubtitleLayout = Exclude<SubtitleBurnMode, "none">;
 export type SegmentPatch = { id: Segment["id"] } & Partial<
   Pick<
     Segment,
+    | "start"
+    | "end"
     | "speaker"
     | "orig_text"
     | "alignment_needs_review"
@@ -57,3 +59,9 @@ export type ExportDirOption = components["schemas"]["ExportDirOption"];
 export type ExportDirsResponse = components["schemas"]["ExportDirsResponse"];
 export type RenderRequest = components["schemas"]["RenderRequest"];
 export type RenderResponse = components["schemas"]["RenderResponse"];
+export type ScriptSnapshotMeta = components["schemas"]["ScriptSnapshotMeta"];
+export type ScriptSnapshotListResponse = components["schemas"]["ScriptSnapshotListResponse"];
+export type VoicePreset = components["schemas"]["VoicePreset"];
+export type VoicePresetCreateRequest = components["schemas"]["VoicePresetCreateRequest"];
+export type VoicePresetListResponse = components["schemas"]["VoicePresetListResponse"];
+export type VoicePresetDeleteResponse = components["schemas"]["VoicePresetDeleteResponse"];
