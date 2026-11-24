@@ -6,7 +6,58 @@ import argparse
 import json
 import math
 import sys
+import tempfile
 from pathlib import Path
+
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def apply_diarizen_override(source: str) -> str:
+    """Replace only the pinned Emilia diarizer, retaining its ASR/VAD/filter/export."""
+    import_line = "from pyannote.audio import Pipeline"
+    start_marker = '    if not cfg["huggingface_token"].startswith("hf"):'
+    end_marker = "    dia_pipeline.to(device)"
+    if source.count(import_line) != 1 or source.count(start_marker) != 1 or source.count(end_marker) != 1:
+        raise ValueError("Unexpected Emilia diarization source; refusing to run the old model")
+    source = source.replace(import_line, "", 1)
+    start = source.index(start_marker)
+    end = source.index(end_marker, start) + len(end_marker)
+    source = source[:start] + "    dia_pipeline = stage_tts_diarizen_pipeline" + source[end:]
+    call = "    speakerdia = speaker_diarization(audio)"
+    if source.count(call) != 1:
+        raise ValueError("Unexpected Emilia processing function")
+    return source.replace(call, call + "\n    stage_tts_diarizen_pipeline.save_report(save_path)", 1)
+
+
+class EmiliaDiarizenPipeline:
+    """Adapt Emilia's waveform call to the isolated, local-only speaker worker."""
+
+    def __init__(self, settings: dict):
+        self.settings = settings
+        self.last_result = None
+
+    def save_report(self, directory):
+        (Path(directory) / "speaker_analysis.json").write_text(
+            json.dumps(self.last_result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def __call__(self, audio):
+        import soundfile as sf
+        from pyannote.core import Annotation, Segment
+
+        from workers.emilia_segments import exclusive_turns
+        from workers.speaker_pipeline import run_speaker_job
+
+        waveform = audio["waveform"].detach().cpu().numpy()
+        with tempfile.TemporaryDirectory(prefix="stagetts_emilia_diarizen_") as temporary:
+            path = Path(temporary) / "dialogue.wav"
+            sf.write(str(path), waveform.mean(axis=0), audio["sample_rate"])
+            result = run_speaker_job(path, self.settings)
+        self.last_result = result
+        annotation = Annotation()
+        for index, (start, end, label) in enumerate(exclusive_turns(result["diarization_spans"])):
+            annotation[Segment(start, end), index] = label
+        return annotation
 
 
 def apply_filter_overrides(
@@ -55,15 +106,22 @@ def main() -> None:
     parser.add_argument("--min-silence-ms", type=int, default=150)
     parser.add_argument("--tail-ms", type=int, default=150)
     parser.add_argument("--turn-boundaries", type=Path)
+    parser.add_argument("--diarization-settings", type=Path, required=True)
     args, official_args = parser.parse_known_args()
     entrypoint = args.entrypoint.resolve()
     source = apply_filter_overrides(
         entrypoint.read_text(encoding="utf-8"), args.min_clip_seconds, args.min_dnsmos,
         fine_turns=args.fine_turns,
     )
+    source = apply_diarizen_override(source)
     sys.path.insert(0, str(entrypoint.parent))
     sys.argv = [str(entrypoint), *official_args]
     launch = {"__name__": "__main__", "__file__": str(entrypoint), "__package__": None}
+    from workers.speaker_pipeline import run_speaker_job
+
+    settings = json.loads(args.diarization_settings.read_text(encoding="utf-8"))
+    run_speaker_job(None, settings, preflight=True)
+    launch["stage_tts_diarizen_pipeline"] = EmiliaDiarizenPipeline(settings)
     if args.fine_turns:
         from emilia_segments import pad_exported_tails, refine_turns
 

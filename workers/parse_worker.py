@@ -1,4 +1,4 @@
-"""独立感知解析 Worker（运行在 env_parse：PyTorch cu128 + Banquet + WhisperX + pyannote）。
+"""独立感知解析 Worker（运行在 env_parse：Banquet + WhisperX 转写；DiariZen 独立运行）。
 
 由 backend/services/task_runner.py 通过 subprocess.run 启动，进程退出时由 OS 100% 释放显存。
 严禁在 env_backend 中直接导入本文件或依赖。
@@ -6,8 +6,8 @@
 四阶段流水线：
   Stage 0: FFmpeg 抽取标准 WAV 并探测媒体精确时长
   Stage 1: Banquet 分离对白、歌声、伴奏和音效
-  Stage 2: WhisperX 语音识别 + 词级时间戳对齐（含 CUDA OOM 自动降级 int8 / cpu）
-  Stage 3: pyannote 3.x 说话人聚类（跳过、缺失 Token 或失败时标记 UNKNOWN 待人工确认）
+  Stage 2: WhisperX 转写与词级对齐
+  Stage 3: 独立 DiariZen 说话人分离
   Stage 4: LLM 导演口语化翻译、情绪/动作/原声叹词标注，校验并落盘 script.json
 """
 
@@ -27,7 +27,6 @@ import sys
 import tempfile
 import threading
 import time
-import wave
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -593,6 +592,16 @@ def _mark_overlapping_activity(segments: List[Dict[str, Any]], activity_rows: Li
             seg["speaker_fallback_reason"] = seg.get("speaker_fallback_reason") or "overlapping_speaker_activity"
 
 
+def _speaker_settings(device: str) -> dict:
+    return {
+        "python": config.ENV_DIARIZATION_PYTHON,
+        "model_path": str(config.DIARIZEN_MODEL_PATH or ""),
+        "embedding_path": str(config.DIARIZEN_EMBEDDING_PATH or ""),
+        "device": device, "batch_size": config.DIARIZEN_BATCH_SIZE,
+        "timeout": config.PARSE_TIMEOUT_SEC,
+    }
+
+
 def _stage_diarize(
     audio: Any,
     aligned_result: Dict[str, Any],
@@ -601,158 +610,47 @@ def _stage_diarize(
     evidence_context: Optional[Dict[str, Any]] = None,
     language: str | None = None,
 ) -> List[Dict[str, Any]]:
-    """阶段 3：pyannote 说话人聚类与词级分配；无证据时明确保留待确认状态。"""
-    original_result = copy.deepcopy(aligned_result)
-    segments = original_result.get("segments") or []
+    """DiariZen activity -> existing aligned transcript.
+
+    ``audio`` is now the dialogue WAV path, never a WhisperX numpy array.
+    Model failure is explicit and cannot publish stale or single-speaker labels.
+    """
+    from workers.speaker_pipeline import assign_transcript, run_speaker_job
+
+    original = copy.deepcopy(aligned_result.get("segments") or [])
     if evidence_context is not None:
-        evidence_context.update(raw_segments=copy.deepcopy(segments), diarization_spans=[],
-                                exclusive_spans=[], fallback_reason=None)
-
-    def fallback(reason: str) -> List[Dict[str, Any]]:
-        if evidence_context is not None:
-            evidence_context["fallback_reason"] = reason
-        return _unknown_speaker_segments(segments, reason, language=language)
-
-    if not segments:
-        return []
-
+        evidence_context.update(raw_segments=copy.deepcopy(original), diarization_spans=[],
+                                exclusive_spans=[], fallback_reason=None,
+                                diarization_backend="diarizen")
     if skip_diarization:
-        _log("Stage3", "已通过参数跳过说话人聚类，全部片段标记 UNKNOWN 待确认")
-        return fallback("diarization_skipped")
-    if not config.is_hf_token_configured():
-        _log("Stage3", "未配置有效 HF_TOKEN，全部片段标记 UNKNOWN 待确认")
-        return fallback("hf_token_missing")
-
-    _enable_pyannote_torch_load_compat()
-    try:
-        from whisperx.diarize import DiarizationPipeline, assign_word_speakers
-    except Exception as exc:
-        _log("Stage3", f"无法加载说话人聚类，待人工校对：{str(exc)[:220]}")
-        return fallback("diarization_import_failed")
-
-    attempts = [device, "cpu"] if device == "cuda" else ["cpu"]
-    for diar_dev in attempts:
-        diarize_model = None
-        try:
-            _log("Stage3", f"启动 pyannote/speaker-diarization-3.1 (device={diar_dev})...")
-            diarize_model = DiarizationPipeline(
-                model_name="pyannote/speaker-diarization-3.1",
-                use_auth_token=config.HF_TOKEN,
-                device=diar_dev,
-            )
-            diarize_df = diarize_model(audio)
-            activity_rows = _diarization_activity_rows(diarize_df) if evidence_context is not None else []
-            if evidence_context is not None:
-                evidence_context["diarization_spans"] = activity_rows
-                evidence_context["device"] = diar_dev
-            # WhisperX mutates its argument: isolate speaker assignment from the
-            # immutable source ASR snapshot and from a possible device retry.
-            assigned = assign_word_speakers(diarize_df, copy.deepcopy(original_result), fill_nearest=False)
-            assigned_segments = assigned.get("segments") or []
-            if not assigned_segments:
-                return fallback("speaker_assignment_missing")
-            _log("Stage3", f"说话人聚类完成 ({diar_dev})")
-            normalized = _review_assigned_speakers(assigned_segments, language=language)
-            _mark_overlapping_activity(normalized, activity_rows)
-            return normalized
-        except Exception as exc:
-            _log("Stage3", f"说话人聚类 ({diar_dev}) 失败：{str(exc)[:220]}")
-        finally:
-            if diarize_model is not None:
-                del diarize_model
-            _release_cuda_memory()
-
-    _log("Stage3", "pyannote 聚类不可用，全部片段标记 UNKNOWN 待确认")
-    return fallback("diarization_failed")
-
-
-def _moss_model_request() -> Dict[str, Any]:
-    if not config.MOSS_MODEL_PATH or not config.MOSS_REVISION or not config.MOSS_CUSTOM_CODE_APPROVED:
-        raise RuntimeError("MOSS backend is not configured: local model/revision/custom-code approval required; no legacy fallback")
-    return {"id": "OpenMOSS-Team/MOSS-Transcribe-Diarize", "local_path": str(config.MOSS_MODEL_PATH),
-            "revision": config.MOSS_REVISION, "transformers_version": config.MOSS_TRANSFORMERS_VERSION,
-            "torch_version": config.MOSS_TORCH_VERSION, "custom_code_approved": config.MOSS_CUSTOM_CODE_APPROVED}
-
-
-def _preflight_moss(device: str) -> None:
-    from workers.moss_worker import validate_request
-    try:
-        validate_request({"version": "1.0", "model": _moss_model_request(),
-                          "source": {"id": "preflight", "kind": "dialogue"},
-                          "device": "cuda:0" if device == "cuda" else "cpu",
-                          "max_audio_seconds": config.MOSS_MAX_AUDIO_SECONDS,
-                          "max_new_tokens": config.MOSS_MAX_NEW_TOKENS}, model_only=True)
-    except (OSError, ValueError, TypeError, importlib.metadata.PackageNotFoundError) as exc:
-        raise RuntimeError(f"MOSS preflight failed before separation: {exc}; no legacy fallback") from exc
-
-
-def _stage_moss_transcribe(vocals_wav: Path, device: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
-    """Joint ASR/speaker generation with source segment timestamps, not word alignment."""
-    from workers.moss_worker import run_request as run_moss
-
-    if not config.MOSS_MODEL_PATH or not config.MOSS_REVISION or not config.MOSS_CUSTOM_CODE_APPROVED:
-        raise RuntimeError("MOSS backend is not configured: local model/revision/custom-code approval required; no legacy fallback")
-    source_digest = hashlib.sha256()
-    with vocals_wav.open("rb") as source_file:
-        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
-            source_digest.update(chunk)
-    source_id = f"sha256:{source_digest.hexdigest()}"
-    with tempfile.TemporaryDirectory(prefix="moss_input_", dir=vocals_wav.parent) as temporary:
-        mono = Path(temporary) / "dialogue_16k.wav"
-        conversion = subprocess.run(
-            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(vocals_wav),
-             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(mono)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
-        )
-        if conversion.returncode != 0 or not mono.is_file():
-            raise RuntimeError(f"MOSS explicit 16k mono conversion failed: {conversion.stderr[-500:]}")
-        request = {
-            "version": "1.0", "model": _moss_model_request(),
-            "source": {"id": source_id, "kind": "dialogue", "audio_path": str(mono.resolve()),
-                       "window_id": "whole_recording"},
-            "device": "cuda:0" if device == "cuda" else "cpu",
-            "max_audio_seconds": config.MOSS_MAX_AUDIO_SECONDS,
-            "max_new_tokens": config.MOSS_MAX_NEW_TOKENS,
-        }
-        try:
-            result = run_moss(request)
-        finally:
-            _release_cuda_memory()
-    if result.get("status") not in {"ok", "partial"} or not result.get("segments"):
-        raise RuntimeError(f"MOSS transcription did not complete: {result.get('error') or result.get('review_reasons')}; no legacy fallback")
-    # A token-limit/invalid stream must be reviewed before publishing a source script.
-    blocking_reasons = [reason for reason in result.get("review_reasons", [])
-                        if reason != "source_wave_tail_within_explicit_0.05s_budget_tolerance"]
-    if blocking_reasons:
-        raise RuntimeError(f"MOSS generation requires review before import: {blocking_reasons}")
-    scope_hash = hashlib.sha256(f"{source_id}:whole_recording".encode()).hexdigest()[:12]
-    raw_segments, normalized, spans = [], [], []
-    for index, row in enumerate(result["segments"]):
-        label = str(row.get("speaker") or "UNKNOWN")
-        speaker = f"MOSS_{scope_hash}_{label}" if label != "UNKNOWN" else "UNKNOWN"
-        raw_segments.append({"start": row["start"], "end": row["end"], "text": row["text"], "words": [],
-                             "generated_start": row.get("generated_start", row["start"]),
-                             "generated_end": row.get("generated_end", row["end"]),
-                             "review_reasons": [*row.get("review_reasons", []), *result.get("review_reasons", [])]})
-        normalized.append({"id": index, "start": row["start"], "end": row["end"], "speaker": speaker,
-                           "orig_text": row["text"], "words": [], "alignment_needs_review": True,
-                           "alignment_granularity": "segment", "timing_source": "moss_joint_generated",
-                           "segment_timing_needs_review": True,
-                           "speaker_needs_review": True,
-                           "speaker_fallback_reason": "moss_joint_generated_segment_requires_review"})
-        if speaker != "UNKNOWN":
-            spans.append({"start": row["start"], "end": row["end"], "speaker": speaker,
-                          "review_reasons": ["moss_joint_generated_activity_unvalidated", *row.get("review_reasons", [])]})
-    context = {"raw_segments": raw_segments, "diarization_spans": spans, "exclusive_spans": [],
-               "fallback_reason": "moss_joint_generated_segment_requires_review", "backend": "moss",
-               "raw_generation": result["raw_text"], "speaker_scope": f"{source_id}:whole_recording",
-               "model_revision": config.MOSS_REVISION, "device": request["device"],
-               "source_audio_id": source_id,
-               "source_wave_duration": result.get("duration_seconds"),
-               "input_audio_budget_seconds": result.get("audio_budget_seconds"),
-               "input_media_tail_tolerance_seconds": result.get("media_tail_tolerance_seconds"),
-               "preprocessing": "ffmpeg_pcm16_mono_16000_whole_recording"}
-    return normalized, context, ""
+        if evidence_context is not None:
+            evidence_context["fallback_reason"] = "diarization_skipped"
+        return _unknown_speaker_segments(original, "diarization_skipped", language=language)
+    _log("Stage3", f"DiariZen Large v2 (device={device})")
+    result = run_speaker_job(Path(audio), _speaker_settings(device))
+    spans = result["diarization_spans"]
+    if evidence_context is not None:
+        evidence_context.update(diarization_spans=spans, device=device,
+                                diarization_revision=result.get("model_revision"),
+                                speaker_scope=f"sha256:{result.get('source_audio_sha256')}:whole_recording")
+    # Retain original and recording-scoped DiariZen labels for audit.
+    report = Path(audio).parent / "speaker_analysis.json"
+    report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if evidence_context is not None:
+        evidence_context["speaker_analysis_path"] = str(report)
+    assigned = assign_transcript(original, spans)
+    normalized = _review_assigned_speakers(assigned, language=language)
+    # Normalization may split words at a real speaker change; reassess each output range.
+    from workers.speaker_pipeline import assign_interval
+    for part in normalized:
+        label, reason = assign_interval(part["start"], part["end"], spans)
+        part["speaker"] = label
+        part["speaker_needs_review"] = bool(reason) or not part.get("words") or any(
+            w.get("speaker") is None for w in part.get("words", []))
+        part.pop("speaker_fallback_reason", None)
+        if reason or part["speaker_needs_review"]:
+            part["speaker_fallback_reason"] = reason or "word_speaker_missing"
+    return normalized
 
 
 def _project_media_url(path: Path, project_dir: Path, project_id: str) -> str:
@@ -836,30 +734,19 @@ def _build_and_save_script(
                 return importlib.metadata.version(name)
             except importlib.metadata.PackageNotFoundError:
                 return None
-        backend = evidence_context.get("backend", "legacy")
         provenance = [
-            EvidenceProvenance(stage="asr", model=("OpenMOSS-Team/MOSS-Transcribe-Diarize" if backend == "moss"
-                                                   else getattr(args, "whisper_model", None)),
-                               model_version=(evidence_context.get("model_revision") if backend == "moss" else package_version("whisperx")),
-                               source_id=source_id,
-                               parameters={"audio_source": "dialogue", "language": getattr(args, "source_lang", None) or detected_lang or None,
-                                           "timestamp_granularity": "segment" if backend == "moss" else "word_or_unknown",
-                                           "preprocessing": evidence_context.get("preprocessing"),
-                                           "source_audio_id": evidence_context.get("source_audio_id"),
-                                           "source_wave_duration": evidence_context.get("source_wave_duration"),
-                                           "input_audio_budget_seconds": evidence_context.get("input_audio_budget_seconds"),
-                                           "input_media_tail_tolerance_seconds": evidence_context.get("input_media_tail_tolerance_seconds"),
-                                           "source_language_kind": "user_declared" if getattr(args, "source_lang", None) else (
-                                               "model_detected" if detected_lang else "unknown")}),
-            EvidenceProvenance(stage="diarization", model=("OpenMOSS-Team/MOSS-Transcribe-Diarize" if backend == "moss"
-                                                           else "pyannote/speaker-diarization-3.1"),
-                               model_version=(evidence_context.get("model_revision") if backend == "moss" else package_version("pyannote.audio")),
-                               source_id=source_id,
+            EvidenceProvenance(stage="asr", model=getattr(args, "whisper_model", "large-v3"),
+                               model_version=package_version("whisperx"), source_id=source_id,
+                               parameters={"audio_source": "dialogue", "language": detected_lang,
+                                           "timestamp_granularity": "word_or_unknown"}),
+            EvidenceProvenance(stage="diarization", model="BUT-FIT/diarizen-wavlm-large-s80-md-v2",
+                               model_version=evidence_context.get("diarization_revision"), source_id=source_id,
                                parameters={"audio_source": "dialogue", "device": evidence_context.get("device"),
                                            "fallback_reason": evidence_context.get("fallback_reason"),
                                            "speaker_scope": evidence_context.get("speaker_scope"),
-                                           "timestamp_correction_policy": "clamp_source_bounds_tolerance_0.05s" if backend == "moss" else None,
-                                           "activity_kind": "joint_generated_derived_timestamps" if backend == "moss" else "diarizer_activity"}),
+                                           "speaker_analysis_path": evidence_context.get("speaker_analysis_path"),
+                                           "timestamp_correction_policy": "intersect_frame_activity_with_source_bounds",
+                                           "activity_kind": "diarizer_activity"}),
         ]
         evidence = build_source_evidence(
             evidence_context.get("raw_segments") or [], evidence_context.get("diarization_spans") or [],
@@ -875,6 +762,7 @@ def _build_and_save_script(
         mode=args.mode,
         source_lang=getattr(args, "source_lang", None) or (existing.source_lang if existing else None) or detected_lang or None,
         glossary=existing.glossary if existing else {},
+        tts_engine=existing.tts_engine if existing else "gpt_sovits_v5",
         media=MediaInfo(
             source_video=source_video_url,
             vocals_wav=_project_media_url(vocals_wav, args.output_dir, project_id),
@@ -889,8 +777,6 @@ def _build_and_save_script(
         evidence=evidence,
     )
 
-    if evidence_context and evidence_context.get("backend") == "moss" and not script.source_lang:
-        _log("Stage3", "MOSS未检测源语种，请到翻译设置确认原声语言；确认前自动参考不可用，不能用目标语种代填")
     if args.skip_llm or not config.is_llm_configured():
         _log("Stage4", "跳过翻译或未配置 LLM，保留识别原文")
     elif segments:
@@ -915,7 +801,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, type=Path, help="项目输出目录 workspace/{project_id}")
     parser.add_argument("--target-lang", default="zh", help="目标配音语种（默认 zh）")
     parser.add_argument("--source-lang", choices=["zh", "en", "ja", "ko", "yue"], default=None,
-                        help="人工声明源音频语种；MOSS不输出语言检测，留空待确认，不使用目标语种代填")
+                        help="人工声明源音频语种；留空由 WhisperX 检测")
     parser.add_argument(
         "--mode",
         default="video_dubbing",
@@ -928,9 +814,7 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cuda", "cpu"],
         help="计算设备（默认 auto 自动探测 CUDA 并支持 OOM 降级）",
     )
-    parser.add_argument("--parse-backend", choices=["moss", "legacy"], default=None,
-                        help="解析后端，默认 PARSE_BACKEND=moss；legacy 为显式旧链回滚")
-    parser.add_argument("--skip-diarization", action="store_true", help="仅 legacy：跳过 pyannote 说话人聚类")
+    parser.add_argument("--skip-diarization", action="store_true", help="跳过 DiariZen 说话人分离")
     parser.add_argument("--skip-llm", action="store_true", help="跳过 LLM 翻译与情绪标注")
     return parser.parse_args()
 
@@ -949,18 +833,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     device = _resolve_device(args.device)
-    backend = getattr(args, "parse_backend", None) or config.PARSE_BACKEND
-    if backend not in {"moss", "legacy"}:
-        raise RuntimeError(f"Unknown parse backend: {backend}; no automatic fallback")
-    model_summary = (f"MOSS revision={config.MOSS_REVISION or '(not configured)'}, timestamps=segment"
-                     if backend == "moss" else "legacy WhisperX + pyannote")
-    _log(
-        "Init",
-        f"project={args.project_id}, backend={backend}, device={device}, {model_summary}, "
-        f"HF_HOME={os.getenv('HF_HOME', '(default)')}, TORCH_HOME={os.getenv('TORCH_HOME', '(default)')}",
-    )
-    if backend == "moss":
-        _preflight_moss(device)
+    _log("Init", f"project={args.project_id}, device={device}, WhisperX + DiariZen")
 
     # Publish new audio separately so a failed reparse preserves the previous script's tracks.
     cinematic_dir = Path(tempfile.mkdtemp(prefix="cinematic-", dir=args.output_dir))
@@ -968,36 +841,27 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         with tempfile.TemporaryDirectory(prefix="stagetts_work_") as work_tmp:
             extracted_wav = Path(work_tmp) / "extracted_audio.wav"
             duration = _extract_wav_and_probe(args.input, extracted_wav)
-            if backend == "moss":
-                with wave.open(str(extracted_wav), "rb") as extracted_audio:
-                    waveform_duration = extracted_audio.getnframes() / extracted_audio.getframerate()
-                if not 0 < waveform_duration <= min(config.MOSS_MAX_AUDIO_SECONDS, 60.0) + 0.05:
-                    raise RuntimeError(f"MOSS initial audio budget exceeded or unknown waveform duration: {waveform_duration:.6f}s; "
-                                       "long-window strategy requires explicit validation before separation")
+            if not getattr(args, "skip_diarization", False):
+                from workers.speaker_pipeline import run_speaker_job
+                run_speaker_job(None, _speaker_settings(device), preflight=True)
             _stage_banquet(extracted_wav, cinematic_dir, device)
             vocals_wav, bgm_wav, cinematic_stems = _finish_four_stems(cinematic_dir, args.project_id)
 
-        if backend == "moss":
-            _log("Stage2", "MOSS joint ASR + speaker segment timestamps (no word alignment)")
-            raw_segments, evidence_context, detected_lang = _stage_moss_transcribe(vocals_wav, device)
-        elif backend == "legacy":
-            audio, aligned_result, detected_lang = _stage_whisperx_asr_align(
-                vocals_wav=vocals_wav,
-                compute_type=getattr(args, "compute_type", "float16"),
-                whisper_model=getattr(args, "whisper_model", "large-v3"),
-                device=device,
-            )
-            evidence_context: Dict[str, Any] = {}
-            raw_segments = _stage_diarize(
-                audio=audio,
-                aligned_result=aligned_result,
-                device=device,
-                skip_diarization=args.skip_diarization,
-                evidence_context=evidence_context,
-                language=detected_lang,
-            )
-        else:
-            raise RuntimeError(f"Unknown parse backend: {backend}; no automatic fallback")
+        audio, aligned_result, detected_lang = _stage_whisperx_asr_align(
+            vocals_wav=vocals_wav,
+            compute_type=getattr(args, "compute_type", "float16"),
+            whisper_model=getattr(args, "whisper_model", "large-v3"),
+            device=device,
+        )
+        evidence_context: Dict[str, Any] = {}
+        raw_segments = _stage_diarize(
+            audio=vocals_wav,
+            aligned_result=aligned_result,
+            device=device,
+            skip_diarization=args.skip_diarization,
+            evidence_context=evidence_context,
+            language=detected_lang,
+        )
         review_count = sum(seg["alignment_needs_review"] or seg["speaker_needs_review"] for seg in raw_segments)
         if review_count:
             _log("Stage3", f"{review_count} 条片段的原文范围或说话人待人工校对")

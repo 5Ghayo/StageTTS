@@ -76,15 +76,15 @@ function createInitialNodes(config: PipelineConfig): StageFlowNode[] {
       type: "stageNode",
       position: { x: 500, y: 18 },
       data: {
-        title: "MOSS 语音识别与角色",
+        title: "WhisperX 识别与 DiariZen 角色",
         category: "parse",
         env: "env_parse",
-        vramGb: 2.0,
+        vramGb: null,
         status: "idle",
         inputs: [{ id: "in-vocals", label: "对白轨", type: "AUDIO" }],
         outputs: [{ id: "out-turns", label: "角色时间段", type: "SEGMENTS" }],
-        summary: "MOSS BF16 · 实测峰值约 2.0 GB（最长 60 秒样例）",
-        params: { model: "OpenMOSS-Team/MOSS-Transcribe-Diarize", precision: "bfloat16", max_audio_seconds: 60 },
+        summary: "WhisperX 识别对齐 · DiariZen 独立分离",
+        params: { model: "WhisperX + DiariZen" },
       },
     },
     {
@@ -286,6 +286,7 @@ function makeLog(
 const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
   targetLang: "zh",
   burnWatermark: false,
+  burnSubtitles: "none",
 };
 
 export function workflowPreflight(script: ProjectScript, config: PipelineConfig & { startStep: PipelineStartStep }, parseOnly: boolean): string | null {
@@ -454,7 +455,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       if (state.isPipelineRunning) return state;
       const nextConfig = { ...state.pipelineConfig, ...patch };
       const nodes = state.nodes.map((node) => {
-        if (node.id === "whisperx") return { ...node, data: { ...node.data, vramGb: 2.0, summary: "MOSS BF16 · 实测峰值约 2.0 GB（最长 60 秒样例）" } };
+        if (node.id === "whisperx") return { ...node, data: { ...node.data, vramGb: null, summary: "WhisperX 识别对齐 · DiariZen 独立分离" } };
         if (node.id === "llm_tagger") {
           const lang = nextConfig.targetLang === "zh" ? "中文" : nextConfig.targetLang === "en" ? "英文" : "日语";
           return { ...node, data: { ...node.data, summary: `目标语言: ${lang}`, params: { ...node.data.params, target_lang: nextConfig.targetLang } } };
@@ -591,7 +592,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         setActiveEdges(["e-input-banquet"]);
         get().appendLog(
           "env_parse",
-          `启动真实 4 阶段解析：项目 ${activeScript.project_id}（目标语种=${cfg.targetLang}，MOSS BF16/SDPA）`,
+          `启动真实 4 阶段解析：项目 ${activeScript.project_id}（目标语种=${cfg.targetLang}，WhisperX + DiariZen）`,
           "info",
         );
 
@@ -742,7 +743,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       }
 
       // -------------------------------------------------------------------
-      // 阶段 B：调用真实后端 POST /api/projects/{id}/synthesize（GPT-SoVITS）
+      // 阶段 B：调用真实后端 POST /api/projects/{id}/synthesize
       // -------------------------------------------------------------------
       if (needsSynthesize) {
         if (!await beforeNextStep("语音合成")) return;
@@ -800,7 +801,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       setNodeStatus("virtual_stage_out", "running");
       get().appendLog("env_backend", "正在执行毫秒拼轨与 FFmpeg 混音封装...", "info");
 
-      const renderRes = await renderVideo(activeScript.project_id, cfg.burnWatermark);
+      const renderRes = await renderVideo(activeScript.project_id, {
+        burn_watermark: cfg.burnWatermark, burn_subtitles: cfg.burnSubtitles,
+      });
       activeScript = {
         ...activeScript,
         media: { ...activeScript.media, output_video: renderRes.output_video },
@@ -883,7 +886,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
     setNodeStatus("whisperx", "running");
     setActiveEdges(["e-whisper-llm"]);
-    get().appendLog("env_parse", `MOSS BF16/SDPA 语音识别与窗口内匿名说话人分类`, "info");
+    get().appendLog("env_parse", `WhisperX + DiariZen 语音识别与窗口内匿名说话人分类`, "info");
     await sleep(600);
     setNodeStatus("whisperx", "done");
 

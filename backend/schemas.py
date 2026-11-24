@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 ProjectMode = Literal["video_dubbing", "virtual_stage"]
+TTSEngine = Literal["gpt_sovits_v5", "gpt_sovits_v2"]
 EmotionType = Literal["neutral", "angry", "happy", "sad", "whisper"]
 SegmentStatus = Literal["pending", "synthesizing", "ready", "error"]
 AvatarType = Literal["live2d", "vrm"]
@@ -300,6 +301,7 @@ class Segment(BaseModel):
     boundary_provenance: List[BoundaryEvidence] = Field(default_factory=list)
     boundary_review_reasons: List[str] = Field(default_factory=list)
     alignment_granularity: Literal["unknown", "segment", "word"] = "unknown"
+    # Retain the retired parser tag only to load existing project files.
     timing_source: Literal["unknown", "moss_joint_generated", "forced_alignment", "manual"] = "unknown"
     segment_timing_needs_review: bool = True
     alignment_needs_review: bool = True
@@ -342,6 +344,7 @@ class ProjectScript(BaseModel):
 
     project_id: str = Field(min_length=1, description="项目唯一标识")
     mode: ProjectMode = Field(default="video_dubbing", description="工作模式")
+    tts_engine: TTSEngine = "gpt_sovits_v5"
     media: MediaInfo
     source_lang: str | None = None
     glossary: Dict[str, str] = Field(default_factory=dict, json_schema_extra={"default": {}})

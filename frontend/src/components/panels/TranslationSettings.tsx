@@ -54,7 +54,7 @@ export function TranslationSettings({ script }: { script: ProjectScript }) {
           onChange={(e) => setSourceLang(e.target.value)}
           disabled={busy || pipelineRunning}
         >
-          <option value="">待确认（MOSS 不自动检测）</option>
+          <option value="">待确认（解析时自动检测）</option>
           <option value="ja">日语</option>
           <option value="en">英语</option>
           <option value="zh">普通话</option>

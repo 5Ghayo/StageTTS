@@ -6,11 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
-from workers.emilia_runner import apply_filter_overrides
+from workers.emilia_runner import apply_diarizen_override, apply_filter_overrides
 from workers.emilia_segments import exclusive_turns, pad_exported_tails, split_turns_at_boundaries
-from workers.moss_runner import export_segments
 from workers.research_training import character_for_clip, load_config, overlap_windows, prepare_dataset
-from workers.research_voice_corpus import select_members
 from workers.subtitle_boundaries import detect_subtitle_boundaries, srt_cut_seconds
 
 
@@ -18,54 +16,27 @@ def turn(speaker, start, end, needs_review=False):
     return {"speaker": speaker, "start": start, "end": end, "speaker_needs_review": needs_review}
 
 
-def test_cluster_ranking_preserves_corpus_indices():
-    ranking = select_members([22, 47, 91], [0.64, 0.42, 0.88], 0.50)
-
-    assert ranking == [(91, 0.88), (22, 0.64)]
-
-
-def test_moss_export_clamps_tail_and_preserves_speaker_and_speech_end(tmp_path):
-    source = tmp_path / "original.wav"
-    segment = {"start": 1.0, "end": 1.95, "speaker": "S02", "text": "はい"}
-    with (
-        patch("workers.moss_runner.subprocess.check_output", return_value="2.0\n"),
-        patch("workers.moss_runner.subprocess.run") as run,
-    ):
-        rows = export_segments([segment], source, tmp_path, "ja")
-    assert rows[0]["end"] == 2.0
-    assert rows[0]["speech_end"] == 1.95
-    assert rows[0]["speaker"] == "S02"
-    assert rows[0]["language"] == "ja"
-    assert run.call_args.args[0][-1] == str(tmp_path / "original_0.mp3")
-
-
-def test_moss_prepare_uses_independent_interpreter_and_preserves_metadata(tmp_path):
-    original = tmp_path / "input.wav"
-    original.write_bytes(b"audio fixture")
-    output = tmp_path / "corpus"
-
-    def run(command, **kwargs):
-        assert command[0] == sys.executable
-        inputs = Path(command[command.index("--inputs") + 1])
-        native = inputs.with_name("emilia_processed") / "original"
-        native.mkdir(parents=True)
-        (native / "original.json").write_text(json.dumps([
-            {"start": 0, "end": 1.15, "speech_end": 1, "text": "はい", "speaker": "S01", "language": "ja"},
-        ]))
-        (native / "original_0.mp3").touch()
-
-    with (
-        patch("workers.research_training.validate_emilia") as emilia,
-        patch("workers.research_training.subprocess.run", side_effect=run),
-        patch("workers.research_training.attach_features"),
-    ):
-        prepare_dataset({"moss_python": sys.executable}, output, original, None, [],
-                        backend="moss", moss_language="ja")
-    emilia.assert_not_called()
-    manifest = json.loads((output / "manifest.json").read_text())
-    assert manifest["transcription_backend"] == "moss"
-    assert manifest["clips"][0]["speaker"] == "S01"
-    assert manifest["clips"][0]["speech_end"] == 1
+def test_emilia_diarizer_override_removes_token_gate_and_keeps_processing():
+    source = '''from pyannote.audio import Pipeline
+def main_process():
+    speakerdia = speaker_diarization(audio)
+    vad_list = vad.vad(speakerdia, audio)
+if __name__ == "__main__":
+    if not cfg["huggingface_token"].startswith("hf"):
+        raise ValueError("token")
+    dia_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+    dia_pipeline.to(device)
+    asr_model = load_asr()
+'''
+    result = apply_diarizen_override(source)
+    compile(result, "fixture", "exec")
+    assert "huggingface_token" not in result
+    assert "Pipeline.from_pretrained" not in result
+    assert "dia_pipeline = stage_tts_diarizen_pipeline" in result
+    assert "asr_model = load_asr()" in result
+    assert "save_report(save_path)" in result
+    with pytest.raises(ValueError, match="Unexpected Emilia"):
+        apply_diarizen_override("changed upstream")
 
 
 def test_emilia_overrides_apply_before_asr_and_during_final_filter():
@@ -227,3 +198,36 @@ def test_prepare_preserves_native_clips_and_links_model_features(tmp_path):
         assert clip["character_id"] is None
         assert (output / clip["audio"]).is_file()
         assert (output / clip["features"]).is_file()
+
+
+def test_voice_corpus_uses_scoped_speaker_ids_without_feature_models(tmp_path):
+    from argparse import Namespace
+
+    from workers.research_voice_corpus import build_voice_corpus
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    rows = []
+    for i, (source, speaker) in enumerate([("one", "UNKNOWN"), ("one", "A"), ("one", "A"), ("two", "A")]):
+        audio = corpus / f"{i}.wav"
+        audio.touch()
+        rows.append({"audio": audio.name, "start": 0, "end": 4, "speaker": speaker,
+                     "text": "はい。", "language": "ja",
+                     "provenance": {"source": source, "origin": "original"}})
+    (corpus / "manifest.json").write_text(json.dumps({"clips": rows}))
+    output = tmp_path / "voices"
+    args = Namespace(corpus=corpus, output=output, min_clips=1, min_seconds=1,
+                     min_clip_seconds=1, max_clip_seconds=10)
+
+    def ffmpeg(command, **kwargs):
+        Path(command[-1]).touch()
+
+    with patch("workers.research_voice_corpus.subprocess.run", side_effect=ffmpeg):
+        build_voice_corpus(args)
+    report = json.loads((output / "voices.json").read_text())
+    assert report["group_by"] == "speaker"
+    assert [[clip["row"] for clip in voice["clips"]] for voice in report["voices"]] == [[1, 2], [3]]
+    for voice in report["voices"]:
+        labels = (output / "training-candidates" / voice["voice"] / "labels.list").read_text()
+        assert "|ja|はい。" in labels
+        assert all("similarity" not in clip for clip in voice["clips"])

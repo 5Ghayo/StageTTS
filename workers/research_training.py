@@ -17,13 +17,11 @@ from workers.subtitle_boundaries import detect_subtitle_boundaries
 
 MODEL_RUNNER = Path(__file__).with_name("research_models.py").resolve()
 EMILIA_RUNNER = Path(__file__).with_name("emilia_runner.py").resolve()
-MOSS_RUNNER = Path(__file__).with_name("moss_runner.py").resolve()
 EMILIA_MAIN = Path("preprocessors/Emilia/main.py")
 EMILIA_AUDIO = {".mp3", ".wav", ".flac", ".m4a", ".aac"}
 SOURCES = {
     "amphion": ["https://github.com/open-mmlab/Amphion", "26f6883110181f1dbfe95c70a7c7dbaf4de5f42a"],
     "sidon": ["https://github.com/sarulab-speech/Sidon", "45210939881b8a38a0752fb33451a79a9d3703ee"],
-    "kyarabench": ["https://github.com/sizigi/kyarabench", "6453727862d3bdf54a8e50a4d26a254ca3b47e14"],
     "emotion2vec": ["https://github.com/ddlBoJack/emotion2vec", "a0e606c668227ab0c01527e196a4acc42b1efad9"],
 }
 
@@ -41,7 +39,9 @@ def file_path(path: Path) -> Path:
 def load_config(path: Path) -> dict:
     config = json.loads(path.read_text(encoding="utf-8"))
     # Resolving a venv's python symlink would select the system interpreter.
-    return {name: os.path.abspath(path.parent / Path(value).expanduser()) for name, value in config.items() if value}
+    scalars = {"diarization_device", "diarizen_batch_size"}
+    return {name: value if name in scalars else os.path.abspath(path.parent / Path(value).expanduser())
+            for name, value in config.items() if value is not None and value != ""}
 
 
 def run_job(config: dict, stage: str, job: dict) -> None:
@@ -132,32 +132,41 @@ def character_for_clip(segments: list[dict], start: float, end: float) -> str | 
 def run_emilia(config: dict, inputs: Path, filter_overrides: dict[str, float | bool | str] | None = None) -> None:
     main = file_path(Path(config["amphion_root"]) / EMILIA_MAIN)
     command = [str(file_path(Path(config["emilia_python"])))]
-    if filter_overrides is None:
-        command.append(str(main))
-    else:
-        command.extend([
-            str(EMILIA_RUNNER), str(main),
-            "--min-clip-seconds", str(filter_overrides["min_clip_seconds"]),
-            "--min-dnsmos", str(filter_overrides["min_dnsmos"]),
-        ])
-        if filter_overrides.get("fine_turns"):
-            command.append("--fine-turns")
-            for name in ("max_turn_seconds", "min_silence_ms", "tail_ms", "turn_boundaries"):
-                if name in filter_overrides:
-                    command.extend(["--" + name.replace("_", "-"), str(filter_overrides[name])])
-    subprocess.run(
-        [*command, "--config_path", str(file_path(Path(config["emilia_config"]))),
-         "--input_folder_path", str(inputs), "--whisper_arch", "medium"],
-        cwd=main.parent, check=True,
-    )
+    overrides = filter_overrides or {"min_clip_seconds": 3.0, "min_dnsmos": 3.0}
+    command.extend([
+        str(EMILIA_RUNNER), str(main),
+        "--min-clip-seconds", str(overrides["min_clip_seconds"]),
+        "--min-dnsmos", str(overrides["min_dnsmos"]),
+    ])
+    if overrides.get("fine_turns"):
+        command.append("--fine-turns")
+        for name in ("max_turn_seconds", "min_silence_ms", "tail_ms", "turn_boundaries"):
+            if name in overrides:
+                command.extend(["--" + name.replace("_", "-"), str(overrides[name])])
+    with tempfile.TemporaryDirectory(prefix="stagetts_emilia_settings_") as temporary:
+        settings = Path(temporary) / "diarization.json"
+        write_json(settings, research_speaker_settings(config))
+        subprocess.run(
+            [*command, "--diarization-settings", str(settings),
+             "--config_path", str(file_path(Path(config["emilia_config"]))),
+             "--input_folder_path", str(inputs), "--whisper_arch", "medium"],
+            cwd=main.parent, check=True,
+        )
+
+
+def research_speaker_settings(config: dict) -> dict:
+    """Resolve the independent speaker runtime from the research toolchain."""
+    return {"python": config["diarization_python"], "model_path": config["diarizen_model_path"],
+            "embedding_path": config["diarizen_embedding_path"],
+            "device": config.get("diarization_device", "cpu"),
+            "batch_size": config.get("diarizen_batch_size", 1)}
 
 
 def validate_emilia(config: dict) -> None:
     main = file_path(Path(config["amphion_root"]) / EMILIA_MAIN)
     settings = json.loads(Path(config["emilia_config"]).read_text(encoding="utf-8"))
-    token = settings.get("huggingface_token", "")
-    if not isinstance(token, str) or not token.startswith("hf_"):
-        raise ValueError("Set an authorized Hugging Face token in the local Emilia-Pipe config")
+    from workers.speaker_pipeline import run_speaker_job
+    run_speaker_job(None, research_speaker_settings(config), preflight=True)
     for model, expected in (
         (settings["separate"]["step1"]["model_path"], "UVR-MDX-NET-Inst_HQ_3.onnx"),
         (settings["mos_model"]["primary_model_path"], "sig_bak_ovr.onnx"),
@@ -173,25 +182,16 @@ def attach_features(config: dict, root: Path, records: list[dict]) -> None:
     (root / "features").mkdir()
     for index, record in enumerate(records):
         record["features"] = f"features/{index:06}.npz"
-    ranking = root / "character_candidates.json"
     run_job(config, "features", {
         "clips": [
             {
                 "audio": str(root / row["audio"]), "features": str(root / row["features"]),
-                "character_id": row["character_id"],
-                "candidate_characters": row.get("provenance", {}).get("candidate_characters", []),
             }
             for row in records
         ],
-        "ranking": str(ranking),
     })
     for record in records:
         file_path(root / record["features"])
-    if ranking.is_file():
-        for index, candidates in json.loads(ranking.read_text(encoding="utf-8")).items():
-            records[int(index)]["character_candidates"] = candidates
-        ranking.unlink()
-
 
 def pack_clips(config: dict, output: Path, inputs: list[Path]) -> None:
     """Extract representations from audio that has already passed corpus review."""
@@ -203,7 +203,7 @@ def pack_clips(config: dict, output: Path, inputs: list[Path]) -> None:
             shutil.copyfile(file_path(source), root / audio)
             rows.append({"audio": audio, "source": str(source), "character_id": None})
         attach_features(config, root, rows)
-        write_manifest(root, rows, ["kyaraembed", "emotion2vec", "facodec"])
+        write_manifest(root, rows, ["emotion2vec", "facodec"])
 
 
 def write_manifest(
@@ -219,20 +219,20 @@ def write_manifest(
         manifest["emilia_filter"] = emilia_filter
     if transcription_backend is not None:
         manifest["transcription_backend"] = transcription_backend
+        if transcription_backend == "emilia":
+            from workers.speaker_pipeline import DIARIZEN_MODEL, DIARIZEN_REVISION
+            manifest["speaker_pipeline"] = {
+                "diarization_model": DIARIZEN_MODEL, "diarization_revision": DIARIZEN_REVISION,
+                "identity_scope": "recording_local_candidate",
+            }
     write_json(root / "manifest.json", manifest)
 
 
 def prepare_dataset(
     config: dict, output: Path, input_audio: Path | None, script_path: Path | None, overlaps: list[Path],
     *, emilia_filter: dict[str, float | bool | str] | None = None, subtitle_source: Path | None = None,
-    backend: str = "emilia", moss_language: str | None = None,
 ) -> None:
-    if backend not in {"emilia", "moss"}:
-        raise ValueError("Unknown transcription backend")
-    if backend == "emilia":
-        validate_emilia(config)
-    elif not moss_language or emilia_filter or subtitle_source:
-        raise ValueError("MOSS requires an explicit language and uses its own segmentation")
+    validate_emilia(config)
     segments = []
     dialogue_source = None
     duration = 0.0
@@ -255,7 +255,7 @@ def prepare_dataset(
     if input_audio is None:
         raise ValueError("An input file or StageTTS project is required")
     source = file_path(input_audio)
-    models = ["kyaraembed", "emotion2vec", "facodec"]
+    models = ["emotion2vec", "facodec"]
     with output_directory(output) as root, tempfile.TemporaryDirectory(prefix="stagetts_research_inputs_") as tmp_name:
         temp = Path(tmp_name)
         inputs = temp / "emilia"
@@ -301,13 +301,7 @@ def prepare_dataset(
                     file_path(Path(track))
             models.append("dialogue-sidon")
 
-        if backend == "emilia":
-            run_emilia(config, inputs, runtime_filter)
-        else:
-            subprocess.run([
-                str(file_path(Path(config["moss_python"]))), str(MOSS_RUNNER),
-                "--inputs", str(inputs), "--language", moss_language,
-            ], check=True)
+        run_emilia(config, inputs, runtime_filter)
         native = inputs.with_name("emilia_processed")
         if not native.is_dir():
             raise RuntimeError("Emilia-Pipe did not write its native output directory")
@@ -330,7 +324,7 @@ def prepare_dataset(
                     ),
                 })
         attach_features(config, root, rows)
-        write_manifest(root, rows, models, emilia_filter=emilia_filter, transcription_backend=backend)
+        write_manifest(root, rows, models, emilia_filter=emilia_filter, transcription_backend="emilia")
 
 
 def main() -> None:
@@ -338,8 +332,6 @@ def main() -> None:
     parser.add_argument("--toolchain", type=Path, required=True)
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare = subparsers.add_parser("prepare", help="Transcribe, slice, and extract training features")
-    prepare.add_argument("--backend", choices=["emilia", "moss"], default="emilia")
-    prepare.add_argument("--moss-language", help="Language label for MOSS training clips, e.g. ja")
     source = prepare.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path)
     source.add_argument("--project", type=Path, help="Path to a StageTTS script.json")
@@ -359,9 +351,6 @@ def main() -> None:
     separate = subparsers.add_parser("separate", help="Run DialogueSidon on a two-speaker WAV")
     separate.add_argument("--input", type=Path, required=True)
     separate.add_argument("--output", type=Path, required=True)
-    benchmark = subparsers.add_parser("kyarabench", help="Run the official benchmark on restored Anim-400K clips")
-    benchmark.add_argument("--clips", type=Path, required=True)
-    benchmark.add_argument("--anim400k-source", type=Path, help="Restore the official source clips before scoring")
     args = parser.parse_args()
 
     try:
@@ -405,7 +394,6 @@ def main() -> None:
                 args.project.resolve() if args.project else None, [p.resolve() for p in args.overlap],
                 emilia_filter=overrides,
                 subtitle_source=file_path(args.emilia_subtitle_source.resolve()) if args.emilia_subtitle_source else None,
-                backend=args.backend, moss_language=args.moss_language,
             )
         elif args.command == "features":
             pack_clips(config, args.output.resolve(), [p.resolve() for p in args.input])
@@ -416,16 +404,6 @@ def main() -> None:
                 run_job(config, "dialogue-sidon", {"mixtures": [mixture], "seed": 0})
                 for track in tracks:
                     file_path(track)
-        else:
-            if args.anim400k_source:
-                kyara = Path(config["kyara_root"])
-                subprocess.run(
-                    [config["sidon_python"], str(kyara / "prepare/restore.py"), "--input-root",
-                     str(args.anim400k_source.resolve()), "--output-root", str(args.clips.resolve()),
-                     "--clips-json", str(kyara / "data/kyarabench_v1.0_source_clips.json")],
-                    cwd=kyara, check=True,
-                )
-            run_job(config, "kyarabench", {"clips_root": str(args.clips.resolve())})
     except (KeyError, ValueError, TypeError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"Training data preparation failed: {exc}\n")
 

@@ -1,4 +1,3 @@
-import copy
 import math
 import shutil
 import struct
@@ -10,12 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.schemas import AlignedWord, CharacterConfig, EmotionRef, MediaInfo, ProjectScript, Segment, SourceTurn
+from backend.services.engine_capabilities import build_gpt_sovits_request, get_capabilities, resolve_reference_route
 from backend.services.evidence import build_source_evidence
 from backend.services.performance_analysis import (
-    _validate_stage, analyze_project_performance, apply_analysis_to_evidence,
+    _validate_stage,
+    analyze_project_performance,
+    apply_analysis_to_evidence,
 )
-from backend.services.engine_capabilities import build_gpt_sovits_request, get_capabilities, resolve_reference_route
-from workers.prosody_worker import analyze_request, measure_clip, read_wav
+from workers.prosody_worker import measure_clip, read_wav
 
 
 def write_wave(path, amplitudes=(0.1, 0.4), rate=16000, channels=1):
@@ -182,6 +183,7 @@ class PerformanceTest(unittest.TestCase):
 
     def test_pyin_uses_voiced_flags_and_drops_unvoiced_noise(self):
         import types
+
         import numpy as np
         def fake_pyin(signal, **kwargs):
             self.assertFalse(kwargs['center'])
@@ -260,7 +262,7 @@ class PerformanceTest(unittest.TestCase):
         self.assertFalse(engine.direct_emotion_control)
         self.assertFalse(engine.direct_prosody_control)
         self.assertEqual(engine.status, 'wired')
-        self.assertEqual(get_capabilities('cosyvoice3_0_5b').status, 'planned_not_wired')
+        self.assertIsNone(get_capabilities('removed_engine'))
         reference = EmotionRef(wav='reference.wav', text='Actual English reference.', lang='en')
         character = CharacterConfig(display_name='A', emotion_refs={'neutral': reference})
         routed, reason = resolve_reference_route(character, 'angry')

@@ -1,13 +1,11 @@
 """Mock-only M1 parse snapshot regression tests; no model or user project loads."""
 import copy
 import json
-import sys
 import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from backend.schemas import ProjectScript
 from workers import parse_worker
@@ -15,9 +13,7 @@ from workers import parse_worker
 
 class ParseEvidenceTest(unittest.TestCase):
     def setUp(self):
-        patch.object(parse_worker, "_enable_pyannote_torch_load_compat").start()
         patch.object(parse_worker, "_release_cuda_memory").start()
-        patch.object(parse_worker.config, "is_hf_token_configured", return_value=True).start()
         self.addCleanup(patch.stopall)
 
     def test_snapshot_precedes_mutating_word_assignment_and_preserves_overlap(self):
@@ -26,18 +22,12 @@ class ParseEvidenceTest(unittest.TestCase):
             {"word": "there.", "start": 1, "end": 2}]}]}
         original = copy.deepcopy(raw)
         rows = [{"start": 0, "end": 2, "speaker": "A"}, {"start": 0.5, "end": 1.5, "speaker": "B"}]
-        dataframe = SimpleNamespace(to_dict=lambda orient: copy.deepcopy(rows))
-        module = ModuleType("whisperx.diarize")
-        module.DiarizationPipeline = MagicMock(return_value=MagicMock(return_value=dataframe))
-        def mutate(df, result, **kwargs):
-            result["segments"][0]["speaker"] = "A"
-            for word in result["segments"][0]["words"]:
-                word["speaker"] = "A"
-            return result
-        module.assign_word_speakers = mutate
         context = {}
-        with patch.dict(sys.modules, {"whisperx.diarize": module}):
-            segments = parse_worker._stage_diarize(None, raw, "cpu", False, context)
+        result = {"diarization_spans": rows, "model_revision": "fixture", "source_audio_sha256": "fixture"}
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch("workers.speaker_pipeline.run_speaker_job", return_value=result):
+            audio = Path(temporary) / "dialogue.wav"
+            segments = parse_worker._stage_diarize(audio, raw, "cpu", False, context)
         self.assertEqual(raw, original)
         self.assertEqual(context["raw_segments"], original["segments"])
         self.assertEqual(context["diarization_spans"], rows)
@@ -109,16 +99,11 @@ class ParseEvidenceTest(unittest.TestCase):
         with patch.object(parse_worker, "normalize_segments", wraps=real_normalize) as normalize:
             parse_worker._stage_diarize(None, raw, "cpu", True, {}, language="ja")
             self.assertEqual(normalize.call_args.kwargs["language"], "ja")
-        dataframe = SimpleNamespace(to_dict=lambda orient: [{"start": 0, "end": 1, "speaker": "A"}])
-        module = ModuleType("whisperx.diarize")
-        module.DiarizationPipeline = MagicMock(return_value=MagicMock(return_value=dataframe))
-        assigned = copy.deepcopy(raw)
-        assigned["segments"][0]["speaker"] = "A"
-        assigned["segments"][0]["words"][0]["speaker"] = "A"
-        module.assign_word_speakers = MagicMock(return_value=assigned)
-        with patch.dict(sys.modules, {"whisperx.diarize": module}), \
+        result = {"diarization_spans": [{"start": 0, "end": 1, "speaker": "A"}]}
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch("workers.speaker_pipeline.run_speaker_job", return_value=result), \
              patch.object(parse_worker, "normalize_segments", wraps=real_normalize) as normalize:
-            parse_worker._stage_diarize(None, raw, "cpu", False, {}, language="ja")
+            parse_worker._stage_diarize(Path(temporary) / "audio.wav", raw, "cpu", False, {}, language="ja")
             self.assertEqual(normalize.call_args.kwargs["language"], "ja")
 
     def test_production_pipeline_passes_detected_language_and_snapshot_context(self):
@@ -128,8 +113,9 @@ class ParseEvidenceTest(unittest.TestCase):
             source.touch()
             output = root / "output"
             args = Namespace(project_id="mock-pipeline", input=source, output_dir=output,
-                             device="cpu", skip_diarization=False, parse_backend="legacy")
-            with patch.object(parse_worker, "_resolve_device", return_value="cpu"), \
+                             device="cpu", skip_diarization=False)
+            with patch("workers.speaker_pipeline.run_speaker_job", return_value={}), \
+                 patch.object(parse_worker, "_resolve_device", return_value="cpu"), \
                  patch.object(parse_worker, "_extract_wav_and_probe", return_value=1), \
                  patch.object(parse_worker, "_stage_banquet"), \
                  patch.object(parse_worker, "_finish_four_stems", return_value=(source, None, None)), \
@@ -140,26 +126,6 @@ class ParseEvidenceTest(unittest.TestCase):
                 parse_worker.run_pipeline(args)
             self.assertEqual(diarize.call_args.kwargs["language"], "ja")
             self.assertIs(diarize.call_args.kwargs["evidence_context"], save.call_args.kwargs["evidence_context"])
-
-    def test_retries_assign_fresh_copy_not_mutated_previous_attempt(self):
-        raw = {"segments": [{"start": 0, "end": 1, "text": "Wait.",
-                             "words": [{"word": "Wait.", "start": 0, "end": 1}]}]}
-        dataframe = SimpleNamespace(to_dict=lambda orient: [{"start": 0, "end": 1, "speaker": "A"}])
-        module = ModuleType("whisperx.diarize")
-        module.DiarizationPipeline = MagicMock(return_value=MagicMock(return_value=dataframe))
-        seen = []
-        def assign(df, value, **kwargs):
-            seen.append(copy.deepcopy(value))
-            value["segments"][0]["speaker"] = "A"
-            value["segments"][0]["words"][0]["speaker"] = "A"
-            if len(seen) == 1:
-                raise RuntimeError("after partial mutation")
-            return value
-        module.assign_word_speakers = assign
-        with patch.dict(sys.modules, {"whisperx.diarize": module}):
-            result = parse_worker._stage_diarize(None, raw, "cuda", False, {})
-        self.assertEqual(seen, [raw, raw])
-        self.assertEqual(result[0]["speaker"], "A")
 
 
 if __name__ == "__main__":

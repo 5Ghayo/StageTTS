@@ -61,14 +61,10 @@ class _StageTTSSettingsFields(BaseModel):
     tts_startup_timeout_sec: float = Field(default=90.0, alias="TTS_STARTUP_TIMEOUT_SEC")
 
     env_parse_python: str = Field(default="python", alias="ENV_PARSE_PYTHON")
-    parse_backend: str = Field(default="moss", alias="PARSE_BACKEND")
-    moss_model_path_raw: str = Field(default="", alias="MOSS_MODEL_PATH")
-    moss_revision: str = Field(default="", alias="MOSS_REVISION")
-    moss_torch_version: str = Field(default="2.8.0+cu128", alias="MOSS_TORCH_VERSION")
-    moss_transformers_version: str = Field(default="5.6.0", alias="MOSS_TRANSFORMERS_VERSION")
-    moss_custom_code_approved: bool = Field(default=False, alias="MOSS_CUSTOM_CODE_APPROVED")
-    moss_max_audio_seconds: float = Field(default=60, gt=0, alias="MOSS_MAX_AUDIO_SECONDS")
-    moss_max_new_tokens: int = Field(default=4096, gt=0, alias="MOSS_MAX_NEW_TOKENS")
+    env_diarization_python: str = Field(default="", alias="ENV_DIARIZATION_PYTHON")
+    diarizen_model_path_raw: str = Field(default="", alias="DIARIZEN_MODEL_PATH")
+    diarizen_embedding_path_raw: str = Field(default="", alias="DIARIZEN_EMBEDDING_PATH")
+    diarizen_batch_size: int = Field(default=1, ge=1, alias="DIARIZEN_BATCH_SIZE")
     banquet_root_raw: str = Field(default="", alias="BANQUET_ROOT")
     banquet_checkpoint_raw: str = Field(default="", alias="BANQUET_CHECKPOINT")
     hf_token: str = Field(default="", alias="HF_TOKEN")
@@ -170,23 +166,17 @@ GPT_SOVITS_PYTHON: str = (
 )
 GPT_SOVITS_CONFIG: str = (
     settings.gpt_sovits_config_raw.strip()
-    or (str(BACKEND_DIR / "tts_v2.yaml") if (BACKEND_DIR / "tts_v2.yaml").is_file() else "")
+    or (str(BACKEND_DIR / "tts_v5.yaml") if (BACKEND_DIR / "tts_v5.yaml").is_file() else "")
 )
 TTS_AUTO_MANAGE: bool = settings.tts_auto_manage
 TTS_STARTUP_TIMEOUT_SEC: float = settings.tts_startup_timeout_sec
 
 # 外部算力服务与子进程 Python 路径
 ENV_PARSE_PYTHON: str = settings.env_parse_python.strip() or "python"
-PARSE_BACKEND: str = settings.parse_backend.strip().lower() or "moss"
-if PARSE_BACKEND not in {"moss", "legacy"}:
-    raise ValueError("PARSE_BACKEND must be moss or legacy; automatic fallback is disabled")
-MOSS_MODEL_PATH: Optional[Path] = _resolve_optional_path(settings.moss_model_path_raw)
-MOSS_REVISION: str = settings.moss_revision.strip()
-MOSS_TORCH_VERSION: str = settings.moss_torch_version.strip()
-MOSS_TRANSFORMERS_VERSION: str = settings.moss_transformers_version.strip()
-MOSS_CUSTOM_CODE_APPROVED: bool = settings.moss_custom_code_approved
-MOSS_MAX_AUDIO_SECONDS: float = settings.moss_max_audio_seconds
-MOSS_MAX_NEW_TOKENS: int = settings.moss_max_new_tokens
+ENV_DIARIZATION_PYTHON: str = settings.env_diarization_python.strip()
+DIARIZEN_MODEL_PATH: Optional[Path] = _resolve_optional_path(settings.diarizen_model_path_raw)
+DIARIZEN_EMBEDDING_PATH: Optional[Path] = _resolve_optional_path(settings.diarizen_embedding_path_raw)
+DIARIZEN_BATCH_SIZE: int = settings.diarizen_batch_size
 BANQUET_ROOT: Optional[Path] = _resolve_optional_path(settings.banquet_root_raw)
 BANQUET_CHECKPOINT: Optional[Path] = _resolve_optional_path(settings.banquet_checkpoint_raw)
 # Optional isolated analysis runtime. Empty values never trigger downloads or installs.

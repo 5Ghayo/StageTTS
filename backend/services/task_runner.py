@@ -464,7 +464,7 @@ def run_parse_worker(
     mode: str = "video_dubbing",
     source_lang: str | None = None,
 ) -> Path:
-    """启动独立 MOSS / Banquet 解析 worker（legacy 模式须显式配置；GPU 在子进程退出时回收）。
+    """启动独立 Banquet / WhisperX 解析 worker（DiariZen 使用隔离环境；GPU 在子进程退出时回收）。
 
     GPU 推理框架不在 env_backend 中导入；全过程由 gpu_task_guard 串行化。
     """

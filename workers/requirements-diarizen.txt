@@ -1,0 +1,19 @@
+# Isolated Python 3.10 runtime. Install matching torch/torchaudio separately.
+# Install the pinned DiariZen source and its bundled pyannote-audio after this file.
+numpy==1.26.4
+librosa==0.11.0
+soundfile==0.13.1
+toml==0.10.2
+einops==0.8.1
+joblib==1.5.2
+h5py==3.14.0
+huggingface_hub==0.36.0
+speechbrain==1.0.3
+lightning==2.4.0
+pytorch-lightning==2.4.0
+torchmetrics==1.5.2
+accelerate==1.6.0
+psutil==7.1.0
+setuptools<81
+torchinfo==1.8.0
+thop==0.1.1.post2209072238

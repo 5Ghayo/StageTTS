@@ -107,7 +107,7 @@ export const TopMenuBar: React.FC = () => {
     if (!script || isSynthesizing) {
       return;
     }
-    setActionToast("正在按需启动 GPT-SoVITS 并配音...");
+    setActionToast(`正在使用 GPT-SoVITS 配音...`);
     const ids =
       pendingCount === 0
         ? script.segments.filter((seg) => !seg.keep_original).map((seg) => seg.id)
@@ -154,7 +154,9 @@ export const TopMenuBar: React.FC = () => {
           return;
         }
       }
-      const res = await renderVideo(script.project_id, pipelineConfig.burnWatermark);
+      const res = await renderVideo(script.project_id, {
+        burn_watermark: pipelineConfig.burnWatermark, burn_subtitles: pipelineConfig.burnSubtitles,
+      });
       useProjectStore.setState((state) =>
         state.script?.project_id === res.project_id
           ? {
@@ -295,7 +297,7 @@ export const TopMenuBar: React.FC = () => {
                   type="button"
                   disabled={isSynthesizing || isLoading || isPipelineRunning}
                   onClick={() => void handleBatchSynthesize()}
-                  title="自动按需启动 GPT-SoVITS 并批量合成所有待配音片段"
+                  title="使用项目所选模型批量合成配音"
                   className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-[4px] border border-white/[0.1] bg-[#2C2C2C] px-3 py-1 text-[12px] font-medium text-primary transition-colors hover:bg-[#363636] disabled:opacity-50"
                 >
                   <Mic className="h-3.5 w-3.5 text-secondary" strokeWidth={1.5} />

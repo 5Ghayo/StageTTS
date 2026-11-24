@@ -9,6 +9,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-diarizen/
 venv/
 env/
 env_parse/
@@ -108,3 +109,7 @@ desktop.ini
 
 # Private UI LLM preferences
 backend/llm_settings.local.json
+
+# Local listening reports and experiment exports
+/listening-*/
+/v5-dub-*/

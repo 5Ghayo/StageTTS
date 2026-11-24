@@ -61,20 +61,19 @@ GPT_SOVITS_V2 = EngineCapabilities(
     ),
 )
 
-COSYVOICE3 = EngineCapabilities(
-    name="cosyvoice3_0_5b",
-    version_hint="Fun-CosyVoice3-0.5B",
+GPT_SOVITS_V5 = EngineCapabilities(
+    name="gpt_sovits_v5",
+    version_hint="v5dev / s1v3.ckpt + s2Gv5dev.pth (LoRA fine-tuning)",
     supports_reference_audio=True,
     supports_reference_text=True,
     supports_reference_lang=True,
-    supported_reference_langs=("zh", "en", "ja", "ko", "de", "es", "fr", "it", "ru"),
-    supported_emotions=(),
+    supported_reference_langs=SUPPORTED_LANGS,
+    supported_emotions=SUPPORTED_EMOTIONS,
     direct_emotion_control=False,
     direct_prosody_control=False,
-    status="planned_not_wired",
-    notes=("documented instruction/pinyin controls require version-specific validation; not called by StageTTS",
-           "Cantonese/yue is described among dialects, separate from the nine language list",
-           "control flags describe controls applied by StageTTS, not unconnected model documentation"),
+    status="wired",
+    notes=("emotion selects reference audio; no numeric emotion or F0 control",
+           "v5 LoRA weights require the matching v5 base checkpoint"),
 )
 
 INDEXTTS = EngineCapabilities(
@@ -94,7 +93,7 @@ INDEXTTS = EngineCapabilities(
 )
 
 ENGINES: dict[str, EngineCapabilities] = {
-    item.name: item for item in (GPT_SOVITS_V2, COSYVOICE3, INDEXTTS)
+    item.name: item for item in (GPT_SOVITS_V5, GPT_SOVITS_V2, INDEXTTS)
 }
 
 
@@ -107,8 +106,8 @@ def all_capabilities() -> list[dict]:
 
 
 def routed_emotions(engine: EngineCapabilities) -> list[EmotionType]:
-    """Only GPT-SoVITS v2 uses the legacy emotion5 reference routing today."""
-    if engine.name != GPT_SOVITS_V2.name or engine.status != "wired":
+    """Both GPT-SoVITS versions use reference routing rather than emotion controls."""
+    if engine.name not in {GPT_SOVITS_V2.name, GPT_SOVITS_V5.name} or engine.status != "wired":
         return []
     return list(engine.supported_emotions)  # type: ignore[return-value]
 

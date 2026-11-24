@@ -373,7 +373,6 @@ class ParseTest(unittest.TestCase):
                 device="cpu",
                 skip_diarization=True,
                 skip_llm=True,
-                parse_backend="legacy",
             )
 
             with (

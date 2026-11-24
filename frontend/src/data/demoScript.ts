@@ -7,6 +7,7 @@ import type { ProjectScript } from "../types/script";
 export const DEMO_PROJECT_SCRIPT: ProjectScript = {
   project_id: "proj_demo_01",
   mode: "video_dubbing",
+  tts_engine: "gpt_sovits_v2",
   media: {
     source_video: "/workspace/proj_demo_01/input.mp4",
     vocals_wav: "/workspace/proj_demo_01/vocals.wav",

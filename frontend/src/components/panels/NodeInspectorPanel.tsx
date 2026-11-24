@@ -2,7 +2,7 @@ import { AlertTriangle, Cpu, Sliders, Sparkles, Terminal } from "lucide-react";
 import type React from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
-import type { StemVolumes, SubtitleBurnMode } from "../../types/script";
+import type { ProjectScript, StemVolumes, SubtitleBurnMode } from "../../types/script";
 
 /**
  * 扁平化节点参数检查器（#222222 面板 + #181818 凹槽控件 + 极淡虚线分组）。
@@ -10,6 +10,8 @@ import type { StemVolumes, SubtitleBurnMode } from "../../types/script";
 export const NodeInspectorPanel: React.FC = () => {
   const script = useProjectStore((s) => s.script);
   const setMode = useProjectStore((s) => s.setMode);
+  const setTTSEngine = useProjectStore((s) => s.setTTSEngine);
+  const isSynthesizing = useProjectStore((s) => s.isSynthesizing);
   const updateBgmVolume = useProjectStore((s) => s.updateBgmVolume);
   const updateStemVolume = useProjectStore((s) => s.updateStemVolume);
   const updateAutoDucking = useProjectStore((s) => s.updateAutoDucking);
@@ -17,6 +19,7 @@ export const NodeInspectorPanel: React.FC = () => {
   const selectedNodeId = useWorkflowStore((s) => s.selectedNodeId);
   const nodes = useWorkflowStore((s) => s.nodes);
   const pipelineConfig = useWorkflowStore((s) => s.pipelineConfig);
+  const isPipelineRunning = useWorkflowStore((s) => s.isPipelineRunning);
   const setWorkspacePreset = useWorkflowStore((s) => s.setWorkspacePreset);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? nodes[0] ?? null;
@@ -62,12 +65,28 @@ export const NodeInspectorPanel: React.FC = () => {
         </label>
       )}
 
-      {/* MOSS runtime information */}
+      {selectedNode.id === "agent_tts" && script && (
+        <label className="space-y-1.5 border-b border-dashed border-white/[0.08] pb-3 text-[11px] text-secondary">
+          <span className="block">配音模型</span>
+          <select
+            value={script.tts_engine ?? "gpt_sovits_v5"}
+            onChange={(event) => setTTSEngine(event.target.value as ProjectScript["tts_engine"])}
+            disabled={isSynthesizing || isPipelineRunning}
+            className="h-7 w-full rounded border border-white/[0.07] bg-[#181818] px-2 text-primary"
+          >
+            <option value="gpt_sovits_v5">GPT-SoVITS v5</option>
+            <option value="gpt_sovits_v2">GPT-SoVITS（旧角色权重）</option>
+          </select>
+          <span className="block">应用于新的配音和手动重配</span>
+        </label>
+      )}
+
+      {/* WhisperX / DiariZen runtime information */}
       {selectedNode.id === "whisperx" && (
         <div className="space-y-1 border-b border-dashed border-white/[0.08] pb-3 text-[11px]">
           <div className="text-secondary">主识别模型</div>
-          <div className="text-primary">MOSS-Transcribe-Diarize · BF16 / SDPA</div>
-          <p className="text-secondary">8GB 显卡已测 10–60 秒样例，峰值约 2 GB。当前应用时长上限为 60 秒；MOSS 输出句段时间，不提供词级强制对齐。</p>
+          <div className="text-primary">WhisperX + DiariZen Large v2</div>
+          <p className="text-secondary">WhisperX 提供原文和词级对齐；DiariZen 在独立环境中生成说话人时间段。重叠及不确定片段需要审校。</p>
         </div>
       )}
 
@@ -146,7 +165,7 @@ export const NodeInspectorPanel: React.FC = () => {
               id="node-burn-subtitles"
               value={pipelineConfig.burnSubtitles}
               onChange={(e) =>
-                updatePipelineConfig({
+                useWorkflowStore.getState().updatePipelineConfig({
                   burnSubtitles: e.target.value as SubtitleBurnMode,
                 })
               }

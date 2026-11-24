@@ -961,6 +961,8 @@ export interface components {
              * @enum {string}
              */
             mode: "video_dubbing" | "virtual_stage";
+            /** @default gpt_sovits_v5 */
+            tts_engine: "gpt_sovits_v5" | "gpt_sovits_v2";
             media: components["schemas"]["MediaInfo"];
             /** Source Lang */
             source_lang?: string | null;
@@ -1002,6 +1004,8 @@ export interface components {
              * @enum {string}
              */
             mode: "video_dubbing" | "virtual_stage";
+            /** @default gpt_sovits_v5 */
+            tts_engine: "gpt_sovits_v5" | "gpt_sovits_v2";
             media: components["schemas"]["MediaInfo"];
             /** Source Lang */
             source_lang?: string | null;
@@ -2073,7 +2077,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectScript"];
+                    "application/json": components["schemas"]["ProjectScript-Output"];
                 };
             };
             /** @description Validation Error */

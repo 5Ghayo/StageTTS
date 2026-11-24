@@ -1,4 +1,4 @@
-"""GPT-SoVITS 推理客户端：按说话人分组批量合成 + 动态情绪参考音频路由。"""
+"""按说话人分组批量合成，使用 GPT-SoVITS。"""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from backend.services.text_normalization import (
 
 
 class TTSServiceUnavailableError(RuntimeError):
-    """GPT-SoVITS 推理服务不可达或响应超时。"""
+    """语音合成服务未配置、不可达或响应超时。"""
 
 
 # Only track components that StageTTS changed. None marks an uncertain switch.
@@ -211,7 +211,7 @@ def synthesize_segments_grouped(
     require_shorter: bool = False,
     require_longer: bool = False,
 ) -> Tuple[List[int], List[str]]:
-    """按 speaker 分组批量调用 GPT-SoVITS (api_v2.py) 合成单句 WAV。
+    """按 speaker 分组调用 GPT-SoVITS 合成单句 WAV。
 
     严格遵守 ARCHITECTURE.md 铁律：
     1. 过滤 keep_original == True 的片段；segment_ids 为 None 时合成全部非 ready 片段。

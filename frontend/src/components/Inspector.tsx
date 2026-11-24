@@ -369,7 +369,6 @@ export const Inspector: React.FC = () => {
           />
           <p className="text-[11px] text-secondary">
             时间粒度：{segment.alignment_granularity === "word" ? "词级" : segment.alignment_granularity === "segment" ? "句段级" : "未声明"}
-            {segment.timing_source === "moss_joint_generated" && " · MOSS 句段预测"}
           </p>
           {segment.segment_timing_needs_review !== false && (
             <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">

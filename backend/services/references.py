@@ -165,11 +165,7 @@ def reference_unavailable_reason(script: ProjectScript, speaker: str) -> str:
 
 
 def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview | None:
-    reviewed = _reviewed_automatic_reference(script, speaker)
-    if reviewed is not None:
-        return reviewed
-    from backend.services.automatic_moss_reference import automatic_moss_reference
-    return automatic_moss_reference(script, speaker)
+    return _reviewed_automatic_reference(script, speaker)
 
 
 def _reviewed_automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview | None:

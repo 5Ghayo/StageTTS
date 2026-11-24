@@ -98,6 +98,7 @@ interface ProjectState {
   applyVoicePresetToCharacter: (speakerKey: string, preset: VoicePreset) => void;
   restoreSnapshot: (snapshotId: string) => Promise<boolean>;
   updateBgmVolume: (volume: number) => void;
+  setTTSEngine: (engine: ProjectScript["tts_engine"]) => void;
   updateStemVolume: (stem: keyof StemVolumes, volume: number) => void;
   updateAutoDucking: (enabled: boolean) => void;
   updateCharacter: (speakerKey: string, patch: Partial<CharacterConfig>) => void;
@@ -435,6 +436,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const localScript: ProjectScript = {
         project_id: cleanName,
         mode: targetMode,
+        tts_engine: "gpt_sovits_v5",
         media: {
           source_video: isAudio ? null : objectUrl,
           vocals_wav: isAudio ? objectUrl : null,
@@ -853,6 +855,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       orig_text: "",
       words: [],
       alignment_needs_review: true,
+      alignment_granularity: "unknown",
+      timing_source: "unknown",
+      segment_timing_needs_review: true,
       speaker_needs_review: false,
       target_text: "新台词片段",
       target_lang: selectedSeg?.target_lang ?? "zh",
@@ -1019,6 +1024,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return false;
     }
   },
+
+  setTTSEngine: (engine) =>
+    set((state) => state.script && state.script.tts_engine !== engine
+      ? { script: { ...state.script, tts_engine: engine }, isDirty: true }
+      : state),
 
   updateBgmVolume: (volume) =>
     set((state) => {

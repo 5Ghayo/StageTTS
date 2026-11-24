@@ -51,7 +51,7 @@ export function pipelineStartForNode(nodeId: string | null): PipelineStartStep |
 }
 
 export function pipelineNodeHint(nodeId: string | null): string {
-  if (nodeId === "whisperx") return "MOSS 识别节点不能单独启动；请从音轨分离节点运行完整解析，或选择翻译节点处理已有对白。";
+  if (nodeId === "whisperx") return "WhisperX 识别节点不能单独启动；请从音轨分离节点运行完整解析，或选择翻译节点处理已有对白。";
   if (nodeId === "virtual_stage_out") return "舞台节点请使用右侧「进入虚拟舞台」。";
   return "请先在画布中选中一个可运行节点。";
 }
