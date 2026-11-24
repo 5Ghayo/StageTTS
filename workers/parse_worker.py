@@ -546,7 +546,7 @@ def _review_assigned_speakers(segments: List[Dict[str, Any]], language: str | No
     prepared = []
     for raw in segments:
         prepared.append({**raw, "speaker": str(raw.get("speaker") or "").strip() or "UNKNOWN"})
-    for part in normalize_segments(prepared, diarized=True, language=language):
+    for part in normalize_segments(prepared, diarized=True, language=language, trim_to_aligned_words=True):
         words = part.get("words") or []
         labels = [str(word.get("speaker") or "").strip() for word in words]
         has_speaker = any(label and label != "UNKNOWN" for label in labels)

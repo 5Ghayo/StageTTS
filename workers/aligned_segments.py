@@ -52,6 +52,7 @@ def _split_segment(
     raw: dict, diarized: bool, *, language: str | None = None,
     tokenizer: TokenizerAdapter | None = None,
     boundary_selector: BoundarySelector | None = None,
+    trim_to_aligned_words: bool = False,
 ) -> list[dict]:
     text = str(raw.get("text") or "").strip()
     if not text:
@@ -59,6 +60,7 @@ def _split_segment(
     raw_start, raw_end = _time(raw.get("start")), _time(raw.get("end"))
     start = raw_start if raw_start is not None else 0.0
     end = raw_end if raw_end is not None and raw_end > start else round(start + 0.25, 3)
+    invalid_source_bounds = raw_start is None or raw_end != end
     rank_speaker = (str(raw.get("speaker") or "").strip() or None) if diarized else None
     words = []
     for item in raw.get("words") or []:
@@ -69,6 +71,13 @@ def _split_segment(
         words.append(dict(word=str(item.get("word") or ""), start=word_start, end=word_end, speaker=speaker))
 
     offsets = _word_offsets(text, words)
+    # ASR/VAD windows can include silence or another speaker outside the text.
+    # Tighten only a complete, ordered alignment. The source evidence retains
+    # the ASR window; never crop missing text or change individual word times.
+    if (trim_to_aligned_words and offsets and raw_start is not None and raw_end == end
+            and all(word["start"] is not None and word["end"] is not None for word in words)
+            and all(left["end"] <= right["start"] for left, right in zip(words, words[1:]))):
+        start, end = words[0]["start"], words[-1]["end"]
     # A valid cut needs aligned words on both sides and must preserve their audio.
     cuts = [
         i for i in range(1, len(words))
@@ -104,7 +113,7 @@ def _split_segment(
             start=part_start,
             end=part_end,
             words=part_words,
-        ), diarized, alignment_extra=(not offsets or raw_start is None or raw_end != end))
+        ), diarized, alignment_extra=(not offsets or invalid_source_bounds))
         return dict(
             start=part_start,
             end=part_end,
@@ -253,9 +262,11 @@ def normalize_segments(
     raw_segments: list[dict], *, diarized: bool = False,
     language: str | None = None, tokenizer: TokenizerAdapter | None = None,
     boundary_selector: BoundarySelector | None = None,
+    trim_to_aligned_words: bool = False,
 ) -> list[dict]:
     segments = [part for raw in raw_segments for part in _split_segment(
         raw, diarized, language=language, tokenizer=tokenizer, boundary_selector=boundary_selector,
+        trim_to_aligned_words=trim_to_aligned_words,
     )]
     segments.sort(key=lambda item: (item["start"], item["end"]))
     segments = _merge_short_segments(segments, diarized=diarized)
