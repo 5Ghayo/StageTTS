@@ -1,6 +1,5 @@
 """Refine Emilia's diarized intervals without joining separate speech turns."""
 
-from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 
 
@@ -29,12 +28,6 @@ def exclusive_turns(turns):
     return spans
 
 
-def split_turns_at_boundaries(turns, boundaries):
-    for start, end, speaker in turns:
-        cuts = [start, *boundaries[bisect_right(boundaries, start):bisect_left(boundaries, end)], end]
-        yield from ((left, right, speaker) for left, right in zip(cuts, cuts[1:]))
-
-
 def pad_exported_tails(segments, duration, tail_ms):
     """Extend the WAV ranges after transcription and filtering."""
     return [
@@ -44,7 +37,7 @@ def pad_exported_tails(segments, duration, tail_ms):
 
 
 def refine_turns(
-    vad, diarization, audio, *, boundaries=(), max_turn_seconds=15, min_silence_ms=150,
+    vad, diarization, audio, *, max_turn_seconds=15, min_silence_ms=150,
 ):
     import librosa
 
@@ -52,7 +45,7 @@ def refine_turns(
     waveform = librosa.resample(audio["waveform"], orig_sr=audio["sample_rate"], target_sr=rate)
     segments = []
     turns = exclusive_turns(diarization.to_dict(orient="records"))
-    for start, end, speaker in split_turns_at_boundaries(turns, boundaries):
+    for start, end, speaker in turns:
         first, last = max(0, round(start * rate)), min(len(waveform), round(end * rate))
         if last - first < round(0.16 * rate):
             continue

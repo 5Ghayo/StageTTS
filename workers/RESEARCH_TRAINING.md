@@ -1,5 +1,7 @@
 # 研究训练数据工具链
 
+文本与切段只依据音频；生成后的字幕导出和界面文字预览仍保留。
+
 从仓库根目录运行 `python -m workers.research_training --toolchain /path/to/toolchain.json`。输出到独立目录，不覆盖输入项目。
 
 ## 保留的作者工具
@@ -48,7 +50,7 @@ python -m workers.research_voice_corpus --corpus /path/to/corpus \
 
 `prepare --project /path/to/script.json` 可使用项目时间轴。两个已经确认的角色发生重叠时，DialogueSidon 优先读取项目对白轨中的对应窗口；也可重复传 `--overlap two-speaker.wav`。直接输入的音视频使用 Emilia 原版 UVR 预处理；它与应用中的 Banquet 四轨处理是不同入口。
 
-`--emilia-min-clip-seconds` 和 `--emilia-min-dnsmos` 默认均为 3。可显式放宽；`--emilia-fine-turns` 对每个无重叠的说话人区间运行 VAD，支持 `--emilia-max-turn-seconds`、`--emilia-min-silence-ms` 和 `--emilia-tail-ms`。可提供 `--emilia-turn-boundaries` 或 `--emilia-subtitle-source` 帮助切段；参数写入 manifest，便于复现。
+`--emilia-min-clip-seconds` 和 `--emilia-min-dnsmos` 默认均为 3。可显式放宽；`--emilia-fine-turns` 对每个无重叠的说话人区间运行 VAD，支持 `--emilia-max-turn-seconds`、`--emilia-min-silence-ms` 和 `--emilia-tail-ms`。切段只使用对白音频、说话人活动和 VAD，不读取字幕轨、不做 OCR，也不接受字幕时间点。参数写入 manifest，便于复现。
 
 `emilia_processed/` 保留原版片段和逐文件 JSON；`manifest.json` 保留来源、时间、文本、语种、模型和特征路径；NPZ 含 `emotion2vec`、`prosody`、`content`、`timbre`、`acoustic_detail`。角色归属需要人工审核，双人分离的通道号不代表跨窗口的固定角色。
 

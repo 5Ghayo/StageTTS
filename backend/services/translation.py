@@ -14,6 +14,7 @@ from backend.schemas import ProjectScript, Segment
 
 EMOTIONS = {"neutral", "angry", "happy", "sad", "whisper"}
 CONTEXT_INSTRUCTIONS = (
+    "原文依据音频听力识别生成；不得读取或引用原片字幕、OCR，或用影视剧情记忆补写未识别的台词。"
     "先通读完整对白理解剧情、角色关系和前后语气，再按原句 id 还原译文。"
     "参照相邻台词、角色语气和术语表；术语出现时使用固定译法。"
     "忠实优先：不得摘要、概括、省略、删词或改成名词短语；min_units/max_units 只是软预算。"

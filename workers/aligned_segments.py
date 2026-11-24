@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import hashlib
 import math
 import re
+from dataclasses import asdict
 from typing import Any
 
 from workers.semantic_boundaries import (
-    BoundaryCandidate, BoundarySelector, TokenizerAdapter,
-    generate_boundary_plan, rank_candidate_ids,
+    BoundaryCandidate,
+    BoundarySelector,
+    TokenizerAdapter,
+    generate_boundary_plan,
+    rank_candidate_ids,
 )
 
 MAX_SECONDS = 14.0
@@ -53,6 +56,7 @@ def _split_segment(
     tokenizer: TokenizerAdapter | None = None,
     boundary_selector: BoundarySelector | None = None,
     trim_to_aligned_words: bool = False,
+    split_sentences: bool = False,
 ) -> list[dict]:
     text = str(raw.get("text") or "").strip()
     if not text:
@@ -129,7 +133,9 @@ def _split_segment(
             boundary_review_reasons=list(review_reasons),
         )
 
-    forced = [i for i in cuts if speaker_at(i - 1) and speaker_at(i) and speaker_at(i - 1) != speaker_at(i)]
+    speaker_cuts = {i for i in cuts if speaker_at(i - 1) and speaker_at(i) and speaker_at(i - 1) != speaker_at(i)}
+    sentence_cuts = {i for i in cuts if i in semantic} if split_sentences else set()
+    forced = sorted(speaker_cuts | sentence_cuts)
     for index in forced:
         candidate = semantic.get(index) or BoundaryCandidate(
             id=f"boundary:{source_text_sha256[:16]}:{offsets[index]}:{words[index - 1]['end']:.6f}:{words[index]['start']:.6f}",
@@ -138,7 +144,7 @@ def _split_segment(
             reasons=("speaker_change",),
         )
         chosen[index] = record(candidate)
-        if "speaker_change" not in chosen[index]["reasons"]:
+        if index in speaker_cuts and "speaker_change" not in chosen[index]["reasons"]:
             chosen[index]["reasons"].append("speaker_change")
     segments = []
     left = 0
@@ -263,12 +269,15 @@ def normalize_segments(
     language: str | None = None, tokenizer: TokenizerAdapter | None = None,
     boundary_selector: BoundarySelector | None = None,
     trim_to_aligned_words: bool = False,
+    split_sentences: bool = False,
 ) -> list[dict]:
     segments = [part for raw in raw_segments for part in _split_segment(
         raw, diarized, language=language, tokenizer=tokenizer, boundary_selector=boundary_selector,
         trim_to_aligned_words=trim_to_aligned_words,
+        split_sentences=split_sentences,
     )]
     segments.sort(key=lambda item: (item["start"], item["end"]))
-    segments = _merge_short_segments(segments, diarized=diarized)
+    if not split_sentences:
+        segments = _merge_short_segments(segments, diarized=diarized)
     segments.sort(key=lambda item: (item["start"], item["end"]))
     return [dict(segment, id=index) for index, segment in enumerate(segments)]

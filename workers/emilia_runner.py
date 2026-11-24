@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 import tempfile
 from pathlib import Path
@@ -105,7 +104,6 @@ def main() -> None:
     parser.add_argument("--max-turn-seconds", type=float, default=15)
     parser.add_argument("--min-silence-ms", type=int, default=150)
     parser.add_argument("--tail-ms", type=int, default=150)
-    parser.add_argument("--turn-boundaries", type=Path)
     parser.add_argument("--diarization-settings", type=Path, required=True)
     args, official_args = parser.parse_known_args()
     entrypoint = args.entrypoint.resolve()
@@ -125,18 +123,9 @@ def main() -> None:
     if args.fine_turns:
         from emilia_segments import pad_exported_tails, refine_turns
 
-        boundaries = []
-        if args.turn_boundaries is not None:
-            data = json.loads(args.turn_boundaries.read_text(encoding="utf-8"))
-            boundaries = sorted({float(t) for t in data["cut_seconds"]})
-            if any(not math.isfinite(t) or t < 0 for t in boundaries):
-                parser.error("Turn boundaries must be finite nonnegative seconds")
-
-        def refine_file(vad, diarization, audio, path):
-            is_original = Path(path).stem == "original"
+        def refine_file(vad, diarization, audio, _path):
             return refine_turns(
                 vad, diarization, audio,
-                boundaries=boundaries if is_original else (),
                 max_turn_seconds=args.max_turn_seconds, min_silence_ms=args.min_silence_ms,
             )
 

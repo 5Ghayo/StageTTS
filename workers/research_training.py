@@ -13,7 +13,6 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from workers.research_models import RELEASES
-from workers.subtitle_boundaries import detect_subtitle_boundaries
 
 MODEL_RUNNER = Path(__file__).with_name("research_models.py").resolve()
 EMILIA_RUNNER = Path(__file__).with_name("emilia_runner.py").resolve()
@@ -38,6 +37,8 @@ def file_path(path: Path) -> Path:
 
 def load_config(path: Path) -> dict:
     config = json.loads(path.read_text(encoding="utf-8"))
+    if "videosubfinder_cli" in config:
+        raise ValueError("Subtitle/OCR input is no longer supported; remove videosubfinder_cli")
     # Resolving a venv's python symlink would select the system interpreter.
     scalars = {"diarization_device", "diarizen_batch_size"}
     return {name: value if name in scalars else os.path.abspath(path.parent / Path(value).expanduser())
@@ -140,7 +141,7 @@ def run_emilia(config: dict, inputs: Path, filter_overrides: dict[str, float | b
     ])
     if overrides.get("fine_turns"):
         command.append("--fine-turns")
-        for name in ("max_turn_seconds", "min_silence_ms", "tail_ms", "turn_boundaries"):
+        for name in ("max_turn_seconds", "min_silence_ms", "tail_ms"):
             if name in overrides:
                 command.extend(["--" + name.replace("_", "-"), str(overrides[name])])
     with tempfile.TemporaryDirectory(prefix="stagetts_emilia_settings_") as temporary:
@@ -230,7 +231,7 @@ def write_manifest(
 
 def prepare_dataset(
     config: dict, output: Path, input_audio: Path | None, script_path: Path | None, overlaps: list[Path],
-    *, emilia_filter: dict[str, float | bool | str] | None = None, subtitle_source: Path | None = None,
+    *, emilia_filter: dict[str, float | bool | str] | None = None,
 ) -> None:
     validate_emilia(config)
     segments = []
@@ -260,18 +261,6 @@ def prepare_dataset(
         temp = Path(tmp_name)
         inputs = temp / "emilia"
         inputs.mkdir()
-        runtime_filter = emilia_filter
-        if emilia_filter and emilia_filter.get("fine_turns") and "turn_boundaries" not in emilia_filter:
-            subtitle_media = subtitle_source or source
-            if subtitle_source is not None or source.suffix.lower() not in EMILIA_AUDIO:
-                detected = detect_subtitle_boundaries(subtitle_media, videosubfinder_cli=config.get("videosubfinder_cli"))
-                if detected:
-                    boundary_file = root / "subtitle-boundaries.json"
-                    write_json(boundary_file, detected)
-                    emilia_filter = {**emilia_filter, "turn_boundaries": boundary_file.name}
-                    runtime_filter = {**emilia_filter, "turn_boundaries": str(boundary_file)}
-                    label = detected.get("detector") or f"subtitle stream {detected['stream']} ({detected['codec']})"
-                    print(f"Detected {len(detected['cut_seconds'])} cut points via {label}", flush=True)
         raw = inputs / ("original" + (source.suffix.lower() if source.suffix.lower() in EMILIA_AUDIO else ".wav"))
         if source.suffix.lower() in EMILIA_AUDIO:
             shutil.copyfile(source, raw)
@@ -301,7 +290,7 @@ def prepare_dataset(
                     file_path(Path(track))
             models.append("dialogue-sidon")
 
-        run_emilia(config, inputs, runtime_filter)
+        run_emilia(config, inputs, emilia_filter)
         native = inputs.with_name("emilia_processed")
         if not native.is_dir():
             raise RuntimeError("Emilia-Pipe did not write its native output directory")
@@ -343,8 +332,6 @@ def main() -> None:
     prepare.add_argument("--emilia-max-turn-seconds", type=float, help="Maximum continuous VAD turn in fine mode")
     prepare.add_argument("--emilia-min-silence-ms", type=int, help="Shortest silence kept as a cut in fine mode")
     prepare.add_argument("--emilia-tail-ms", type=int, help="Maximum trailing padding in fine mode (default: 150)")
-    prepare.add_argument("--emilia-turn-boundaries", type=Path, help="Source-aligned JSON list of cut_seconds")
-    prepare.add_argument("--emilia-subtitle-source", type=Path, help="Aligned video to probe when the input is audio")
     features = subparsers.add_parser("features", help="Extract representations from reviewed speech clips")
     features.add_argument("--input", type=Path, action="append", required=True)
     features.add_argument("--output", type=Path, required=True)
@@ -358,11 +345,9 @@ def main() -> None:
         if args.command == "prepare":
             if not args.emilia_fine_turns and any(value is not None for value in (
                 args.emilia_max_turn_seconds, args.emilia_min_silence_ms,
-                args.emilia_tail_ms, args.emilia_turn_boundaries, args.emilia_subtitle_source,
+                args.emilia_tail_ms,
             )):
                 raise ValueError("Turn tuning options require --emilia-fine-turns")
-            if args.emilia_turn_boundaries is not None and args.emilia_subtitle_source is not None:
-                raise ValueError("Use either a cut-point JSON or a source video for subtitle detection")
             overrides = None
             if args.emilia_min_clip_seconds is not None or args.emilia_min_dnsmos is not None or args.emilia_fine_turns:
                 overrides = {
@@ -387,13 +372,10 @@ def main() -> None:
                         if not (20 <= args.emilia_min_silence_ms <= 1000):
                             raise ValueError("VAD silence must be within 20–1000 ms")
                         overrides["min_silence_ms"] = args.emilia_min_silence_ms
-                    if args.emilia_turn_boundaries is not None:
-                        overrides["turn_boundaries"] = str(file_path(args.emilia_turn_boundaries.resolve()))
             prepare_dataset(
                 config, args.output.resolve(), args.input.resolve() if args.input else None,
                 args.project.resolve() if args.project else None, [p.resolve() for p in args.overlap],
                 emilia_filter=overrides,
-                subtitle_source=file_path(args.emilia_subtitle_source.resolve()) if args.emilia_subtitle_source else None,
             )
         elif args.command == "features":
             pack_clips(config, args.output.resolve(), [p.resolve() for p in args.input])

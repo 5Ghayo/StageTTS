@@ -59,6 +59,8 @@ FFmpeg 混音导出 output.mp4
 
 应用解析固定使用 Banquet 四轨分离 → WhisperX 转写与词级对齐 → DiariZen Large v2 说话人分离 → LLM 翻译 → GPT-SoVITS 配音。DiariZen 在独立环境运行，配置见 [DiariZen 设置](docs/diarizen_setup.md)。重叠和覆盖不足的片段保留 UNKNOWN 并等待人工校对。
 
+**文本仅来自音频听力识别**，再由 LLM 翻译为中文；不读取字幕轨、不做字幕 OCR、不使用字幕时间点切句。生成后的文字预览和字幕导出保留。WhisperX 先依据音频 VAD 按停顿细切（连续语音约 8 秒、250 毫秒停顿），对齐后再结合句末标点和人物切换细分。
+
 ---
 
 ## 2. 当前开发进度与已知边界

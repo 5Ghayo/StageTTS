@@ -450,6 +450,8 @@ def _stage_whisperx_asr_align(
     _enable_pyannote_torch_load_compat()
     import whisperx
 
+    from workers.speech_segmentation import ASR_MAX_SPEECH_SECONDS, enable_sentence_vad
+
     audio = whisperx.load_audio(str(vocals_wav))
 
     candidates: List[Tuple[str, str, int]] = []
@@ -472,7 +474,8 @@ def _stage_whisperx_asr_align(
                 device=dev,
                 compute_type=ctype,
             )
-            result = model.transcribe(audio, batch_size=batch_size)
+            enable_sentence_vad(model)
+            result = model.transcribe(audio, batch_size=batch_size, chunk_size=ASR_MAX_SPEECH_SECONDS)
             used_device = dev
             _log(
                 "Stage2",
@@ -529,7 +532,7 @@ def _unknown_speaker_segments(segments: List[Dict[str, Any]], reason: str,
     """UNKNOWN 是未确认归属的占位符；分别保留源片段，不能据此合并为同一人。"""
     normalized = []
     for raw in segments:
-        for part in normalize_segments([raw], diarized=False, language=language):
+        for part in normalize_segments([raw], diarized=False, language=language, split_sentences=True):
             part["speaker"] = "UNKNOWN"
             part["speaker_needs_review"] = True
             part["speaker_fallback_reason"] = reason
@@ -546,7 +549,8 @@ def _review_assigned_speakers(segments: List[Dict[str, Any]], language: str | No
     prepared = []
     for raw in segments:
         prepared.append({**raw, "speaker": str(raw.get("speaker") or "").strip() or "UNKNOWN"})
-    for part in normalize_segments(prepared, diarized=True, language=language, trim_to_aligned_words=True):
+    for part in normalize_segments(prepared, diarized=True, language=language,
+                                   trim_to_aligned_words=True, split_sentences=True):
         words = part.get("words") or []
         labels = [str(word.get("speaker") or "").strip() for word in words]
         has_speaker = any(label and label != "UNKNOWN" for label in labels)
@@ -738,6 +742,8 @@ def _build_and_save_script(
             EvidenceProvenance(stage="asr", model=getattr(args, "whisper_model", "large-v3"),
                                model_version=package_version("whisperx"), source_id=source_id,
                                parameters={"audio_source": "dialogue", "language": detected_lang,
+                                           "text_source": "audio_asr_only", "subtitle_input": False,
+                                           "asr_max_speech_seconds": 8.0, "asr_min_silence_seconds": 0.25,
                                            "timestamp_granularity": "word_or_unknown"}),
             EvidenceProvenance(stage="diarization", model="BUT-FIT/diarizen-wavlm-large-s80-md-v2",
                                model_version=evidence_context.get("diarization_revision"), source_id=source_id,
