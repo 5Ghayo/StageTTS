@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import re
 import shutil
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import AsyncIterator, Dict, List
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
+from backend.services.llm_settings import (
+    LLMSettingsResponse, LLMSettingsUpdate, get_llm_snapshot, save_llm_settings,
+)
 from backend import config
 from backend.agent.orchestrator import run_agent_chat
 from backend.agent.tools import (
@@ -41,6 +48,7 @@ from backend.schemas import (
     RenderResponse,
     SynthesizeRequest,
     SynthesizeResponse,
+    TranslationRequest,
     TranslationResponse,
     UploadResponse,
 )
@@ -50,6 +58,8 @@ from backend.services.task_runner import (
     GpuBusyError,
     ParseWorkerError,
     get_parse_progress,
+    gpu_task_guard,
+    ensure_tts_stopped,
     is_gpu_busy,
     probe_media_duration,
     read_gpu_memory,
@@ -173,6 +183,16 @@ def _find_input_media(project_id: str, script: ProjectScript | None) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/settings/llm", response_model=LLMSettingsResponse)
+def read_llm_settings() -> LLMSettingsResponse:
+    return get_llm_snapshot().public()
+
+
+@app.put("/api/settings/llm", response_model=LLMSettingsResponse)
+def update_llm_settings(req: LLMSettingsUpdate) -> LLMSettingsResponse:
+    return save_llm_settings(req)
+
+
 @app.get("/api/health", response_model=HealthResponse)
 def health_check() -> Dict[str, object]:
     """服务健康检查、GPU 单任务锁状态与外部环境就绪度探测。"""
@@ -225,7 +245,30 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
         raise ValueError(
             f"路径 project_id ({safe_id}) 与请求体 project_id ({payload.project_id}) 不一致"
         )
-    save_project_script(payload)
+    with project_task_guard(safe_id):
+        try:
+            previous = load_project_script(safe_id)
+        except FileNotFoundError:
+            previous = None
+        if previous is not None:
+            originals = {segment.id: segment for segment in previous.segments}
+            for segment in payload.segments:
+                before = originals.get(segment.id)
+                if before is None:
+                    segment.alignment_granularity = "unknown"
+                    segment.timing_source = "unknown"
+                    segment.segment_timing_needs_review = True
+                    continue
+                # Source capabilities come from parsing, not a client-side claim.
+                segment.alignment_granularity = before.alignment_granularity
+                segment.timing_source = before.timing_source
+                if (segment.orig_text, segment.start, segment.end, segment.speaker) != (
+                    before.orig_text, before.start, before.end, before.speaker
+                ) or payload.media.vocals_wav != previous.media.vocals_wav:
+                    segment.segment_timing_needs_review = True
+                if (segment.orig_text, segment.start, segment.end) != (before.orig_text, before.start, before.end):
+                    segment.alignment_needs_review = True
+        save_project_script(payload)
     return payload
 
 
@@ -252,20 +295,53 @@ def preview_automatic_reference(project_id: str, speaker: str) -> ReferencePrevi
 
 
 @app.post("/api/projects/{project_id}/translate", response_model=TranslationResponse)
-def retranslate_project(project_id: str) -> TranslationResponse:
+def retranslate_project(project_id: str, req: TranslationRequest | None = None) -> TranslationResponse:
+    """Resume from saved source text; never invoke the media parsing worker."""
     safe_id = _validate_project_id(project_id)
     with project_task_guard(safe_id):
         script = load_project_script(safe_id)
+        if not script.segments:
+            raise ValueError("没有可翻译片段。请先解析媒体或导入含原文台词的剧本，再从翻译步骤开始。")
+        eligible = {seg.id for seg in script.segments if seg.orig_text.strip()}
+        if not eligible:
+            raise ValueError("片段原文 orig_text 为空。请先补全原文台词，再从翻译步骤开始。")
+
+        # Translate an isolated candidate. A language override must not relabel
+        # failed rows or leave old TTS audio attached to the wrong language.
+        candidate = script.model_copy(deep=True)
+        target_lang = req.target_lang.lower() if req is not None and req.target_lang is not None else None
+        if target_lang is not None:
+            for seg in candidate.segments:
+                if seg.id in eligible:
+                    seg.target_lang = target_lang
         batch_errors: list[str] = []
-        translated = translate_script(script, create_openai_client(), errors=batch_errors)
-        if not translated and batch_errors:
-            raise LLMServiceError(f"台词重译失败：{batch_errors[0]}")
-        if translated:
-            save_project_script(script)
+        translated = translate_script(candidate, create_openai_client(), errors=batch_errors)
+        successful = set(translated) & eligible
+        if not successful:
+            detail = batch_errors[0] if batch_errors else "LLM 未返回任何合法译文，请检查模型配置后重试"
+            raise LLMServiceError(f"台词重译失败：{detail}")
+
+        candidates = {seg.id: seg for seg in candidate.segments}
+        for seg in script.segments:
+            if seg.id not in successful:
+                continue
+            result = candidates[seg.id]
+            before_audio = (seg.target_text, seg.target_lang, seg.emotion, seg.keep_original)
+            seg.target_text = result.target_text
+            seg.target_lang = result.target_lang
+            seg.emotion = result.emotion
+            seg.action = result.action
+            seg.keep_original = result.keep_original
+            if (seg.target_text, seg.target_lang, seg.emotion, seg.keep_original) != before_audio:
+                seg.invalidate_audio()
+        missing = eligible - successful
+        if missing and not batch_errors:
+            batch_errors.append("以下片段未返回合法译文，已保留旧文本/语种/音频：" + ", ".join(f"#{item}" for item in sorted(missing)))
+        save_project_script(script)
         return TranslationResponse(
             script=script,
-            translated_ids=translated,
-            skipped_count=len(script.segments) - len(translated),
+            translated_ids=sorted(successful),
+            skipped_count=len(script.segments) - len(successful),
             errors=batch_errors,
         )
 
@@ -377,10 +453,89 @@ def parse_project_media(project_id: str, req: ParseRequest) -> ProjectScript:
             project_id=safe_id,
             input_path=input_path,
             target_lang=req.target_lang,
-            compute_type=req.compute_type,
+            source_lang=req.source_lang or (existing_script.source_lang if existing_script else None),
             mode=mode,
         )
         return load_project_script(safe_id)
+
+
+class PerformanceAnalysisRequest(BaseModel):
+    segment_ids: List[int] | None = None
+    enable_emotion: bool = False
+    enable_prosody: bool = True
+
+
+class PerformanceAnalysisResponse(BaseModel):
+    project_id: str
+    status: str
+    stage_status: Dict[str, str] = Field(default_factory=dict)
+    review_reasons: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    script: ProjectScript
+
+
+@app.post("/api/projects/{project_id}/analyze-performance", response_model=PerformanceAnalysisResponse)
+def analyze_project_source(project_id: str, req: PerformanceAnalysisRequest) -> PerformanceAnalysisResponse:
+    """Explicit local source analysis; no downloads or inferred neutral defaults."""
+    from backend.services.performance_analysis import analyze_project_performance, apply_analysis_to_evidence
+
+    safe_id = _validate_project_id(project_id)
+    with project_task_guard(safe_id):
+        script = load_project_script(safe_id)
+        known_ids = {seg.id for seg in script.segments}
+        if req.segment_ids is not None and not set(req.segment_ids) <= known_ids:
+            raise ValueError("分析请求包含不存在的片段 ID")
+        if not req.enable_emotion and not req.enable_prosody:
+            raise ValueError("请至少选择一项源声分析")
+        source_path = config.resolve_media_path(script.media.vocals_wav) if script.media.vocals_wav else None
+        with gpu_task_guard() if req.enable_emotion else nullcontext():
+            ser_configured = all((config.ENV_ANALYSIS_PYTHON, config.EMOTION_MODEL_PATH,
+                                  config.EMOTION_MODEL_ID, config.EMOTION_REVISION,
+                                  config.EMOTION_FUNASR_VERSION, config.EMOTION_USER_AUTHORIZED))
+            if req.enable_emotion and ser_configured:
+                # Serialize managed GPU stages; never terminate an external TTS process.
+                if config.TTS_AUTO_MANAGE:
+                    ensure_tts_stopped()
+                tts_host = urlparse(config.TTS_API_URL).hostname or "localhost"
+                try:
+                    local_tts = ipaddress.ip_address(tts_host).is_loopback or ipaddress.ip_address(tts_host).is_unspecified
+                except ValueError:
+                    local_tts = tts_host.lower() == "localhost"
+                if local_tts and check_tts_service():
+                    raise GpuBusyError("源声情绪分析前请释放本机外部 GPT-SoVITS 服务，避免同时占用显存。")
+            report = analyze_project_performance(
+                script,
+                segment_ids=req.segment_ids,
+                audio_path=source_path,
+                enable_emotion=req.enable_emotion,
+                enable_prosody=req.enable_prosody,
+                emotion_python=config.ENV_ANALYSIS_PYTHON or None,
+                emotion_worker_path=config.ROOT_DIR / "workers" / "emotion_worker.py",
+                emotion_model_path=str(config.EMOTION_MODEL_PATH) if config.EMOTION_MODEL_PATH else None,
+                emotion_model_id=config.EMOTION_MODEL_ID or None,
+                emotion_revision=config.EMOTION_REVISION or None,
+                emotion_funasr_version=config.EMOTION_FUNASR_VERSION or None,
+                emotion_user_authorized=config.EMOTION_USER_AUTHORIZED,
+                emotion_device=config.EMOTION_DEVICE,
+                enable_f0=config.ANALYSIS_ENABLE_F0,
+                prosody_python=config.ENV_ANALYSIS_PYTHON or None,
+                prosody_worker_path=config.ROOT_DIR / "workers" / "prosody_worker.py",
+            )
+        annotations = apply_analysis_to_evidence(script, report)
+        if script.evidence is not None and annotations:
+            additions = {annotation.id: annotation for annotation in annotations}
+            previous = [annotation for annotation in script.evidence.annotations if annotation.id not in additions]
+            evidence = script.evidence.model_copy(update={"annotations": [*previous, *annotations]})
+            script = ProjectScript.model_validate({**script.model_dump(), "evidence": evidence.model_dump()})
+            save_project_script(script)
+        return PerformanceAnalysisResponse(
+            project_id=safe_id,
+            status=report.status,
+            stage_status={"emotion": report.emotion.status, "prosody": report.prosody.status},
+            review_reasons=report.review_reasons,
+            errors=report.errors,
+            script=script,
+        )
 
 
 @app.post("/api/projects/{project_id}/synthesize", response_model=SynthesizeResponse)

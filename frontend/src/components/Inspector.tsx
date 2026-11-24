@@ -2,16 +2,20 @@ import {
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
+  GitMerge,
   Pause,
   Play,
   Save,
+  Scissors,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { getCacheBustedUrl, useProjectStore } from "../store/useProjectStore";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 import type { EmotionType } from "../types/script";
+import { SourceEvidencePanel } from "./SourceEvidencePanel";
 import { isSegmentOverflow, isSegmentTooShort } from "../utils/synthesisIssues";
 
 const EMOTIONS: Array<{ id: EmotionType; label: string; dotColor: string }> = [
@@ -21,6 +25,15 @@ const EMOTIONS: Array<{ id: EmotionType; label: string; dotColor: string }> = [
   { id: "sad", label: "悲伤", dotColor: "#5B8DEF" },
   { id: "whisper", label: "低语", dotColor: "#9A86B8" },
 ];
+
+const SPEAKER_FALLBACK_LABELS: Record<string, string> = {
+  diarization_skipped: "已跳过说话人识别",
+  hf_token_missing: "未配置说话人识别凭据",
+  diarization_import_failed: "说话人识别组件加载失败",
+  diarization_failed: "说话人识别失败",
+  speaker_assignment_missing: "没有可靠的角色归属",
+  word_speaker_missing: "部分字词的角色归属缺失",
+};
 
 function formatMiniTime(sec: number): string {
   const safe = Math.max(0, Number.isFinite(sec) ? sec : 0);
@@ -42,10 +55,16 @@ export const Inspector: React.FC = () => {
 
   const stepSegment = useProjectStore((s) => s.stepSegment);
   const updateSegmentLocal = useProjectStore((s) => s.updateSegmentLocal);
+  const splitSegment = useProjectStore((s) => s.splitSegment);
+  const mergeSegmentWithNext = useProjectStore((s) => s.mergeSegmentWithNext);
+  const deleteSegment = useProjectStore((s) => s.deleteSegment);
   const saveProjectScript = useProjectStore((s) => s.saveProjectScript);
   const synthesizeSegment = useProjectStore((s) => s.synthesizeSegment);
+  const currentTime = useProjectStore((s) => s.currentTime);
 
   const [synthNote, setSynthNote] = useState<string | null>(null);
+  const [startDraft, setStartDraft] = useState("");
+  const [endDraft, setEndDraft] = useState("");
 
   // 自定义极简试听条状态
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -84,6 +103,15 @@ export const Inspector: React.FC = () => {
       sourceAudioRef.current?.pause();
     }
   }, [activeSegmentId]);
+
+  const segStart = segment?.start;
+  const segEnd = segment?.end;
+  useEffect(() => {
+    if (activeSegmentId !== null && segStart !== undefined && segEnd !== undefined) {
+      setStartDraft(segStart.toFixed(2));
+      setEndDraft(segEnd.toFixed(2));
+    }
+  }, [activeSegmentId, segStart, segEnd]);
 
   if (!script || !segment) {
     return (
@@ -156,36 +184,142 @@ export const Inspector: React.FC = () => {
     window.setTimeout(() => setSynthNote(null), 3500);
   };
 
+  const commitStartDraft = () => {
+    const trimmed = startDraft.trim();
+    const val = Number(trimmed);
+    if (!trimmed || !Number.isFinite(val) || val < 0 || segment.end - val < 0.2) {
+      setStartDraft(segment.start.toFixed(2));
+      return;
+    }
+    const rounded = Number(val.toFixed(2));
+    setStartDraft(rounded.toFixed(2));
+    if (rounded !== Number(segment.start.toFixed(2))) {
+      updateSegmentLocal({ id: segment.id, start: rounded });
+    }
+  };
+
+  const commitEndDraft = () => {
+    const trimmed = endDraft.trim();
+    const val = Number(trimmed);
+    if (!trimmed || !Number.isFinite(val) || val - segment.start < 0.2) {
+      setEndDraft(segment.end.toFixed(2));
+      return;
+    }
+    const rounded = Number(val.toFixed(2));
+    setEndDraft(rounded.toFixed(2));
+    if (rounded !== Number(segment.end.toFixed(2))) {
+      updateSegmentLocal({ id: segment.id, end: rounded });
+    }
+  };
+
   return (
     <div className="flex h-full flex-col justify-between overflow-hidden bg-[#222222] text-[12px]">
       <div className="flex-1 space-y-3 overflow-y-auto py-3 pl-3.5 pr-4">
-        {/* 片段导航头 */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex min-w-0 items-baseline gap-2 truncate">
-            <span className="shrink-0 text-[13px] font-medium text-primary">
-              片段 #{segment.id}
-            </span>
-            <span className="truncate font-mono tabular-nums text-[11px] text-secondary">
-              {segment.start.toFixed(1)}s – {segment.end.toFixed(1)}s
-            </span>
+        {/* 片段导航头与结构精修 */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-baseline gap-2 truncate">
+              <span className="shrink-0 text-[13px] font-medium text-primary">
+                片段 #{segment.id}
+              </span>
+              <span className="truncate font-mono tabular-nums text-[11px] text-secondary">
+                {slotDuration.toFixed(2)}s
+              </span>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <button
+                type="button"
+                disabled={editsDisabled || slotDuration < 0.4}
+                onClick={() => splitSegment(segment.id, currentTime)}
+                className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-[#2C2C2C] text-secondary transition-colors hover:bg-[#363636] hover:text-primary disabled:opacity-40"
+                title="分割当前片段"
+              >
+                <Scissors className="h-3.5 w-3.5" strokeWidth={1.5} />
+              </button>
+              <button
+                type="button"
+                disabled={editsDisabled}
+                onClick={() => mergeSegmentWithNext(segment.id)}
+                className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-[#2C2C2C] text-secondary transition-colors hover:bg-[#363636] hover:text-primary disabled:opacity-40"
+                title="与下一句合并"
+              >
+                <GitMerge className="h-3.5 w-3.5" strokeWidth={1.5} />
+              </button>
+              <button
+                type="button"
+                disabled={editsDisabled}
+                onClick={() => deleteSegment(segment.id)}
+                className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-[#2C2C2C] text-secondary transition-colors hover:bg-[#363636] hover:text-status-error disabled:opacity-40"
+                title="删除片段"
+              >
+                <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+              </button>
+              <button
+                type="button"
+                onClick={() => stepSegment(-1)}
+                className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-[#2C2C2C] text-secondary transition-colors hover:bg-[#363636] hover:text-primary"
+                title="上一句"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+              </button>
+              <button
+                type="button"
+                onClick={() => stepSegment(1)}
+                className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-[#2C2C2C] text-secondary transition-colors hover:bg-[#363636] hover:text-primary"
+                title="下一句"
+              >
+                <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
+              </button>
+            </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <button
-              type="button"
-              onClick={() => stepSegment(-1)}
-              className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-[#2C2C2C] text-secondary transition-colors hover:bg-[#363636] hover:text-primary"
-              title="上一句"
-            >
-              <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </button>
-            <button
-              type="button"
-              onClick={() => stepSegment(1)}
-              className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-[#2C2C2C] text-secondary transition-colors hover:bg-[#363636] hover:text-primary"
-              title="下一句"
-            >
-              <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </button>
+
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex items-center justify-between gap-1.5 rounded-[4px] border border-white/[0.06] bg-[#181818] px-2 py-1 text-[11px] text-secondary">
+              <span>开始(s)</span>
+              <input
+                aria-label="片段开始时间"
+                type="number"
+                step={0.05}
+                min={0}
+                disabled={editsDisabled}
+                value={startDraft}
+                onChange={(e) => setStartDraft(e.target.value)}
+                onBlur={commitStartDraft}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    commitStartDraft();
+                    e.currentTarget.blur();
+                  } else if (e.key === "Escape") {
+                    setStartDraft(segment.start.toFixed(2));
+                    e.currentTarget.blur();
+                  }
+                }}
+                className="w-16 bg-transparent text-right font-mono tabular-nums text-primary outline-none"
+              />
+            </label>
+            <label className="flex items-center justify-between gap-1.5 rounded-[4px] border border-white/[0.06] bg-[#181818] px-2 py-1 text-[11px] text-secondary">
+              <span>结束(s)</span>
+              <input
+                aria-label="片段结束时间"
+                type="number"
+                step={0.05}
+                min={Number((segment.start + 0.2).toFixed(2))}
+                disabled={editsDisabled}
+                value={endDraft}
+                onChange={(e) => setEndDraft(e.target.value)}
+                onBlur={commitEndDraft}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    commitEndDraft();
+                    e.currentTarget.blur();
+                  } else if (e.key === "Escape") {
+                    setEndDraft(segment.end.toFixed(2));
+                    e.currentTarget.blur();
+                  }
+                }}
+                className="w-16 bg-transparent text-right font-mono tabular-nums text-primary outline-none"
+              />
+            </label>
           </div>
         </div>
 
@@ -233,18 +367,35 @@ export const Inspector: React.FC = () => {
             value={segment.orig_text}
             onChange={(e) => updateSegmentLocal({ id: segment.id, orig_text: e.target.value })}
           />
-          {segment.alignment_needs_review !== false && (
+          <p className="text-[11px] text-secondary">
+            时间粒度：{segment.alignment_granularity === "word" ? "词级" : segment.alignment_granularity === "segment" ? "句段级" : "未声明"}
+            {segment.timing_source === "moss_joint_generated" && " · MOSS 句段预测"}
+          </p>
+          {segment.segment_timing_needs_review !== false && (
             <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
-              <span className="text-status-warning">原文与时间范围待校对</span>
+              <span className="text-status-warning">整段原文与音频边界待确认</span>
               <button
                 type="button"
                 className="text-secondary hover:text-primary"
                 disabled={editsDisabled || !segment.orig_text.trim()}
+                onClick={() => updateSegmentLocal({ id: segment.id, segment_timing_needs_review: false })}
+              >
+                确认句段时间与原文
+              </button>
+            </div>
+          )}
+          {segment.alignment_needs_review !== false && (
+            <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
+              <span className="text-status-warning">词级对齐待校对{!segment.words?.length && "（无词级时间）"}</span>
+              <button
+                type="button"
+                className="text-secondary hover:text-primary"
+                disabled={editsDisabled || !segment.orig_text.trim() || !segment.words?.length}
                 onClick={() =>
                   updateSegmentLocal({ id: segment.id, alignment_needs_review: false })
                 }
               >
-                确认原文与时间范围
+                确认已有词级对齐
               </button>
             </div>
           )}
@@ -264,6 +415,8 @@ export const Inspector: React.FC = () => {
             </details>
           )}
         </div>
+
+        <SourceEvidencePanel key={`${script.project_id}-${segment.id}`} script={script} segment={segment} />
 
         {/* 配音台词输入（#181818 哑光凹槽，无亮框） */}
         <div className="space-y-1.5 border-t border-dashed border-white/[0.08] pt-3">
@@ -312,16 +465,23 @@ export const Inspector: React.FC = () => {
           </div>
           {segment.speaker_needs_review !== false && script.characters[segment.speaker] && (
             <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
-              <span className="text-status-warning">说话人待校对</span>
+              <span className="text-status-warning">
+                {segment.speaker === "UNKNOWN" ? "说话人识别未完成，请指定角色" : "说话人待校对"}
+              </span>
               <button
                 type="button"
                 className="text-secondary hover:text-primary"
-                disabled={editsDisabled}
+                disabled={editsDisabled || segment.speaker === "UNKNOWN"}
                 onClick={() => updateSegmentLocal({ id: segment.id, speaker: segment.speaker })}
               >
                 确认当前说话人
               </button>
             </div>
+          )}
+          {segment.speaker_fallback_reason && segment.speaker_needs_review !== false && (
+            <p className="text-[11px] text-secondary">
+              识别状态：{SPEAKER_FALLBACK_LABELS[segment.speaker_fallback_reason] ?? "需要人工确认角色"}
+            </p>
           )}
 
           <div className="flex items-center gap-2">

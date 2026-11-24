@@ -2,6 +2,7 @@ import createClient from "openapi-fetch";
 import type { components, paths } from "../types/api.generated";
 import type {
   AgentChatResponse,
+  ExportDirsResponse,
   GpuDevice,
   GpuStatusResponse,
   HealthResponse,
@@ -10,13 +11,20 @@ import type {
   ProjectScript,
   ReferencePreview,
   ReferenceUploadResponse,
+  RenderRequest,
   RenderResponse,
+  ScriptSnapshotListResponse,
+  SubtitleLayout,
   SynthesizeResponse,
   TranslationResponse,
   UploadResponse,
+  VoicePreset,
+  VoicePresetCreateRequest,
+  VoicePresetDeleteResponse,
+  VoicePresetListResponse,
 } from "../types/script";
 
-export type { GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
+export type { ExportDirsResponse, GpuDevice, HealthResponse, ParseStatusResponse, UploadResponse };
 
 export class ApiError extends Error {
   status: number;
@@ -56,6 +64,17 @@ async function unwrap<T>(
   }
 
   return result.data;
+}
+
+export type LLMSettings = components["schemas"]["LLMSettingsResponse"];
+export type LLMSettingsUpdate = components["schemas"]["LLMSettingsUpdate"];
+
+export function fetchLLMSettings(): Promise<LLMSettings> {
+  return unwrap(apiClient.GET("/api/settings/llm", { cache: "no-store" }));
+}
+
+export function saveLLMSettings(settings: LLMSettingsUpdate): Promise<LLMSettings> {
+  return unwrap(apiClient.PUT("/api/settings/llm", { body: settings }));
 }
 
 export function checkHealth(): Promise<HealthResponse> {
@@ -128,24 +147,30 @@ export function previewAutomaticReference(
   );
 }
 
-export function translateProject(projectId: string): Promise<TranslationResponse> {
+export function translateProject(
+  projectId: string,
+  options?: { target_lang?: string | null },
+): Promise<TranslationResponse> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/translate", {
       params: { path: { project_id: projectId } },
+      body: options,
     }),
   );
 }
 
 export function parseProjectMedia(
   projectId: string,
-  options: { target_lang: string; compute_type: "float16" | "int8" },
+  options: { target_lang: string; source_lang?: string | null },
 ): Promise<ProjectScript> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/parse", {
       params: { path: { project_id: projectId } },
       body: {
         target_lang: options.target_lang,
-        compute_type: options.compute_type,
+        source_lang: options.source_lang && ["zh", "en", "ja", "ko", "yue"].includes(options.source_lang)
+          ? options.source_lang as "zh" | "en" | "ja" | "ko" | "yue"
+          : undefined,
       },
     }),
   );
@@ -215,11 +240,78 @@ export function sendAgentChat(
   );
 }
 
-export function renderVideo(projectId: string, burnWatermark = false): Promise<RenderResponse> {
+export function fetchExportDirs(): Promise<ExportDirsResponse> {
+  return unwrap(apiClient.GET("/api/export/dirs"));
+}
+
+export function getSubtitlesUrl(projectId: string, layout: SubtitleLayout = "target"): string {
+  return `/api/projects/${encodeURIComponent(projectId)}/subtitles?layout=${encodeURIComponent(layout)}`;
+}
+
+export function renderVideo(
+  projectId: string,
+  options: Partial<RenderRequest> = {},
+): Promise<RenderResponse> {
   return unwrap(
     apiClient.POST("/api/projects/{project_id}/render", {
       params: { path: { project_id: projectId } },
-      body: { burn_watermark: burnWatermark },
+      body: {
+        burn_watermark: false,
+        burn_subtitles: "none",
+        ...options,
+      },
+    }),
+  );
+}
+
+export function fetchProjectHistory(projectId: string): Promise<ScriptSnapshotListResponse> {
+  return unwrap(
+    apiClient.GET("/api/projects/{project_id}/history", {
+      params: { path: { project_id: projectId } },
+    }),
+  );
+}
+
+export function restoreProjectSnapshot(
+  projectId: string,
+  snapshotId: string,
+): Promise<ProjectScript> {
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/history/{snapshot_id}/restore", {
+      params: { path: { project_id: projectId, snapshot_id: snapshotId } },
+    }),
+  );
+}
+
+export function fetchVoicePresets(): Promise<VoicePresetListResponse> {
+  return unwrap(apiClient.GET("/api/voice-presets"));
+}
+
+export function createVoicePreset(payload: VoicePresetCreateRequest): Promise<VoicePreset> {
+  return unwrap(
+    apiClient.POST("/api/voice-presets", {
+      body: payload,
+    }),
+  );
+}
+
+export function deleteVoicePreset(presetId: string): Promise<VoicePresetDeleteResponse> {
+  return unwrap(
+    apiClient.DELETE("/api/voice-presets/{preset_id}", {
+      params: { path: { preset_id: presetId } },
+    }),
+  );
+}
+
+export function analyzePerformance(
+  projectId: string,
+  segmentIds: number[],
+  enableEmotion = false,
+): Promise<components["schemas"]["PerformanceAnalysisResponse"]> {
+  return unwrap(
+    apiClient.POST("/api/projects/{project_id}/analyze-performance", {
+      params: { path: { project_id: projectId } },
+      body: { segment_ids: segmentIds, enable_emotion: enableEmotion, enable_prosody: true },
     }),
   );
 }

@@ -105,3 +105,6 @@ assets/refs/*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Private UI LLM preferences
+backend/llm_settings.local.json

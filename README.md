@@ -28,16 +28,10 @@
    - FFmpeg
 
    可以只启动后端 + 前端，加载内置 demo 看 UI。  
-   如果要真正跑解析和配音，还要额外配置 `env_parse` 和 GPT-SoVITS。
+   如果要真正跑解析和配音，还要额外配置独立的 `env_parse`（Banquet + MOSS）和 GPT-SoVITS。
 
 4. **不同电脑不用完全照抄开发机路径**  
-   本 README 中的 `F:\Download\StageTTS`、`C:\Project\GPT-SoVITS...` 只是当前开发机示例。  
-   你完全可以改成：
-   - `D:\StageTTS\env_parse`
-   - `E:\AI\GPT-SoVITS`
-   - `F:\AI\hf_cache`
-
-   只要 `backend/.env` 里的路径跟着改即可。
+   本 README 中的 `F:\Download\StageTTS`、`C:\Project\GPT-SoVITS...` 只是当前开发机示例。将 `ENV_PARSE_PYTHON` 指向本机独立 MOSS 环境，并修改 `MOSS_MODEL_PATH`、Banquet、GPT-SoVITS 和缓存路径即可。
 
 ---
 
@@ -46,13 +40,13 @@
 ```text
 视频/音频
   ↓
-Stage0 FFmpeg 抽音频
+Stage0 FFmpeg 抽取音频
   ↓
 Stage1 Banquet 分离对白、歌声、伴奏和音效
   ↓
-Stage2 WhisperX 识别 + 对齐
+Stage2 MOSS-Transcribe-Diarize 联合 ASR + 匿名说话人 + 句段时间
   ↓
-Stage3 pyannote 说话人聚类
+Stage3 对齐候选、证据保留、人工校对（MOSS 不提供词级强制对齐）
   ↓
 Stage4 LLM 翻译 / 情绪 / 动作 / 是否保留原声
   ↓
@@ -63,6 +57,12 @@ GPT-SoVITS 按句合成配音
 FFmpeg 混音导出 output.mp4
 ```
 
+MOSS 主模型固定至本地已审核 revision `10304d926740cf5a5cee05a268086e3265197910`，通过独立 `env_parse` 子进程运行；Banquet 分离、MOSS 联合转录与 GPT-SoVITS 合成串行接力显存。
+
+**时长边界：**MOSS 官方模型说明单次支持最长 **90 分钟**，但 StageTTS 当前配置 `MOSS_MAX_AUDIO_SECONDS=60`，是只在最长 60 秒样本验证过的保守接入上限，不是模型固有上限。超过 60 秒会在分离 / 推理前明确拒绝；目前尚未实现可生产的长视频分块和跨块说话人身份关联。即使是 8GB 显卡，90 分钟官方能力也不等于显存、速度或识别质量已验证。详见 [MOSS 设置与验证记录](docs/moss_setup.md)。
+
+MOSS 输出的是模型联合生成的**句段时间**与窗口内匿名角色标记；不是词级时间、独立重叠检测或跨窗口全局角色身份。保持来源证据和校对提示，禁止将未知角色静默映射为已确认说话人。
+
 ---
 
 ## 2. 当前开发进度与已知边界
@@ -71,8 +71,9 @@ FFmpeg 混音导出 output.mp4
 
 | 模块 | 当前状态 | 说明 |
 | :--- | :---: | :--- |
+| MOSS 联合 ASR 与 diarization | 主解析路径 | Banquet → MOSS → LLM。已完成 MOSS 10 / 30 / 60 秒英日真实推理及独立短样例全流程接入。当前生产入口显式限制 60 秒；90 分钟是上游模型声明，不是本应用验证或承诺。MOSS 仅输出句段时间，词级对齐和准确率仍需审核。|
+| WhisperX + pyannote | 仅历史 / 显式回滚 | 不是默认或静默 fallback；缺少 MOSS 配置或推理失败时明确报错。|
 | `script.json` 数据契约 | 已完成 | Pydantic v2 与 TypeScript 类型 1:1 对齐 |
-| 4 阶段解析流水线 | 已接入 | FFmpeg → Banquet → WhisperX → pyannote → LLM 标注。Banquet 已验证 CPU 短片分轨和导出。ASR 片段会在说话人边界强制切分，过长片段才按语义/停顿切开，过短同角色片段会合并，避免“切得太碎”。 |
 | GPT-SoVITS 分组配音 | 已完成 | 按角色切换权重、按情绪选择参考音，缺失时使用与原文对应的同角色原声片段 |
 | 8GB 显存串行接力 | 已完成 | 解析前释放 GPT-SoVITS，配音时按需拉起 |
 | 配音时长闭环 | 已完成 | 全部配音、全管线和智能体统一支持双向质检：>1.15x 自动精简，<0.8x 自动自然补足；最多两轮，最后才用 0.85–1.15x 温和变速兜底，试听与导出使用同一份调速后的音频 |
@@ -141,14 +142,15 @@ FFmpeg 混音导出 output.mp4
 
 ### 3.2 Stage4 翻译怎么生成？
 
-Stage4 现在是**一次性全文翻译**：
+Stage4 使用**全文源对白上下文 + 每批最多 25 条输出**，不是只调用一次 LLM：
 
-1. 后端把当前项目所有非空原句按时间顺序拼成完整对白；
-2. 每句保留原始 `id`、说话人、角色说话风格、术语表和字数预算；
-3. LLM 先通读整段对白，再按 `id` 返回译文、情绪、动作和是否保留原声；
-4. 后端按 `id` 还原到 `segments`，不会重新编号，也不会合并原句。
+1. 后端把当前项目所有非空原句按时间顺序拼成完整源对白，每批请求都携带；
+2. 每句保留原始 `id`、说话人、角色说话风格、术语表和软字数预算；
+3. LLM 通读对白，为当前批次的 `id` 返回译文、情绪、动作和原声事件建议；
+4. 后端严格校验当前批次的 ID、重复和缺失项，保留合法部分，错误显式返回；
+5. 疑似漏译时单独修复译文，保留既有情绪、动作与已有原声保留标记。普通英文词被翻成中文不再被视为漏词。已有保留标记尚无人工/模型来源字段，可能包含旧模型误判，需要人工复核；M0不自动清除存量布尔值。
 
-这样比“逐句孤立翻译”更能保持角色语气、前后承接和人名/术语一致性。
+全文上下文帮助保持前后承接和术语一致性，语义完整性仍需校验与试听。正常短应答（Yes、Go、你好、はい等）必须翻译，不能仅因短或 LLM 返回布尔值就保留外语原声；自动保留仅允许明确非语言事件记号。
 
 ### 3.3 它给 GPT-SoVITS 提供什么？
 
@@ -182,10 +184,17 @@ Stage4 现在是**一次性全文翻译**：
 1. `characters[speaker].emotion_refs[emotion]` 中人工上传/绑定的参考音优先级最高；
 2. 没有人工参考音时，按 `segment.emotion → neutral → 任意可用情绪` 回退；
 3. 仍然没有时，才调用 `automatic_reference()` 从 `media.vocals_wav` 指向的音轨 生成自动候选；
-4. 自动候选只选择**原文已校对、说话人已确认、3–10 秒、没有与其他说话人重叠**的同角色连续原句；
-5. 候选优先选一段完整连续台词，其次选接近 5 秒的片段；
-6. 自动候选的 `prompt_text` 仍来自 `orig_text`，所以如果 WhisperX 原文错得厉害，建议人工上传参考音并填写逐字稿；
+4. 已校对路径选择**原文已校对、说话人已确认、3–10 秒、没有与其他说话人重叠**的同角色连续原句；MOSS 未校对句段使用第 6 条的独立重识别路径；
+5. 优先使用完整 3–10 秒已确认台词；长段只有在词级文本严格对应当前 `orig_text`、时间有效、词级说话人明确且没有其他角色重叠时才能按词边界裁剪，参考文本只包含裁剪窗口中的词；
+6. MOSS 句段级结果没有合适的已校对参考时，自动从同角色、无已知重叠的句段选取最多 8 秒音频，在独立 CPU 子进程中用本地 MOSS 重新识别这段音频；识别完整、单说话人才使用裁剪音频对应的新逐字稿。首次较慢，音频及带来源信息的逐字稿会缓存在项目 references 目录；人工审核状态不变，角色归属仍继承模型预测。UNKNOWN 不自动取用，失败时提示上传参考音；参考语言始终填音频真实语种；
 7. GPT-SoVITS 的 `/tts` 请求里 `speed_factor` 固定传 `1.0`，角色/片段的 `speed_factor` 是在后端用 FFmpeg `atempo` 对成品 WAV 做温和变速，试听和导出使用同一份处理后的文件。
+
+### 3.4 M0 正确性边界
+
+- 解析跳过/失败的说话人标为 `UNKNOWN`，保留失败原因并待校对，不冒充已经确认的单人；在精修面板指定真实角色后再确认。
+- 长段优先自然停顿与句法边界；中日逐字对齐不能用任意 14 秒边界强切。允许受控延长，仍无可靠边界时保留完整原文并标记待审。
+- 导出保留完整配音 WAV。超出原句槽但能放进后续空隙的尾部可保留；若新增串话或超过项目/源视频边界则明确阻塞导出待审，不删波形尾部、不改变源视频时长。旧项目的导出调速同样在调速后校验。
+- M0 没有引入新说话人模型、声学情绪模型或新的 TTS。现有五类情绪只用于文本标记/参考音路由，不代表 GPT-SoVITS 接受任意情绪指令，也不保证源片表演或跨语种韵律逐词复现。
 
 ---
 
@@ -199,8 +208,9 @@ Stage4 现在是**一次性全文翻译**：
 | Node.js | 前端 Vite 项目 | 必须 | Node.js 20 LTS |
 | Python backend | 跑 FastAPI 后端 | 必须 | Python 3.10+ |
 | GPT-SoVITS | 生成配音 | 完整流程必须 | RTX 50 系列请用 CUDA 12.8 适配版 |
-| env_parse | 跑 Banquet / WhisperX / pyannote | 完整解析必须 | Python 3.12 + torch cu128（开发机方案） |
-| HuggingFace Token | 下载 pyannote 模型 | 说话人分离需要 | 免费，但要在网页同意协议 |
+| env_parse | Banquet 四轨分离 + MOSS 联合识别/说话人/句段时间 | 完整解析必须 | 独立 Python 3.12 + torch / torchaudio 2.8.0+cu128 + Transformers 5.6.0 |
+| Hugging Face Token | 当前本地 MOSS 主解析 | 不需要 | pinned 本地 snapshot；推理时不下载 |
+| WhisperX / pyannote | 明确选择 legacy 时的历史路径 | 默认不需要 | 不参与 MOSS 主依赖或自动回退 |
 | LLM 网关 | 翻译、情绪、动作标注、Agent | 强烈建议 | OpenAI-compatible API 即可 |
 
 ---
@@ -224,32 +234,18 @@ Stage4 现在是**一次性全文翻译**：
 
 这是当前开发机配置，推荐：
 
-- `WHISPER_MODEL=small`
-- `WHISPER_COMPUTE_TYPE=int8`
-- GPT-SoVITS 使用本仓库的 `backend/tts_v2.yaml`
-- 模型缓存放到非 C 盘，例如 `F:\Download\StageTTS\hf_cache`
+- 使用本地 pinned `MOSS-Transcribe-Diarize`（BF16 / SDPA）；最长 60 秒已经在 8GB RTX 5060 Laptop 上实测，详见 [MOSS 实测](docs/moss_setup.md)；
+- `MOSS_MAX_NEW_TOKENS=4096` 是生成 token 上限，不是模型的 90 分钟官方输入能力；应用的 60 秒预算独立配置；
+- GPT-SoVITS 使用本仓库的 `backend/tts_v2.yaml`；
+- 模型缓存放到非系统盘。
 
-不要使用默认 `v2ProPlus`，它在 8GB 笔记本显卡上容易 OOM。
+不要在此 MOSS 环境中混装或自动回退到 WhisperX / pyannote。
 
 ---
 
 ### 情况 C：显存 12GB 或更多
 
-可以尝试更高质量配置：
-
-```env
-WHISPER_MODEL=medium
-WHISPER_COMPUTE_TYPE=float16
-```
-
-如果显存非常充足，例如 16GB+，也可以尝试：
-
-```env
-WHISPER_MODEL=large-v3
-WHISPER_COMPUTE_TYPE=float16
-```
-
-但注意首次下载模型会很大，耗时较长。
+MOSS 本身也支持更长录音，但模型卡的最长 90 分钟声明不代表本应用已支持或目标显卡能承受。当前 StageTTS 仍按最长 60 秒 fail-fast；提高预算需额外做长音频显存、速度、token 完整性及转录质量验证，不能直接据此承诺长视频支持。
 
 ---
 
@@ -258,7 +254,7 @@ WHISPER_COMPUTE_TYPE=float16
 可以启动后端和前端，但不建议跑完整流水线：
 
 - Banquet 会使用 CPU，长视频分轨耗时较长；
-- WhisperX 也能 CPU，但长视频体验很差；
+- MOSS 支持明确的 `cpu` 路径，但吞吐量与可处理长度需自行验证；
 - GPT-SoVITS 实时合成基本不可用。
 
 建议这种电脑只做前端开发、文档、接口 mock 或非实时测试。
@@ -424,36 +420,43 @@ GPT_SOVITS_CONFIG=backend/tts_v2.yaml
 # 自动管理 TTS 进程
 TTS_AUTO_MANAGE=1
 
-# 解析环境 Python
-ENV_PARSE_PYTHON=F:/Download/StageTTS/env_parse/python.exe
-
-# 模型缓存
+ENV_PARSE_PYTHON=F:/Download/StageTTS/env_moss/python.exe
+PARSE_BACKEND=moss
+MOSS_MODEL_PATH=F:/Download/StageTTS/diarization_models/moss-transcribe-diarize
+MOSS_REVISION=10304d926740cf5a5cee05a268086e3265197910
+MOSS_TORCH_VERSION=2.8.0+cu128
+MOSS_TRANSFORMERS_VERSION=5.6.0
+MOSS_CUSTOM_CODE_APPROVED=0 # 仅在本地固定官方代码已审阅并核验 hash 后设置为 1
+MOSS_MAX_AUDIO_SECONDS=60
+MOSS_MAX_NEW_TOKENS=4096
+BANQUET_ROOT=F:/Download/StageTTS/banquet/bandit-v2
+BANQUET_CHECKPOINT=F:/Download/StageTTS/banquet/banquet-split.ckpt
 HF_HOME=F:/Download/StageTTS/hf_cache
 HUGGINGFACE_HUB_CACHE=F:/Download/StageTTS/hf_cache/hub
 TORCH_HOME=F:/Download/StageTTS/torch_cache
 PIP_CACHE_DIR=F:/Download/StageTTS/pip_cache
 
-# WhisperX
-WHISPER_MODEL=small
-WHISPER_COMPUTE_TYPE=int8
+PARSE_TIMEOUT_SEC=1800
+LLM_TIMEOUT_SEC=60
 
-# TTS 服务
-TTS_API_URL=http://127.0.0.1:9880
-
-# LLM，兼容 OpenAI SDK
-LLM_BASE_URL=http://127.0.0.1:3425/v1
+# LLM 配置（示例值；推荐在 UI 顶部「设置」页配置）
 LLM_API_KEY=local-gateway-no-key
 LLM_MODEL=workbuddy-ai/hy4flash-free
-
-# HuggingFace Token
-HF_TOKEN=hf_xxx
 ```
+
+The UI settings page persists model, endpoint and key in the ignored local backend settings file; keep secrets out of tracked documentation. Do not put access tokens in this example.
+
+#### 在 UI 中切换翻译模型
+
+点击顶部“设置”，在“翻译与 LLM”中修改模型名称（服务商提供的模型 ID）、OpenAI 兼容接口根地址和 API Key，然后点击“保存设置”。只换模型时 API Key 留空即可沿用；清除 Key 需要显式勾选。保存不调用模型，也不验证服务商是否支持该模型。
+
+设置保存到后端私有的 `backend/llm_settings.local.json`（已加入 Git 忽略，含明文 Key，不在媒体静态目录中），优先于环境默认值，重启后继续生效；前端不会收到旧 Key，也不会写入浏览器存储。新发起的解析翻译、重译、时长改写和 AI 助手请求共用这套配置；已运行的请求继续使用原配置。
 
 #### 注意
 
 - **不要提交 `backend/.env`**，它已在 `.gitignore` 中。
 - 如果没有本地 LLM 网关，可以填任何 OpenAI-compatible 服务，或者暂时不配置；但不配置时 Stage4 不会翻译，只会保留原文。
-- `HF_TOKEN` 不要发到群里或截图里。
+- **翻译模型设置**：顶部“设置”页或 UI；旧 `.env` 示例仅用于首次默认配置，不得提交密钥。
 
 ---
 
@@ -505,60 +508,23 @@ cd /d C:\Project\GPT-SoVITS-v5-20261006nvidia50x0
 
 ---
 
-### 5.5 配置解析环境 env_parse
+### 5.5 配置解析环境 `env_parse`
 
-`env_parse` 专门跑：
+Banquet 四轨分离和 MOSS 主解析共享一个独立 CUDA 子进程环境；不安装 WhisperX 或 pyannote 作为默认路径，也不把 GPU/ML 包装进 `env_backend`。
 
-- Banquet 四轨分离
-- WhisperX
-- pyannote
-- 词级对齐
-- Stage4 LLM 标注
+#### Banquet 四轨分离
 
-不要把这些包装进 backend 环境。
+1. 在本机检出 [bandit-v2](https://github.com/kwatcharasupat/bandit-v2) 已审查提交 `d5563d9031`，并记录实际 commit/hash。
+2. 单独取得 Netflix 官方 `banquet-split.ckpt`，核对 MD5 `4ac581d6792740f5b7be8e0a3f73c8ea`。
+3. 配置 `BANQUET_ROOT` 和 `BANQUET_CHECKPOINT`。Bandit 依赖须与 MOSS 的 torch/torchaudio ABI 相容；**不要用旧 Banquet requirements 将 torch 2.8 降级**。
 
-#### 推荐方案：复制 GPT-SoVITS runtime
+#### MOSS 依赖、模型与配置
 
-开发机方案是把 GPT-SoVITS 的 runtime 复制到非 C 盘：
+见 [MOSS 设置与验证文档](docs/moss_setup.md)。关键固定信息：Python 3.12、torch/torchaudio 2.8.0+cu128、transformers 5.6.0；MOSS revision 与权重 SHA-256 固定在该文档。先安装 CUDA 12.8 torch 栈，再安装 `workers/requirements-moss.txt`；隔离环境设为 `ENV_PARSE_PYTHON`，backend `.env` 配置 `PARSE_BACKEND=moss`、本地 `MOSS_MODEL_PATH`、固定 revision 与代码审批标志。
 
-```powershell
-mkdir F:\Download\StageTTS
-xcopy /E /I C:\Project\GPT-SoVITS-v5-20261006nvidia50x0\runtime F:\Download\StageTTS\env_parse
-```
+MOSS 官方声明单次最长 90 分钟，但当前经最长 60 秒 GPU 样本验证的应用入口明确默认 `MOSS_MAX_AUDIO_SECONDS=60`。在更长时长完成内存、耗时与生成完整性验证前，不要把应用限制误写成已支持 90 分钟；完整长视频分块和跨块说话人身份关联尚未实现。
 
-确认：
-
-```powershell
-F:\Download\StageTTS\env_parse\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
-
-期望看到类似：
-
-```text
-2.7.1+cu128 True
-```
-
-千万不要把 cu128 换成 CPU torch。
-
-#### 安装解析依赖
-
-```powershell
-F:\Download\StageTTS\env_parse\python.exe -m pip install whisperx pyannote.audio==3.4.0 openai pydantic python-dotenv pytorch-lightning librosa soundfile
-```
-
-如果下载慢，可以配置你所在网络允许的镜像或代理。
-
-#### 配置 Banquet 四轨分离
-
-1. 获取 [bandit-v2 源码](https://github.com/kwatcharasupat/bandit-v2)，使用提交 `d5563d9031`。
-2. 下载 [Netflix 发布的官方权重](https://zenodo.org/records/13327983) `banquet-split.ckpt`，MD5 为 `4ac581d6792740f5b7be8e0a3f73c8ea`。
-3. 在 `backend/.env` 中设置 `BANQUET_ROOT` 为源码目录、`BANQUET_CHECKPOINT` 为权重文件。
-
-解析时自动运行 Banquet。「项目媒体素材」可分别试听四轨。对白送入识别和配音参考，歌声、伴奏和音效合成导出背景。
-
-#### 设置缓存路径
-
-在 `backend/.env` 中统一设置：
+#### 缓存目录
 
 ```env
 HF_HOME=F:/Download/StageTTS/hf_cache
@@ -567,30 +533,17 @@ TORCH_HOME=F:/Download/StageTTS/torch_cache
 PIP_CACHE_DIR=F:/Download/StageTTS/pip_cache
 ```
 
-首次运行识别和对齐时会自动下载对应模型。
-
-日语词级对齐模型较大，网络不稳定时可能降级为句级时间戳，但不会阻断整个流程。
+推理只读取经批准的本地 snapshot，不会静默下载模型。
 
 ---
 
-### 5.6 申请 HuggingFace Token
+---
 
-用于 pyannote 说话人分离。
+#### MOSS/Banquet 依赖安装注意
 
-步骤：
+Banquet 来自第三方 Bandit-v2 实现，必须在**同一个 `env_parse` Python 环境**运行，以满足子进程 torch ABI。其旧官方锁文件针对 torch 2.0/CUDA 11.8；不能照抄整份 requirements 覆盖 MOSS 的 torch 2.8/CUDA 12.8 栈。当前开发环境已在上述固定 torch 环境验证短 Banquet CUDA stem smoke；新机器需按绑定的 Bandit commit 检查缺失 Python 包与版本兼容，禁止降级 / 替换 torch、torchaudio 和 transformers。Banquet 权重与 Bandit 源码由用户自行取得并校验，仓库不分发。
 
-1. 注册 HuggingFace 账号；
-2. 申请 Access Token；
-3. 打开以下两个模型页面并同意协议：
-   - `pyannote/speaker-diarization-3.1`
-   - `pyannote/segmentation-3.0`
-4. 把 Token 写入 `backend/.env`：
-
-```env
-HF_TOKEN=hf_xxx
-```
-
-注意：Token 是免费的，但不要公开。
+---
 
 ---
 
@@ -654,8 +607,13 @@ http://127.0.0.1:5173/
    - 选择 MP4 / WAV；
    - 等待创建项目。
 5. 切到顶部“节点流”：
-   - 点“仅解析剧本”生成 `script.json`；
-   - 右侧“运行日志”会滚动显示 Stage0～Stage4。
+1. 在画布选中「媒体输入 / 音轨分离」开始 Banquet + MOSS 完整解析；只想从已有对白开始时选择翻译节点。MOSS 默认限制 60 秒，超时/超预算前会明确失败，不自动切分或静默回退。
+   - 已有对白时，选中“翻译与情绪标注”节点和目标语言，点“翻译并保存剧本”，即可跳过音轨分离和识别；
+   - 运行按钮会直接读取选中的节点，并从该节点继续到合成与导出；选中“剧本枢纽”或“语音合成与反思”使用现有译文，选中“视频混音导出”使用现有配音；
+   - “语音识别与聚类”暂不支持单独启动，请选“音轨分离”执行完整解析；“虚拟舞台演播”通过右侧“进入虚拟舞台”打开。未选中可运行节点时运行按钮不可用；
+   - 运行前会保存当前台词、术语表和角色设置。部分翻译失败时保留成功译文，并停止后续合成/导出；
+   - 右侧“运行日志”显示实际执行步骤，跳过的节点保持待机；
+   - 运行时可点“暂停”：当前后端步骤完成并保存后暂停，点击“继续”接着运行；等待期间可取消暂停，也可“结束流程”保留已有结果并停止后续步骤。解析（含分离/识别/翻译）、独立翻译、批量合成、导出各自是一个步骤，无法在请求内部即时暂停；最后一步完成后流程直接结束。暂停状态仅在当前页面中保留，刷新后可选中相应节点从已保存结果继续。
 6. 解析完成后切回“剪辑”：
    - 检查时间轴、台词、说话人；
    - 单句可点“重合成试听”；
@@ -697,28 +655,15 @@ ffmpeg -version
 
 ---
 
-### Q4：Banquet 长素材与 CUDA 显存问题
+### Q4：MOSS 占用显存或解析失败
 
-Banquet 将长音频分块处理，优先使用 CUDA，CUDA 不可用或显存不足时使用 CPU。若手动启动的本机 GPT-SoVITS 仍在线，请先停止该服务再解析。
-
-建议：
-
-- 使用 `small` + `int8`；
-- 关闭其他占显存程序；
-- 不要同时手动启动 GPT-SoVITS。
+MOSS 使用 BF16 / SDPA，短样例已在 RTX 5060 8GB 验证；系统会在解析前停止由后端托管的 GPT-SoVITS。关闭其他 GPU 程序；不要在模型初始化或解析任务仍运行时重启 backend。 MOSS 配置 / 权重失败时检查 `MOSS_MODEL_PATH`、固定 revision 和本地 hash manifest；应用时长超过 60 秒时当前会 fail-fast。
 
 ---
 
-### Q5：日语词级对齐失败
+### Q5：MOSS 输入时长限制
 
-日志可能出现：
-
-```text
-The chosen align_model ... could not be found ...
-```
-
-这是 WhisperX 把下载失败统一包装成的误导信息。  
-流水线会降级保留句级时间戳，仍然可以继续生成 `script.json`。
+MOSS 官方模型卡声明可单次处理最长 90 分钟；StageTTS 目前为了守住已验证边界，默认只允许最多 60 秒音频。超限会 fail-fast，不会自动切窗或静默回退 Whisper。更长音频预算和跨窗说话人关联尚未完成，不能把上游模型能力当成本应用已支持。
 
 ---
 
@@ -770,7 +715,7 @@ StageTTS/
 
 ## 10. 评测计划
 
-论文训练数据入口见 [训练音频工具链](workers/RESEARCH_TRAINING.md)。
+训练语料生成与论文模型特征提取见 [训练音频工具链](workers/RESEARCH_TRAINING.md)。
 
 评测脚本在 [experiments/](experiments)，目前是骨架：
 
@@ -799,3 +744,14 @@ StageTTS/
 - 严禁未经授权克隆商业声优、影视角色或公众人物声音。
 - 所有导出视频与虚拟演播室界面均需保留“AI 合成语音”显式标识。
 - 禁止用于欺诈、冒充、误导传播等不当用途。
+
+
+### 3.5 M1 / M2 / M3 可选源声证据与分析
+
+新解析可在 `script.evidence` 保存独立源证据：原始ASR整句与字词、可重叠的diarization活动区间、源turn，以及翻译/表演单位的来源链接。exclusive轨是派生方便轨，不替代真实重叠活动。旧JSON缺少evidence时仍可打开，不能从旧TTS倒造源声证据。
+
+M2边界候选仅来自原文字符范围和已有alignment。分词器可注入，缺少JA/ZH词典时保守回退待审；可选LLM只能选择已有候选ID，不能发明时间戳或词中切点。默认主解析为固定 revision 的 MOSS joint ASR + 窗口内匿名角色 + 句段时间，使用独立 MOSS / Banquet 环境，旧 WhisperX / pyannote worker 只保留代码以供单独审查的 legacy 实验，不作为依赖清单、默认入口或自动 fallback。官方原精度BF16+SDPA已测JA/EN10、30、完整60秒单scope，当前预算60秒/4096输出token；更长输入明确拒绝，不能外推90分钟或自动切窗认同S01。MOSS不提供word时间，不按字符均分；`alignment_granularity`与独立句段审核保留这种能力差别。整段原文/边界与角色确认后可用完整3–10秒参考，超过10秒无词级对齐不允许裁剪。官方固定snapshot与本地custom code已hash验证，community-1暂停。
+
+源声韵律/情绪分析为显式操作，不跟随每次保存自动运行。精修面板显示证据链接与分析状态；`not_run`/`not_configured`/`blocked`不是neutral。CPU能量/活动区间等测量与模型情绪分数分开保存，原始分数不冒充校准概率，不由标签猜F0。GPT-SoVITS当前只应用参考路由；CV3/Index适配状态不代表已接通。
+
+情绪分析使用独立解释器和经许可确认的本地权重：`ENV_ANALYSIS_PYTHON`、`EMOTION_MODEL_PATH`、`EMOTION_MODEL_ID`、`EMOTION_REVISION`、`EMOTION_FUNASR_VERSION`，以及默认关闭的`EMOTION_USER_AUTHORIZED`。不要更改现有 CUDA / PyTorch 运行环境；情绪分析与 MOSS 主解析分别保留独立解释器，按各自锁文件部署。若仅运行 MOSS，则参阅 [MOSS 安装与验证文档](docs/moss_setup.md)。

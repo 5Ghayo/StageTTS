@@ -61,16 +61,23 @@ def store_reference_audio(project_id: str, source: BinaryIO) -> str:
     return f"/workspace/{project_id}/references/{name}"
 
 
+def _whole_timing_confirmed(seg: Segment) -> bool:
+    # Old reviewed JSON keeps its historical eligibility. New segment-only
+    # confirmation permits whole audio, never invented word-level crops.
+    return (not seg.segment_timing_needs_review
+            or (not seg.alignment_needs_review and _verified_word_offsets(seg) is not None))
+
+
 def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]:
     ordered = sorted(script.segments, key=lambda seg: (seg.start, seg.id))
     candidates = []
     for index, seg in enumerate(ordered):
-        if seg.speaker != speaker or seg.alignment_needs_review or seg.speaker_needs_review or not seg.orig_text.strip():
+        if seg.speaker != speaker or not _whole_timing_confirmed(seg) or seg.speaker_needs_review or not seg.orig_text.strip():
             continue
         clip = []
         for following in range(index, len(ordered)):
             other = ordered[following]
-            if (other.speaker != speaker or other.alignment_needs_review or other.speaker_needs_review
+            if (other.speaker != speaker or not _whole_timing_confirmed(other) or other.speaker_needs_review
                     or not other.orig_text.strip() or other.end - seg.start > MAX_REFERENCE_SECONDS
                     or (clip and not 0 <= round(other.start - clip[-1].end, 3) <= 0.35)):
                 break
@@ -79,7 +86,7 @@ def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]
             if MIN_REFERENCE_SECONDS <= duration <= MAX_REFERENCE_SECONDS:
                 if not any(
                     item.start < other.end and item.end > seg.start
-                    and item.speaker != speaker
+                    and item.id not in {part.id for part in clip}
                     for item in ordered
                 ):
                     transcript = " ".join(part.orig_text.strip() for part in clip)
@@ -93,19 +100,81 @@ def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]
     ))
 
 
-def _trimmed_transcript(seg: Segment, start: float, end: float) -> str:
-    """Prefer the exact words in the trim window, but fall back to reviewed full text."""
-    words = [
-        word.word.strip()
-        for word in seg.words
-        if word.word.strip()
-        and word.start is not None and word.end is not None
-        and word.start >= start - 0.001 and word.end <= end + 0.001
-    ]
-    return " ".join(words).strip() or seg.orig_text.strip()
+def _verified_word_offsets(seg: Segment) -> list[int] | None:
+    """Match every aligned token to the reviewed text without guessing text offsets."""
+    letters = [(index, char) for index, char in enumerate(seg.orig_text) if not char.isspace()]
+    compact = "".join(char for _, char in letters)
+    cursor = 0
+    previous_end = seg.start
+    offsets = []
+    for word in seg.words:
+        token = "".join(word.word.split())
+        if (not token or not compact.startswith(token, cursor)
+                or word.start is None or word.end is None
+                or not seg.start <= word.start < word.end <= seg.end
+                or word.start < previous_end or word.speaker != seg.speaker):
+            return None
+        offsets.append(letters[cursor][0])
+        cursor += len(token)
+        previous_end = word.end
+    return offsets if offsets and cursor == len(compact) else None
+
+
+def _trimmed_transcript(seg: Segment, start: float, end: float) -> str | None:
+    offsets = _verified_word_offsets(seg)
+    if offsets is None:
+        return None
+    included = [index for index, word in enumerate(seg.words)
+                if word.start >= start and word.end <= end]
+    if not included or included != list(range(included[0], included[-1] + 1)):
+        return None
+    left, right = included[0], included[-1] + 1
+    return seg.orig_text[offsets[left]:offsets[right] if right < len(offsets) else len(seg.orig_text)].strip()
+
+
+def _long_reference_window(script: ProjectScript, seg: Segment) -> tuple[float, float, str, list[int]] | None:
+    if (seg.alignment_needs_review or seg.speaker_needs_review
+            or seg.end - seg.start <= MAX_REFERENCE_SECONDS
+            or _verified_word_offsets(seg) is None):
+        return None
+    choices = []
+    for index, word in enumerate(seg.words[:-1]):
+        duration = word.end - seg.start
+        if not MIN_REFERENCE_SECONDS <= duration <= MAX_REFERENCE_SECONDS:
+            continue
+        if any(other.id != seg.id and other.start < word.end and other.end > seg.start
+               for other in script.segments):
+            continue
+        transcript = _trimmed_transcript(seg, seg.start, word.end)
+        if transcript:
+            choices.append((seg.start, word.end, transcript, [seg.id]))
+    return min(choices, key=lambda window: abs(window[1] - window[0] - 5)) if choices else None
+
+
+def reference_unavailable_reason(script: ProjectScript, speaker: str) -> str:
+    """Explain missing automatic reference without changing review assertions."""
+    segments = [seg for seg in script.segments if seg.speaker == speaker]
+    prefix = f"角色 {speaker} 缺少可用参考音。"
+    if not segments or speaker == "UNKNOWN":
+        return prefix + "请先确认说话人，或在角色设置中上传 3–10 秒参考音并填写对应原文逐字稿和语种。"
+    whole = [seg for seg in segments if MIN_REFERENCE_SECONDS <= seg.end - seg.start <= MAX_REFERENCE_SECONDS]
+    if whole:
+        ids = "、".join(f"#{seg.id}" for seg in whole)
+        return prefix + f"可检查片段 {ids}：试听原声、校对原文后，在台词检查器确认「句段时间与原文」及「当前说话人」，保存后重试。也可在角色设置上传参考音。"
+    return prefix + "该角色没有 3–10 秒的完整句段，且没有可验证的词级时间，不能直接截取长句前几秒。请在角色设置上传 3–10 秒参考音，填写与音频一致的原文逐字稿和语种；或先将源对白切分、校对为合适句段。"
 
 
 def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview | None:
+    reviewed = _reviewed_automatic_reference(script, speaker)
+    if reviewed is not None:
+        return reviewed
+    from backend.services.automatic_moss_reference import automatic_moss_reference
+    return automatic_moss_reference(script, speaker)
+
+
+def _reviewed_automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview | None:
+    if speaker == "UNKNOWN":
+        return None
     lang = normalize_tts_lang(script.source_lang, default="")
     if lang not in SUPPORTED_SOURCE_LANGS or not script.media.vocals_wav:
         return None
@@ -118,15 +187,11 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
             " ".join(part.orig_text.strip() for part in clip),
             [part.id for part in clip],
         ))
-    if not windows:
-        for seg in sorted(script.segments, key=lambda item: (item.start, item.id)):
-            if seg.speaker != speaker or seg.speaker_needs_review or not seg.orig_text.strip():
-                continue
-            duration = min(5.0, max(0.0, seg.end - seg.start))
-            if duration >= MIN_REFERENCE_SECONDS:
-                end = round(seg.start + duration, 3)
-                windows.append((seg.start, end, seg.orig_text.strip(), [seg.id]))
-                break
+    for seg in sorted(script.segments, key=lambda item: (item.start, item.id)):
+        if seg.speaker == speaker:
+            window = _long_reference_window(script, seg)
+            if window is not None:
+                windows.append(window)
     if not windows:
         return None
 
@@ -145,9 +210,20 @@ def automatic_reference(script: ProjectScript, speaker: str) -> ReferencePreview
         with wave.open(str(source), "rb") as vocals:
             rate, channels, width = vocals.getframerate(), vocals.getnchannels(), vocals.getsampwidth()
             for window_start, window_end, transcript, segment_ids in windows:
-                start = round(window_start * rate)
-                end = round(window_end * rate)
-                if end > vocals.getnframes() or not MIN_REFERENCE_SECONDS * rate <= end - start <= MAX_REFERENCE_SECONDS * rate:
+                start = max(0, round(window_start * rate))
+                requested_end = round(window_end * rate)
+                end = min(requested_end, vocals.getnframes())
+                if requested_end > end:
+                    # Only discard a small, proven word-free alignment margin.
+                    source_end = end / rate
+                    related = [seg for seg in script.segments if seg.id in segment_ids]
+                    if (requested_end - end > round(0.05 * rate)
+                            or not related
+                            or any(_verified_word_offsets(seg) is None for seg in related)
+                            or any(word.end > source_end for seg in related for word in seg.words
+                                   if word.start < window_end and word.end > window_start)):
+                        continue
+                if end - start < MIN_REFERENCE_SECONDS * rate:
                     continue
                 key = (str(source), source.stat().st_mtime_ns, start, end, channels, width)
                 name = f"auto_{hashlib.sha256(repr(key).encode()).hexdigest()[:24]}.wav"

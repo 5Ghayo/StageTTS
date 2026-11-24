@@ -18,11 +18,10 @@
 ```text
 [输入层] 原始视频 / 动漫切片 / 播客音频 / 脚本文本
    │
-   ▼  (独立子进程 env_parse，运行结束由 OS 100% 释放显存)
-[感知解析层] workers/parse_worker.py
-   ├── Banquet 四轨分离       ──▶ 对白供识别，歌声、伴奏和音效合成为背景轨
-   ├── WhisperX + pyannote 3.1 ──▶ 提取词级精准时间戳与说话人聚类 (SPEAKER_XX)
-   └── Emotion2Vec / LLM       ──▶ 口语化翻译、原声叹词标记、情绪与动作标签
+   ▼  (独立子进程 `env_parse`；退出后由 OS 回收显存)
+[感知解析层] `workers/parse_worker.py`
+   ├── Banquet 四轨分离  ──▶ 分离对白 / 歌声 / 伴奏 / 音效
+   └── MOSS-Transcribe-Diarize ──▶ 联合 ASR、窗口内匿名角色与句段时间（无词级强制对齐）
    │
    ▼  输出全链路唯一真相源：workspace/{project_id}/script.json
 [交互精修与 Agent 协同层] backend/ (env_backend, 纯 CPU) + frontend/ (Node.js)
@@ -45,16 +44,16 @@
 所有开发人员与 AI Coding 助手编写代码时，**严禁违背以下 9 条铁律**：
 
 1. **四环境物理隔离，严禁混装依赖**
-   - `env_parse`（Conda Python 3.10）：PyTorch (`cu128`)、Banquet、`whisperx`、`pyannote.audio 3.1`。
-   - `env_tts`（Conda Python 3.10）：GPT-SoVITS CUDA 12.8 适配版整合环境（`is_half: true`，监听 `127.0.0.1:9880`）。
-   - `env_backend`（Conda / venv Python 3.10+，**纯 CPU 0 显存**）：`fastapi>=0.136.0`、`uvicorn`、`pydantic>=2.7`、`pydantic-settings`、`openai`、`httpx`、`pydub`、`PyYAML`。
-   - `frontend`（Node.js 20 LTS + `pnpm`）：Vite + React 18 + TypeScript + TailwindCSS v4 + Zustand + `@tanstack/react-query` + `openapi-fetch` + `wavesurfer.js v7` + `pixi-live2d-display` + Biome。
-   - 严禁在 `env_backend` 中直接 `import torch` / `whisperx`；Banquet 也须独立运行。
+   - `env_parse`（独立 Python 3.12 / torch + torchaudio 2.8.0+cu128 / Transformers 5.6.0）：Banquet、固定版本 MOSS 联合转录。
+   - `env_tts`（GPT-SoVITS CUDA 12.8 整合环境）：服务 `127.0.0.1:9880`。
+   - `env_backend`（Python 3.10+、CPU 协调器）：FastAPI、Pydantic、LLM 客户端、文件/API 和任务调度。
+   - `frontend`（Node.js 20 LTS + pnpm）：React、TypeScript、Vite。
+   - WhisperX / pyannote 仅为 legacy worker 源码 / 实验，不列入 MOSS 依赖，不自动 fallback。
 
 2. **RTX 5060 8GB（Blackwell `sm_120`）串行显存接力与单任务防 OOM**
-   - `env_parse` 必须由后端通过 `subprocess.run` 启动独立进程 `workers/parse_worker.py` 执行，进程退出后由操作系统 100% 回收显存。
-   - 若 `env_parse` 显存紧张，允许通过配置 `WHISPER_COMPUTE_TYPE=int8` 将 WhisperX 显存峰值从 ~5.2 GB 降至 ~3.4 GB。
-   - 后端必须在进程内维护单任务锁/队列（见 `backend/services/task_runner.py`），禁止并发启动多个解析或批量合成任务导致 8GB 显存 OOM。
+   - `env_parse` 必须通过 `subprocess.run` 单独运行 `workers/parse_worker.py`，进程退出后由操作系统回收其 CUDA 显存。
+   - MOSS 使用 BF16 / SDPA；在 RTX 5060 8GB 上已经测试最长 60 秒样例（峰值保留约 1.965 GiB），这不是 90 分钟资源保证。应用默认 fail-fast 限制为 60 秒；长视频分块、跨块 speaker linking 尚未支持。
+   - 主后端必须使用 GPU 单任务锁，防止并发启动多个解析 / 合成任务。
 
 3. **按说话人（`speaker`）分组批量合成**
    - 调用 GPT-SoVITS 合成多个片段时，必须先按 `segment.speaker` 分组，在切换到下一个角色前完成该角色名下全部待合成片段，**每个角色最多触发一次权重切换**，严禁按时间顺序逐句来回切换 `gpt_weights` / `sovits_weights`。
@@ -154,6 +153,8 @@
 - **`EmotionType`**：`"neutral"` | `"angry"` | `"happy"` | `"sad"` | `"whisper"`
 - **`SegmentStatus`**：`"pending"` | `"synthesizing"` | `"ready"` | `"error"`
 - **`AvatarType`**：`"live2d"` | `"vrm"`
+- **`SubtitleBurnMode`**：`"none"` | `"target"` | `"bilingual"`
+- **`SubtitleLayout`**：`"target"` | `"bilingual"`
 
 | 层级 | 字段名 | 类型 | 必填 | 说明 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -167,9 +168,11 @@
 | `media` | `vocals_wav` | `string \| null` | 否 | 对白轨 URL |
 | `media` | `bgm_wav` | `string \| null` | 否 | 歌声、伴奏和音效合成的背景轨 URL |
 | `media` | `cinematic_stems` | `CinematicStems \| null` | 否 | 独立对白、歌声、伴奏、音效 WAV URL |
+| `media` | `stem_volumes` | `StemVolumes \| null` | 否 | 四轨分离背景子轨独立音量系数（`singing` / `music` / `effects`，范围 `0.0` ~ `2.0`） |
 | `media` | `output_video` | `string \| null` | 否 | 最终渲染输出 URL（如 `/workspace/{id}/output.mp4`） |
 | `media` | `duration` | `number` | 是 | 项目总时长（秒） |
-| `media` | `bgm_volume` | `number` | 是 | 伴奏混音系数（`0.0` ~ `2.0`，默认 `0.75`） |
+| `media` | `bgm_volume` | `number` | 是 | 伴奏混音音量主系数（`0.0` ~ `2.0`，默认 `0.75`） |
+| `media` | `auto_ducking` | `boolean` | 否 | 人声出现时是否自动闪避背景音乐（默认 `true`） |
 | `character` | `display_name` | `string` | 是 | 前端显示角色名 |
 | `character` | `speaking_style` | `string` | 否 | 翻译与时长改写使用的角色语气 |
 | `character` | `color` | `string` | 是 | 波形轨道色块 Hex 颜色（如 `#3b82f6`） |
@@ -208,13 +211,20 @@
 | `POST` | `/api/projects/upload` | 创建项目并上传源视频/音频 | `multipart/form-data` (`file`, `mode?`, `project_id?`) | `{ "project_id": "...", "media_url": "..." }` |
 | `POST` | `/api/projects/{project_id}/parse` | 触发 `env_parse` 子进程解析并生成 `script.json`（受单任务锁保护） | `ParseRequest`（含目标语种和识别精度） | `ProjectScript` |
 | `GET` | `/api/projects/{project_id}/script` | 读取指定项目的 `script.json` | — | `ProjectScript` |
-| `PUT` | `/api/projects/{project_id}/script` | 保存前端修改后的完整 `ProjectScript`（Pydantic 校验后落盘） | `ProjectScript` | `ProjectScript` |
+| `PUT` | `/api/projects/{project_id}/script` | 保存前端修改后的完整 `ProjectScript`（Pydantic 校验后落盘，并自动保存历史快照） | `ProjectScript` | `ProjectScript` |
+| `GET` | `/api/projects/{project_id}/history` | 列出项目最近的历史快照列表（最多 20 条，倒序） | — | `ScriptSnapshotListResponse` |
+| `POST` | `/api/projects/{project_id}/history/{snapshot_id}/restore` | 将项目回滚恢复至指定历史快照（同时保留当前版本快照） | — | `ProjectScript` |
+| `GET` | `/api/voice-presets` | 列出全局跨项目音色预设库 | — | `VoicePresetListResponse` |
+| `POST` | `/api/voice-presets` | 将当前角色音色（权重与情绪参考音频）另存为跨项目预设并复制参考音频 | `VoicePresetCreateRequest` | `VoicePreset` |
+| `DELETE` | `/api/voice-presets/{preset_id}` | 删除指定全局音色预设并清理其隔离参考音频 | — | `VoicePresetDeleteResponse` |
 | `POST` | `/api/projects/{project_id}/references` | 上传 3–10 秒音频并转换为 WAV | `multipart/form-data` (`file`) | `{ wav }` |
 | `POST` | `/api/projects/{project_id}/characters/{speaker}/reference-preview` | 从同角色已校对原声生成试听 | — | `ReferencePreview` |
 | `POST` | `/api/projects/{project_id}/translate` | 按当前术语与角色设置重译，保留失败的台词 | — | `TranslationResponse` |
 | `POST` | `/api/projects/{project_id}/synthesize` | 按 `speaker` 分组批量合成指定片段并返回时长质检结果 | `SynthesizeRequest` | `SynthesizeResponse` |
 | `POST` | `/api/projects/{project_id}/agent/chat` | 自然语言批量剪辑对话（多轮工具调用 + 超时反思改写） | `AgentChatRequest` | `AgentChatResponse` |
-| `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + FFmpeg 混音导出 `output.mp4` | `RenderRequest` | `RenderResponse` |
+| `GET` | `/api/projects/{project_id}/subtitles` | 导出当前剧本的 ASS 字幕文件（`layout=target\|bilingual`） | Query: `layout` | UTF-8-SIG ASS 文本 |
+| `GET` | `/api/export/dirs` | 获取工作区与本机推荐导出目录（视频/下载/桌面） | — | `ExportDirsResponse` |
+| `POST` | `/api/projects/{project_id}/render` | `pydub` 拼轨 + 四轨独立混音/自动闪避 + FFmpeg 导出成片，支持自定义文件名/本机目录落盘、ASS 硬字幕与外挂 ASS 字幕 | `RenderRequest` | `RenderResponse` |
 | `STATIC` | `/workspace/*` | 静态挂载 `workspace/` 目录（提供视频、人声、伴奏、单句 TTS 音频） | — | 二进制流 |
 | `STATIC` | `/assets/*` | 静态挂载 `assets/` 目录（提供 Live2D/VRM 模型与情绪参考音频） | — | 二进制流 |
 
@@ -227,10 +237,10 @@
 | 工具名 | 参数签名 | 返回值结构 | 副作用 |
 | :--- | :--- | :--- | :--- |
 | `query_script` | `project_id: str`, `start_sec: float \| None = None`, `end_sec: float \| None = None`, `speaker: str \| None = None` | `{ "count": int, "segments": list[dict] }` | 只读查询 `script.json`，不写盘 |
-| `batch_update_segments` | `project_id: str`, `updates: list[SegmentPatch]`（含 `id` 及可选 `speaker` / `target_text` / `emotion` / `action` / `keep_original` / `speed_factor`） | `{ "updated_ids": list[int], "marked_pending_ids": list[int] }` | 修改指定片段字段；若修改了 `speaker`/`target_text`/`emotion`/`keep_original`，自动将 `status` 置为 `"pending"` 并持久化 `script.json` |
+| `batch_update_segments` | `project_id: str`, `updates: list[SegmentPatch]`（含 `id` 及可选 `start` / `end` / `speaker` / `orig_text` / `target_text` / `emotion` / `action` / `keep_original` / `speed_factor`） | `{ "updated_ids": list[int], "marked_pending_ids": list[int] }` | 修改指定片段字段；若修改了 `start`/`end`/`speaker`/`target_text`/`target_lang`/`emotion`/`keep_original`/`speed_factor`，自动将 `status` 置为 `"pending"` 并持久化 `script.json`（修改前保存历史快照） |
 | `synthesize_segments` | `project_id: str`, `segment_ids: list[int] \| None = None`（为 `None` 时合成全部 `status != "ready"` 且 `keep_original == false` 的片段） | `{ "synthesized_ids": list[int], "overflow_segments": list[SegmentDurationCheck], "errors": list[str] }` | 按角色分组配音，执行时长闭环并返回最终剩余超长 |
-| `update_mix_settings` | `project_id: str`, `bgm_volume: float`（限 `0.0` ~ `2.0`） | `{ "bgm_volume": float }` | 更新 `media.bgm_volume` 并持久化 `script.json` |
-| `render_final_video` | `project_id: str`, `burn_watermark: bool = False` | `{ "output_video": str, "duration": float, "burn_watermark": bool }` | 触发 `pydub` 拼轨与 FFmpeg 混音导出，写回 `media.output_video` 并持久化 `script.json` |
+| `update_mix_settings` | `project_id: str`, `bgm_volume: float \| None = None`, `singing_volume: float \| None = None`, `music_volume: float \| None = None`, `effects_volume: float \| None = None`, `auto_ducking: bool \| None = None` | `{ "bgm_volume": float, "stem_volumes": StemVolumes \| null, "auto_ducking": bool }` | 更新背景混音主音量、四轨子音量与自动闪避开关并持久化 `script.json` |
+| `render_final_video` | `project_id: str`, `burn_watermark: bool = False`, `burn_subtitles: SubtitleBurnMode = "none"`, `auto_ducking: bool \| None = None` | `{ "output_video": str, "duration": float, "burn_watermark": bool, "burn_subtitles": SubtitleBurnMode, "auto_ducking": bool }` | 触发 `pydub` 拼轨与 FFmpeg 混音封装（支持 ASS 硬字幕烧录与自动闪避），写回 `media.output_video` 并持久化 `script.json` |
 
 ---
 
@@ -238,7 +248,7 @@
 
 | 成员 | 目录与文件所有权 | 核心职责 |
 | :--- | :--- | :--- |
-| **成员 A** | `workers/parse_worker.py`、`experiments/` | 维护 `env_parse` 环境、完成 Banquet/WhisperX/pyannote/标注流水线，产出消融实验脚本与图表 |
+| **成员 A** | `workers/parse_worker.py`, `workers/moss_worker.py`, `workers/aligned_segments.py`, `experiments/` | 维护固定 revision 的 MOSS / Banquet 主解析、MOSS 证据与离线评测；WhisperX / pyannote 只作为显式 legacy 研究代码 |
 | **成员 B** | `backend/`（`main.py`, `config.py`, `schemas.py`, `agent/`, `services/`） | 维护 `env_backend` 与 `env_tts` 联调、GPT-SoVITS 分组合成、Agent 5 工具与反思闭环、FFmpeg 混音 |
 | **成员 C** | `frontend/`（除 `VirtualStage.tsx` 外的全量组件、Store 与样式） | 类 PR 三栏工作台、`wavesurfer.js` 波形色块轨道、`Inspector` 单句精修、`AgentChat` 对话交互 |
 | **成员 D** | `frontend/src/components/VirtualStage.tsx`、`assets/`、`README.md` | Live2D/Three-VRM 虚拟演播室嘴型与动作驱动、授权情绪参考音库、合规提示与演示交付 |
@@ -254,6 +264,6 @@
 | **前端核心** | Node.js 20 LTS, `pnpm`, Vite `^5.4.0`, React `^18.3.1`, TypeScript `^5.5.0`, TailwindCSS `^4.0.0`, Zustand `^4.5.0`, `@tanstack/react-query` `^5.62.0`, `openapi-fetch` `^0.13.4`, `@xyflow/react` `^12.3.6`, `lucide-react` `^0.469.0`, `@biomejs/biome` `^1.9.4` |
 | **波形与舞台** | `wavesurfer.js` `^7.8.0` (含 `@wavesurfer/react` 或 `regions` 插件), `pixi.js` `^7.4.0`, `pixi-live2d-display-lipsyncpatch` `^0.5.0-ls-8`（可选进阶 `three` + `@pixiv/three-vrm` v3） |
 | **主后端** | Python 3.10+, `fastapi>=0.136.0`, `starlette>=1.3.1`, `uvicorn[standard]>=0.30.0`, `pydantic>=2.7.0`, `pydantic-settings>=2.4.0`, `openai>=3.57.0`, `httpx>=0.27.0`, `pydub>=0.25.1`, `PyYAML>=6.0.1` |
-| **感知解析** | Python 3.10, PyTorch (`cu128`), Banquet, `whisperx` (`large-v3`), `pyannote.audio 3.1` |
+| **感知解析** | 独立 Python 3.12、PyTorch / torchaudio 2.8.0+cu128、Transformers 5.6.0、BF16 / SDPA、Banquet 与 pin revision 的 MOSS-Transcribe-Diarize |
 | **语音合成** | GPT-SoVITS (`api_v2.py`, CUDA 12.8 适配版, `is_half: true`) |
 | **音视频工具** | FFmpeg `6.x+` (含 `nvenc` / `libx264` 与 `amix` 滤镜) |

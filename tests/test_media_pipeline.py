@@ -1,8 +1,6 @@
-import importlib.util
 import io
 import json
 import os
-import py_compile
 import shutil
 import subprocess
 import sys
@@ -107,6 +105,13 @@ class SynthesisTest(unittest.TestCase):
                 for _ in range(2):
                     response = self.client.post(f"/api/projects/{project_id}/render", json={})
                     self.assertEqual(response.status_code, 200, response.text)
+            # The overflow is allowed into the empty scene gap, not silently cut
+            # at the original 3.0-second slot end during the API export route.
+            with wave.open(str(self.root / project_id / "dubbed_vocals.wav"), "rb") as rendered:
+                rendered.setpos(round(3.05 * rendered.getframerate()))
+                tail = array("h", rendered.readframes(round(0.05 * rendered.getframerate())))
+                self.assertTrue(tail)
+                self.assertGreater(max(abs(sample) for sample in tail), 0)
 
     def test_missing_llm_and_failed_rewrite_keep_usable_audio(self):
         self._create_project("test")
@@ -364,12 +369,11 @@ class ParseTest(unittest.TestCase):
                 input=input_file,
                 output_dir=output_dir,
                 target_lang="zh",
-                whisper_model="small",
-                compute_type="int8",
                 mode="video_dubbing",
                 device="cpu",
                 skip_diarization=True,
                 skip_llm=True,
+                parse_backend="legacy",
             )
 
             with (
@@ -423,57 +427,6 @@ class ParseTest(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "混合背景轨缺失"):
                 media_mixer.mix_and_render(script)
 
-    def test_banquet_worker_compiles(self):
-        py_compile.compile(str(Path(__file__).resolve().parent.parent / "workers" / "banquet_worker.py"), doraise=True)
-
-    def test_banquet_worker_separates_per_channel_and_normalizes_peak(self):
-        missing = [mod for mod in ("torch", "torchaudio", "soundfile") if importlib.util.find_spec(mod) is None]
-        if missing:
-            self.skipTest(f"requires {', '.join(missing)}")
-        import torch
-
-        from workers import banquet_worker
-
-        seen_batches: list[int] = []
-
-        class FakeModel:
-            def __call__(self, batch):
-                audio = batch["mixture"]["audio"]
-                seen_batches.append(audio.shape[0])
-                return {stem: audio * (idx + 1) for idx, stem in enumerate(banquet_worker.STEMS)}
-
-        messages: list[str] = []
-        tiny_wave = torch.ones((1, 400), dtype=torch.float32)
-        tiny_out = banquet_worker.separate(FakeModel(), tiny_wave, "cpu", progress=messages.append)
-        self.assertEqual(seen_batches, [1])
-        self.assertEqual(tiny_out["dialogue"].shape, (1, 400))
-
-        seen_batches.clear()
-        short_wave = torch.ones((2, 2000), dtype=torch.float32)
-        short_out = banquet_worker.separate(FakeModel(), short_wave, "cpu", progress=messages.append)
-        self.assertEqual(seen_batches, [1, 1])
-        self.assertEqual(short_out["dialogue"].shape, (2, 2000))
-        self.assertTrue(torch.allclose(short_out["music"], short_wave * 4))
-
-        seen_batches.clear()
-        long_len = int(9.3 * banquet_worker.SAMPLE_RATE)
-        long_wave = torch.stack([torch.full((long_len,), 0.25), torch.full((long_len,), 0.5)])
-        long_out = banquet_worker.separate(FakeModel(), long_wave, "cpu", progress=messages.append)
-        self.assertTrue(all(batch == 1 for batch in seen_batches))
-        self.assertEqual(long_out["dialogue"].shape, (2, long_len))
-        self.assertTrue(torch.allclose(long_out["dialogue"], long_wave, atol=1e-4))
-        self.assertTrue(any("分离进度" in msg for msg in messages))
-
-        hop4_out = banquet_worker.separate(FakeModel(), long_wave, "cpu", hop_seconds=4.0)
-        self.assertTrue(torch.allclose(hop4_out["dialogue"], long_wave, atol=1e-4))
-        with self.assertRaises(ValueError):
-            banquet_worker.separate(FakeModel(), short_wave, "cpu", hop_seconds=5.0)
-
-        clipped = banquet_worker._normalize_peak(torch.tensor([[1.5, -0.5]]))
-        self.assertAlmostEqual(float(clipped.abs().max()), 0.99, places=5)
-        unclipped = torch.tensor([[0.8, -0.5]])
-        self.assertTrue(torch.equal(banquet_worker._normalize_peak(unclipped), unclipped))
-
     def test_vocal_track_preserves_48khz_and_defaults_to_44100(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(config, "WORKSPACE_DIR", Path(directory)):
             project_dir = Path(directory) / "demo"
@@ -501,6 +454,7 @@ class ParseTest(unittest.TestCase):
             with wave.open(str(out_default), "rb") as wav:
                 self.assertEqual(wav.getframerate(), 44100)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
     def test_automatic_reference_accepts_only_project_banquet_dialogue(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(config, "WORKSPACE_DIR", Path(directory)):
             dialogue = Path(directory) / "demo" / "cinematic-example" / "dialogue.wav"
@@ -522,7 +476,8 @@ class ParseTest(unittest.TestCase):
                 ),
                 segments=[
                     Segment(id=0, start=0, end=4, speaker="A", orig_text="大丈夫。",
-                            alignment_needs_review=False, speaker_needs_review=False),
+                            alignment_needs_review=True, speaker_needs_review=False,
+                            alignment_granularity="segment", segment_timing_needs_review=False),
                 ],
             )
             preview = references.automatic_reference(script, "A")

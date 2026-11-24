@@ -88,6 +88,64 @@ def _probe_tts_ready(timeout: float = 1.0) -> bool:
         return False
 
 
+def _terminate_process_tree(proc: subprocess.Popen[Any], grace_sec: float = 5.0) -> None:
+    """跨平台优雅终止子进程及其派生子进程，超时后强制清理进程树。"""
+    if proc.poll() is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    real_pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+    if os.name == "nt":
+        proc.terminate()
+        try:
+            proc.wait(timeout=grace_sec)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        if real_pid is not None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(real_pid)],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+
+    if real_pid is not None:
+        try:
+            os.killpg(real_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.terminate()
+    else:
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=grace_sec)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    if real_pid is not None:
+        try:
+            os.killpg(real_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def ensure_tts_stopped() -> bool:
     """停止后端持有的 GPT-SoVITS 进程，等它退出后才释放句柄。"""
     global _tts_proc, _tts_log_fp, _tts_config_dir
@@ -95,12 +153,7 @@ def ensure_tts_stopped() -> bool:
     with _tts_proc_lock:
         if _tts_proc is not None:
             if _tts_proc.poll() is None:
-                try:
-                    _tts_proc.terminate()
-                    _tts_proc.wait(timeout=6)
-                except subprocess.TimeoutExpired:
-                    _tts_proc.kill()
-                    _tts_proc.wait(timeout=3)
+                _terminate_process_tree(_tts_proc, grace_sec=6.0)
                 stopped = True
             _tts_proc = None
         if _tts_log_fp is not None:
@@ -171,8 +224,11 @@ def ensure_tts_running() -> None:
         return
 
     api_script = config.GPT_SOVITS_ROOT / "api_v2.py"
-    python_bin = Path(config.GPT_SOVITS_PYTHON) if config.GPT_SOVITS_PYTHON else None
-    if not api_script.is_file() or python_bin is None or not python_bin.is_file():
+    python_cmd = config.GPT_SOVITS_PYTHON.strip()
+    python_valid = bool(
+        python_cmd and (Path(python_cmd).is_file() or shutil.which(python_cmd) is not None)
+    )
+    if not api_script.is_file() or not python_valid:
         return
 
     parsed = urlparse(config.TTS_API_URL)
@@ -180,7 +236,7 @@ def ensure_tts_running() -> None:
     port = parsed.port or 9880
 
     cmd = [
-        str(python_bin),
+        python_cmd,
         "-u",
         str(api_script),
         "-a",
@@ -212,11 +268,19 @@ def ensure_tts_running() -> None:
             config.WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
             log_path = config.WORKSPACE_DIR / "_tts_server.log"
             _tts_log_fp = log_path.open("w", encoding="utf-8", errors="replace")
+            # ONNX Runtime pre-allocates large contiguous buffers for mem patterns.
+            # On 15 GB laptops the 635 MB Chinese G2P model then fails with
+            # "bad allocation"; disabling mem patterns makes it load reliably.
+            tts_env = os.environ.copy()
+            tts_env.setdefault("ORT_DISABLE_MEM_PATTERN", "1")
+            tts_env.setdefault("PYTHONUTF8", "1")
             _tts_proc = subprocess.Popen(
                 cmd,
                 cwd=str(config.GPT_SOVITS_ROOT),
+                env=tts_env,
                 stdout=_tts_log_fp,
                 stderr=subprocess.STDOUT,
+                start_new_session=os.name != "nt",
             )
 
     deadline = time.time() + config.TTS_STARTUP_TIMEOUT_SEC
@@ -397,14 +461,12 @@ def run_parse_worker(
     project_id: str,
     input_path: Path,
     target_lang: str = "zh",
-    compute_type: Optional[str] = None,
     mode: str = "video_dubbing",
+    source_lang: str | None = None,
 ) -> Path:
-    """以独立子进程启动 workers/parse_worker.py（运行在 env_parse）。
+    """启动独立 MOSS / Banquet 解析 worker（legacy 模式须显式配置；GPU 在子进程退出时回收）。
 
-    注意：
-    - 子进程运行结束后由操作系统 100% 回收 CUDA 显存，严禁在 env_backend 中直接导入 torch/whisperx。
-    - 全过程受 gpu_task_guard 保护，防止并发触发 RTX 5060 8GB OOM。
+    GPU 推理框架不在 env_backend 中导入；全过程由 gpu_task_guard 串行化。
     """
     if not input_path.is_file():
         raise FileNotFoundError(f"待解析输入媒体文件不存在: {input_path}")
@@ -424,7 +486,6 @@ def run_parse_worker(
 
     output_dir = config.WORKSPACE_DIR / project_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    effective_compute = compute_type or config.WHISPER_COMPUTE_TYPE
 
     cmd = [
         python_bin,
@@ -437,13 +498,12 @@ def run_parse_worker(
         str(output_dir),
         "--target-lang",
         target_lang,
-        "--whisper-model",
-        config.WHISPER_MODEL,
-        "--compute-type",
-        effective_compute,
         "--mode",
         mode,
     ]
+
+    if source_lang:
+        cmd.extend(["--source-lang", source_lang])
 
     sub_env = os.environ.copy()
     sub_env["PYTHONUTF8"] = "1"
@@ -457,12 +517,10 @@ def run_parse_worker(
         sub_env["TORCH_HOME"] = config.TORCH_HOME
     if config.HF_TOKEN:
         sub_env["HF_TOKEN"] = config.HF_TOKEN
-    if config.LLM_API_KEY:
-        sub_env["LLM_API_KEY"] = config.LLM_API_KEY
-    if config.LLM_BASE_URL:
-        sub_env["LLM_BASE_URL"] = config.LLM_BASE_URL
-    if config.LLM_MODEL:
-        sub_env["LLM_MODEL"] = config.LLM_MODEL
+    from backend.services.llm_settings import get_llm_snapshot
+    llm = get_llm_snapshot()
+    sub_env.update(LLM_API_KEY=llm.api_key, LLM_BASE_URL=llm.base_url,
+                   LLM_MODEL=llm.model, STAGETTS_LLM_SNAPSHOT="1")
 
     with gpu_task_guard():
         _reset_parse_progress(project_id)
@@ -498,22 +556,7 @@ def run_parse_worker(
             try:
                 returncode = proc.wait(timeout=config.PARSE_TIMEOUT_SEC)
             except subprocess.TimeoutExpired as exc:
-                if os.name == "nt":
-                    try:
-                        subprocess.run(
-                            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                            capture_output=True, timeout=5,
-                        )
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
-                    if proc.poll() is None:
-                        proc.kill()
-                else:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                proc.wait()
+                _terminate_process_tree(proc, grace_sec=0.5)
                 reader.join(timeout=3)
                 err_msg = f"parse_worker 执行超时（>{config.PARSE_TIMEOUT_SEC}s）"
                 _finish_parse_progress(error=err_msg)
