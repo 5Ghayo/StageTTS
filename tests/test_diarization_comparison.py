@@ -9,8 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from experiments import eval_diarization
-from workers import diarization_worker
+from experiments import diarization_worker, eval_diarization
 
 
 class Annotation:
@@ -65,7 +64,7 @@ class DiarizationComparisonTest(unittest.TestCase):
             with patch.object(importlib.metadata, "version", return_value="3.4.0"), \
                  patch.object(diarization_worker, "_load_pipeline", return_value=MagicMock(return_value=Annotation([]))) as loader:
                 result = diarization_worker.run_request(request)
-            loader.assert_called_once_with(config_path)
+            loader.assert_called_once_with(config_path.resolve())
             self.assertEqual(result["hash_scope"], "pipeline_config_only_not_model_weights")
             self.assertEqual(len(result["pipeline_config_sha256"]), 64)
             config_path.unlink()

@@ -26,7 +26,10 @@ def apply_diarizen_override(source: str) -> str:
     call = "    speakerdia = speaker_diarization(audio)"
     if source.count(call) != 1:
         raise ValueError("Unexpected Emilia processing function")
-    return source.replace(call, call + "\n    stage_tts_diarizen_pipeline.save_report(save_path)", 1)
+    return source.replace(
+        call, "    stage_tts_diarizen_pipeline.vad = vad\n" + call
+        + "\n    stage_tts_diarizen_pipeline.save_report(save_path)", 1,
+    )
 
 
 class EmiliaDiarizenPipeline:
@@ -35,23 +38,34 @@ class EmiliaDiarizenPipeline:
     def __init__(self, settings: dict):
         self.settings = settings
         self.last_result = None
+        self.vad = None
 
     def save_report(self, directory):
         (Path(directory) / "speaker_analysis.json").write_text(
             json.dumps(self.last_result, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def __call__(self, audio):
+        import librosa
         import soundfile as sf
         from pyannote.core import Annotation, Segment
 
         from workers.emilia_segments import exclusive_turns
         from workers.speaker_pipeline import run_speaker_job
 
-        waveform = audio["waveform"].detach().cpu().numpy()
+        waveform = audio["waveform"].detach().cpu().numpy().mean(axis=0)
+        rate = audio["sample_rate"]
+        vad_rate = 16000
+        samples = librosa.resample(waveform, orig_sr=rate, target_sr=vad_rate)
+        regions = self.vad.get_speech_timestamps(
+            samples, self.vad.vad_model, sampling_rate=vad_rate, max_speech_duration_s=15,
+        )
+        units = [{"id": i, "start": row["start"] / vad_rate,
+                  "end": min(row["end"] / vad_rate, len(waveform) / rate)}
+                 for i, row in enumerate(regions)]
         with tempfile.TemporaryDirectory(prefix="stagetts_emilia_diarizen_") as temporary:
             path = Path(temporary) / "dialogue.wav"
-            sf.write(str(path), waveform.mean(axis=0), audio["sample_rate"])
-            result = run_speaker_job(path, self.settings)
+            sf.write(str(path), waveform, rate)
+            result = run_speaker_job(path, {**self.settings, "dialogue_units": units})
         self.last_result = result
         annotation = Annotation()
         for index, (start, end, label) in enumerate(exclusive_turns(result["diarization_spans"])):

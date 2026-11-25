@@ -1,4 +1,4 @@
-"""Offline DiariZen Large v2 speaker activity with recording-scoped labels.
+"""Offline DiariZen speaker clustering for externally supplied dialogue intervals.
 
 Run in its own environment containing the DiariZen author's pyannote fork.
 No pyannote 3.1/community checkpoint or online model lookup is used here.
@@ -22,6 +22,9 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
 
 from workers.speaker_pipeline import DIARIZEN_MODEL, DIARIZEN_REVISION, validate_spans
 
+AHC_THRESHOLD = 0.35
+CLUSTERING_ASSETS = ("config.toml", "plda/plda.npz", "plda/xvec_transform.npz")
+
 
 def validate_request(request: dict) -> None:
     if request.get("protocol_version") != "1.0":
@@ -31,7 +34,7 @@ def validate_request(request: dict) -> None:
         if not path.is_absolute() or not (path.is_dir() if directory else path.is_file()):
             raise ValueError(f"{key} must be an existing absolute local {'directory' if directory else 'file'}")
     model = Path(request["model_path"])
-    for name in ("config.toml", "pytorch_model.bin", "plda/plda.npz", "plda/xvec_transform.npz"):
+    for name in CLUSTERING_ASSETS:
         if not (model / name).is_file():
             raise ValueError(f"DiariZen model is missing {name}")
     if request.get("device", "cpu") not in {"cpu", "cuda"}:
@@ -43,6 +46,8 @@ def validate_request(request: dict) -> None:
         audio = Path(request.get("audio_path") or "")
         if not audio.is_absolute() or not audio.is_file():
             raise ValueError("audio_path must be an existing absolute local file")
+        if not isinstance(request.get("dialogue_units"), list):
+            raise ValueError("DiariZen requires dialogue_units; audio segmentation is disabled")
 
 
 def source_activity(rows: list[dict], duration: float) -> list[dict]:
@@ -74,17 +79,63 @@ def scope_activity(spans: list[dict], scope: str) -> tuple[list[dict], dict]:
 def _load_diarizen(request: dict):
     import toml
     import torch
-    from diarizen.pipelines.inference import DiariZenPipeline
+    from pyannote.audio.pipelines.clustering import VBxClustering
+    from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
 
-    # The official local constructor avoids the hub IDs used by from_pretrained.
     root = Path(request["model_path"])
-    config = toml.load(str(root / "config.toml"))
-    config["inference"]["args"]["batch_size"] = request.get("batch_size", 1)
+    config = toml.load(str(root / "config.toml"))["clustering"]["args"]
     # Mapping form avoids upstream's filename heuristic interpreting 'wespeaker' as ONNX.
-    embedding = {"checkpoint": request["embedding_path"], "map_location": "cpu"}
-    pipeline = DiariZenPipeline(diarizen_hub=root, embedding_model=embedding, config_parse=config)
-    pipeline.to(torch.device(request.get("device", "cpu")))
-    return pipeline
+    embedding = PretrainedSpeakerEmbedding(
+        {"checkpoint": request["embedding_path"], "map_location": "cpu"},
+        device=torch.device(request.get("device", "cpu")),
+    )
+    clustering = VBxClustering(metric=embedding.metric, plda_dir=str(root / "plda"),
+                               lda_dim=config["lda_dim"], maxIters=config["max_iters"])
+    clustering.instantiate({"ahc_criterion": config["ahc_criterion"], "ahc_threshold": AHC_THRESHOLD,
+                            "Fa": config["Fa"], "Fb": config["Fb"]})
+    return embedding, clustering
+
+
+def cluster_dialogue_units(embedding, clustering, waveform, rate: int, units: list[dict]) -> list[dict]:
+    """Cluster one DiariZen WeSpeaker embedding per final dialogue interval."""
+    import numpy as np
+    import torchaudio
+    from pyannote.core import SlidingWindow, SlidingWindowFeature
+
+    duration = waveform.shape[-1] / rate
+    mono = waveform.mean(dim=0, keepdim=True)
+    if units and rate != embedding.sample_rate:
+        mono = torchaudio.functional.resample(mono, rate, embedding.sample_rate)
+    rows, vectors, valid = [], [], []
+    seen = set()
+    for unit in units:
+        index, start, end = unit["id"], float(unit["start"]), float(unit["end"])
+        if (type(index) is not int or index in seen or not math.isfinite(start) or not math.isfinite(end)
+                or not 0 <= start < end <= duration + 0.001):
+            raise ValueError("Invalid dialogue unit ID or timestamp")
+        seen.add(index)
+        row = {"id": index, "start": start, "end": end, "speaker": "UNKNOWN", "reason": None}
+        rows.append(row)
+        clip = mono[:, round(start * embedding.sample_rate):round(end * embedding.sample_rate)]
+        if clip.shape[-1] < embedding.min_num_samples:
+            row["reason"] = "dialogue_too_short_for_embedding"
+            continue
+        vector = embedding(clip[None])[0]
+        if not np.isfinite(vector).all() or not np.linalg.norm(vector) > 0:
+            row["reason"] = "invalid_dialogue_embedding"
+            continue
+        vectors.append(vector)
+        valid.append(row)
+
+    if vectors:
+        # VBx accepts (chunks, local speakers, dimensions). Here every chunk
+        # is a dialogue unit, with one candidate speaker and one active slot.
+        embeddings = np.stack(vectors)[:, None, :]
+        active = SlidingWindowFeature(np.ones((len(valid), 1, 1), dtype=np.float32), SlidingWindow())
+        labels, _, _ = clustering(embeddings=embeddings, segmentations=active)
+        for row, label in zip(valid, labels[:, 0], strict=True):
+            row["speaker"] = str(int(label))
+    return rows
 
 
 def run_request(request: dict) -> dict:
@@ -100,7 +151,7 @@ def run_request(request: dict) -> dict:
         if manifest_path.is_file():
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             files = [Path(request["embedding_path"]),
-                     *[p for p in Path(request["model_path"]).rglob("*") if p.is_file()]]
+                     *(Path(request["model_path"]) / name for name in CLUSTERING_ASSETS)]
             for path in files:
                 expected = manifest.get("sha256", {}).get(str(path.relative_to(asset_root)))
                 digest = hashlib.sha256()
@@ -118,7 +169,6 @@ def run_request(request: dict) -> dict:
             import inspect
 
             import torch
-            from diarizen.pipelines.inference import DiariZenPipeline  # noqa: F401
             from pyannote.audio.pipelines import SpeakerDiarization
 
             if "config" not in inspect.signature(SpeakerDiarization.__init__).parameters:
@@ -129,28 +179,22 @@ def run_request(request: dict) -> dict:
             if request.get("preflight"):
                 result.update(status="completed", reason=None)
                 return result
-            from io import BytesIO
-
             import torchaudio
 
             waveform, rate = torchaudio.load(request["audio_path"])
             if waveform.ndim != 2 or waveform.shape[1] == 0 or not torch.isfinite(waveform).all():
                 raise ValueError("Invalid input audio")
             duration = waveform.shape[1] / rate
-            # Upstream selects channel 0; explicitly average channels before passing it audio.
-            buffer = BytesIO()
-            torchaudio.save(buffer, waveform.mean(dim=0, keepdim=True), rate, format="wav")
-            buffer.seek(0)
-            pipeline = _load_diarizen(request)
+            embedding, clustering = _load_diarizen(request)
             try:
-                annotation = pipeline(buffer)
+                assignments = cluster_dialogue_units(embedding, clustering, waveform, rate, request["dialogue_units"])
                 original = [
-                    {"start": float(turn.start), "end": float(turn.end), "speaker": str(speaker)}
-                    for turn, _, speaker in annotation.itertracks(yield_label=True)
+                    {key: row[key] for key in ("start", "end", "speaker")}
+                    for row in assignments if row["speaker"] != "UNKNOWN"
                 ]
                 raw = source_activity(original, duration)
             finally:
-                del pipeline
+                del embedding, clustering
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -160,9 +204,15 @@ def run_request(request: dict) -> dict:
                     digest.update(block)
             scope = digest.hexdigest()[:12]
             spans, grouping = scope_activity(raw, scope)
+            mapping = grouping["speaker_mapping"]
+            result["dialogue_assignments"] = [
+                dict(row, speaker=mapping.get(row["speaker"], "UNKNOWN")) for row in assignments
+            ]
             result.update(status="completed", reason=None, diarization_spans=spans,
-                          raw_diarization_spans=original, grouping=grouping, source_audio_sha256=digest.hexdigest(),
+                          grouping=grouping, source_audio_sha256=digest.hexdigest(),
                           duration_seconds=duration, device=request.get("device", "cpu"),
+                          parameters={"ahc_threshold": AHC_THRESHOLD},
+                          clustering_input="dialogue_units",
                           review_reasons=["no_speaker_activity_returned"] if not spans else [])
     except Exception as exc:
         result["reason"] = f"{type(exc).__name__}: {exc}"

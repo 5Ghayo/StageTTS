@@ -124,6 +124,8 @@ export const Inspector: React.FC = () => {
   const speakers = Object.keys(script.characters);
   const editsDisabled = isLoading || isSynthesizing || pipelineRunning;
   const slotDuration = Math.max(0.1, segment.end - segment.start);
+  const sourceStart = segment.source_audio_start ?? segment.start;
+  const sourceEnd = segment.source_audio_end ?? segment.end;
   const targetLang = segment.target_lang.replace(/^all_/, "").split("-")[0];
   const isCjk = ["zh", "ja", "ko", "yue"].includes(targetLang);
   const unit = isCjk ? "字" : "词";
@@ -333,7 +335,7 @@ export const Inspector: React.FC = () => {
                   src={script.media.vocals_wav || script.media.source_video || undefined}
                   preload="none"
                   onTimeUpdate={(e) => {
-                    if (e.currentTarget.currentTime >= segment.end) e.currentTarget.pause();
+                    if (e.currentTarget.currentTime >= sourceEnd) e.currentTarget.pause();
                   }}
                 />
                 <button
@@ -347,7 +349,7 @@ export const Inspector: React.FC = () => {
                       return;
                     }
                     try {
-                      audio.currentTime = segment.start;
+                      audio.currentTime = sourceStart;
                       await audio.play();
                     } catch {
                       setSynthNote("原声试听失败");

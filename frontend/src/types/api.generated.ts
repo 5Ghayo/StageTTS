@@ -1222,6 +1222,10 @@ export interface components {
              * @description 结束时间（秒）
              */
             end: number;
+            /** @description 原声试听起始时间（秒） */
+            source_audio_start?: number | null;
+            /** @description 原声试听结束时间（秒） */
+            source_audio_end?: number | null;
             /**
              * Speaker
              * @description 关联 characters 的说话人 Key

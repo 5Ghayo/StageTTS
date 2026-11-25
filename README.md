@@ -46,7 +46,7 @@ Stage1 Banquet 分离对白、歌声、伴奏和音效
   ↓
 Stage2 WhisperX 转写与词级对齐
   ↓
-Stage3 DiariZen 说话人分离、证据保留与人工校对
+Stage3 SaT 提议补切 → WhisperX 确认停顿并取中点 → DiariZen 聚类与人物标注
   ↓
 Stage4 LLM 翻译 / 情绪 / 动作 / 是否保留原声
   ↓
@@ -57,9 +57,9 @@ GPT-SoVITS 按句合成配音
 FFmpeg 混音导出 output.mp4
 ```
 
-应用解析固定使用 Banquet 四轨分离 → WhisperX 转写与词级对齐 → DiariZen Large v2 说话人分离 → LLM 翻译 → GPT-SoVITS 配音。DiariZen 在独立环境运行，配置见 [DiariZen 设置](docs/diarizen_setup.md)。重叠和覆盖不足的片段保留 UNKNOWN 并等待人工校对。
+应用解析固定使用 Banquet 四轨分离 → WhisperX 转写与词级对齐 → SaT 提议、WhisperX VAD 确认补切 → DiariZen 说话人聚类 → LLM 翻译 → GPT-SoVITS 配音。SaT 和 DiariZen 在独立环境运行，安装见 [解析模型配置](docs/diarizen_setup.md)。
 
-**文本仅来自音频听力识别**，再由 LLM 翻译为中文；不读取字幕轨、不做字幕 OCR、不使用字幕时间点切句。生成后的文字预览和字幕导出保留。WhisperX 先依据音频 VAD 按停顿细切（连续语音约 8 秒、250 毫秒停顿），对齐后再结合句末标点和人物切换细分。
+**文本仅来自音频听力识别**，再由 LLM 翻译为中文；不读取字幕轨、不做字幕 OCR、不使用字幕时间点切句。生成后的文字预览和字幕导出保留。WhisperX VAD 先以 `0.65 / 0.65` 细切。SaT 提出的额外句界以 `0.80 / 0.80` 复查，有停顿才在正中切开。每条最终台词提取一个 DiariZen WeSpeaker 声纹，再统一交给 VBx 聚类。
 
 ---
 

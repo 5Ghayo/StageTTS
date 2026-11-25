@@ -258,10 +258,18 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
                     segment.alignment_granularity = "unknown"
                     segment.timing_source = "unknown"
                     segment.segment_timing_needs_review = True
+                    segment.source_audio_start = segment.source_audio_end = None
                     continue
                 # Source capabilities come from parsing, not a client-side claim.
                 segment.alignment_granularity = before.alignment_granularity
                 segment.timing_source = before.timing_source
+                if (segment.start, segment.end, payload.media.vocals_wav) == (
+                    before.start, before.end, previous.media.vocals_wav
+                ):
+                    segment.source_audio_start = before.source_audio_start
+                    segment.source_audio_end = before.source_audio_end
+                else:
+                    segment.source_audio_start = segment.source_audio_end = None
                 if (segment.orig_text, segment.start, segment.end, segment.speaker) != (
                     before.orig_text, before.start, before.end, before.speaker
                 ) or payload.media.vocals_wav != previous.media.vocals_wav:

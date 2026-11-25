@@ -291,6 +291,8 @@ class Segment(BaseModel):
     id: int = Field(ge=0, description="片段唯一整数 ID")
     start: float = Field(ge=0.0, description="起始时间（秒）")
     end: float = Field(gt=0.0, description="结束时间（秒）")
+    source_audio_start: float | None = Field(default=None, ge=0.0, description="原声试听起始时间（秒）")
+    source_audio_end: float | None = Field(default=None, gt=0.0, description="原声试听结束时间（秒）")
     speaker: str = Field(description="关联 characters 的说话人 Key")
     orig_text: str = Field(default="", description="原片识别文本")
     words: List[AlignedWord] = Field(default_factory=list, json_schema_extra={"default": []})

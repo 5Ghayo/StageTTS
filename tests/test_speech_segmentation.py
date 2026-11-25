@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from workers.aligned_segments import normalize_segments
-from workers.speech_segmentation import speech_chunks
+from workers.speech_segmentation import attach_playback_ranges, speech_chunks
 
 
 def test_real_pauses_separate_short_utterances_instead_of_merging_to_30_seconds():
@@ -23,6 +23,19 @@ def test_short_responses_survive_and_padding_never_overlaps_or_leaves_audio():
     assert chunks[0]["start"] == 0
     assert chunks[-1]["end"] == 0.5
     assert all(a["end"] <= b["start"] for a, b in zip(chunks, chunks[1:]))
+
+
+def test_playback_trims_heads_and_keeps_midpoint_tails_without_moving_aligned_timing():
+    chunks = speech_chunks([(1, 2), (3, 4)], duration=4.1)
+    segments = [{"start": 1.1, "end": 1.4}, {"start": 1.5, "end": 1.8},
+                {"start": 3.1, "end": 3.8}]
+
+    attach_playback_ranges(segments, chunks, 4.1)
+
+    assert [(row["source_audio_start"], row["source_audio_end"]) for row in segments] == [
+        (1.0, 1.4), (1.5, 2.5), (3.0, 4.1),
+    ]
+    assert [(row["start"], row["end"]) for row in segments] == [(1.1, 1.4), (1.5, 1.8), (3.1, 3.8)]
 
 
 def test_no_evenly_spaced_cuts_are_invented_for_long_continuous_speech():
@@ -70,16 +83,23 @@ def test_parse_stage_uses_fine_audio_vad_before_asr_and_keeps_normal_alignment(t
     model = SimpleNamespace(transcribe=lambda *a, **kw: (
         events.append(("asr", kw)) or {"language": "ja", "segments": [{"start": 0, "end": 1, "text": "はい"}]}))
     result = {"segments": [{"start": 0, "end": 1, "text": "はい", "words": []}]}
-    whisper = SimpleNamespace(load_audio=lambda _: "audio", load_model=lambda *a, **kw: model,
+    adapter = SimpleNamespace(last_chunks=speech_chunks([(0, 1)], duration=1), duration=1)
+    def load_model(*args, **kwargs):
+        assert kwargs["vad_options"] == {"vad_onset": 0.65, "vad_offset": 0.65}
+        return model
+
+    whisper = SimpleNamespace(load_audio=lambda _: "audio", load_model=load_model,
                               load_align_model=lambda **kw: ("aligner", {}), align=lambda *a, **kw: result)
     with patch.dict(sys.modules, {"whisperx": whisper}), \
          patch.object(parse_worker, "_enable_pyannote_torch_load_compat"), \
          patch.object(parse_worker, "_release_cuda_memory"), \
-         patch("workers.speech_segmentation.enable_sentence_vad", side_effect=lambda _: events.append(("vad", {}))):
+         patch("workers.speech_segmentation.enable_sentence_vad",
+               side_effect=lambda _: events.append(("vad", {})) or adapter):
         audio, aligned, lang = parse_worker._stage_whisperx_asr_align(tmp_path / "dialogue.wav", "float16", "large-v3", "cuda")
     assert [e[0] for e in events] == ["vad", "asr"]
     assert events[1][1]["chunk_size"] == 8
     assert aligned is result and lang == "ja" and audio == "audio"
+    assert aligned["vad_chunks"] == adapter.last_chunks and aligned["vad_duration"] == 1
 
 
 def test_retired_subtitle_toolchain_configuration_is_rejected(tmp_path):

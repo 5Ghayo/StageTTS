@@ -73,7 +73,7 @@ def main() -> None:
                 bundle.extract(entry, staging)
             (Path(staging) / source.name).rename(source)
     model = root / "diarizen-large-v2"
-    for name in ("config.toml", "config.json", "pytorch_model.bin", "plda/plda.npz", "plda/xvec_transform.npz"):
+    for name in ("config.toml", "plda/plda.npz", "plda/xvec_transform.npz"):
         download(f"https://huggingface.co/{DIARIZEN_MODEL}/resolve/{DIARIZEN_REVISION}/{name}", model / name)
     embedding = root / "wespeaker-resnet34.bin"
     download("https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM/resolve/"

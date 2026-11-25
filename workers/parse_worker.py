@@ -7,7 +7,7 @@
   Stage 0: FFmpeg 抽取标准 WAV 并探测媒体精确时长
   Stage 1: Banquet 分离对白、歌声、伴奏和音效
   Stage 2: WhisperX 转写与词级对齐
-  Stage 3: 独立 DiariZen 说话人分离
+  Stage 3: SaT 提议补切，WhisperX 确认停顿，DiariZen 聚类标注人物
   Stage 4: LLM 导演口语化翻译、情绪/动作/原声叹词标注，校验并落盘 script.json
 """
 
@@ -450,7 +450,7 @@ def _stage_whisperx_asr_align(
     _enable_pyannote_torch_load_compat()
     import whisperx
 
-    from workers.speech_segmentation import ASR_MAX_SPEECH_SECONDS, enable_sentence_vad
+    from workers.speech_segmentation import ASR_MAX_SPEECH_SECONDS, ASR_VAD_THRESHOLD, enable_sentence_vad
 
     audio = whisperx.load_audio(str(vocals_wav))
 
@@ -473,8 +473,9 @@ def _stage_whisperx_asr_align(
                 whisper_model,
                 device=dev,
                 compute_type=ctype,
+                vad_options={"vad_onset": ASR_VAD_THRESHOLD, "vad_offset": ASR_VAD_THRESHOLD},
             )
-            enable_sentence_vad(model)
+            vad_adapter = enable_sentence_vad(model)
             result = model.transcribe(audio, batch_size=batch_size, chunk_size=ASR_MAX_SPEECH_SECONDS)
             used_device = dev
             _log(
@@ -524,76 +525,11 @@ def _stage_whisperx_asr_align(
                     del align_model
                 _release_cuda_memory()
 
+    if getattr(vad_adapter, "last_chunks", None) and vad_adapter.duration is not None:
+        result["vad_chunks"] = vad_adapter.last_chunks
+        result["vad_duration"] = vad_adapter.duration
+        result["vad_recheck_regions"] = getattr(vad_adapter, "recheck_regions", [])
     return audio, result, detected_lang
-
-
-def _unknown_speaker_segments(segments: List[Dict[str, Any]], reason: str,
-                              language: str | None = None) -> List[Dict[str, Any]]:
-    """UNKNOWN 是未确认归属的占位符；分别保留源片段，不能据此合并为同一人。"""
-    normalized = []
-    for raw in segments:
-        for part in normalize_segments([raw], diarized=False, language=language, split_sentences=True):
-            part["speaker"] = "UNKNOWN"
-            part["speaker_needs_review"] = True
-            part["speaker_fallback_reason"] = reason
-            for word in part.get("words") or []:
-                word["speaker"] = None
-            normalized.append(part)
-    normalized.sort(key=lambda item: (item["start"], item["end"]))
-    return [dict(part, id=index) for index, part in enumerate(normalized)]
-
-
-def _review_assigned_speakers(segments: List[Dict[str, Any]], language: str | None = None) -> List[Dict[str, Any]]:
-    """保留成功聚类的标签，但缺失的词级证据不能被片段多数标签掩盖。"""
-    normalized = []
-    prepared = []
-    for raw in segments:
-        prepared.append({**raw, "speaker": str(raw.get("speaker") or "").strip() or "UNKNOWN"})
-    for part in normalize_segments(prepared, diarized=True, language=language,
-                                   trim_to_aligned_words=True, split_sentences=True):
-        words = part.get("words") or []
-        labels = [str(word.get("speaker") or "").strip() for word in words]
-        has_speaker = any(label and label != "UNKNOWN" for label in labels)
-        has_segment_speaker = part["speaker"] not in {"", "UNKNOWN"}
-        if not has_speaker and not has_segment_speaker:
-            part["speaker"] = "UNKNOWN"
-            part["speaker_needs_review"] = True
-            part["speaker_fallback_reason"] = "speaker_assignment_missing"
-        elif not words or any(label in {"", "UNKNOWN"} for label in labels):
-            part["speaker_needs_review"] = True
-            part["speaker_fallback_reason"] = "word_speaker_missing"
-        normalized.append(part)
-    return normalized
-
-
-def _diarization_activity_rows(diarize_df: Any) -> List[Dict[str, Any]]:
-    """Copy original dataframe rows without collapsing concurrent speaker tracks."""
-    rows = diarize_df.to_dict("records")
-    return [{"start": row.get("start"), "end": row.get("end"), "speaker": row.get("speaker")}
-            for row in rows]
-
-
-def _mark_overlapping_activity(segments: List[Dict[str, Any]], activity_rows: List[Dict[str, Any]]) -> None:
-    """Legacy transcript ownership cannot silently confirm simultaneous speakers."""
-    valid = []
-    for row in activity_rows:
-        try:
-            valid.append((float(row["start"]), float(row["end"]), row.get("speaker")))
-        except (KeyError, TypeError, ValueError):
-            continue
-    valid.sort(key=lambda row: row[0])
-    active = []
-    overlaps = []
-    for start, end, speaker in valid:
-        active = [row for row in active if row[1] > start]
-        for left_start, left_end, left_speaker in active:
-            if speaker and left_speaker and speaker != left_speaker and min(end, left_end) > start:
-                overlaps.append((start, min(end, left_end)))
-        active.append((start, end, speaker))
-    for seg in segments:
-        if any(start < seg["end"] and end > seg["start"] for start, end in overlaps):
-            seg["speaker_needs_review"] = True
-            seg["speaker_fallback_reason"] = seg.get("speaker_fallback_reason") or "overlapping_speaker_activity"
 
 
 def _speaker_settings(device: str) -> dict:
@@ -607,53 +543,66 @@ def _speaker_settings(device: str) -> dict:
 
 
 def _stage_diarize(
-    audio: Any,
+    audio: Path | None,
     aligned_result: Dict[str, Any],
     device: str,
     skip_diarization: bool,
     evidence_context: Optional[Dict[str, Any]] = None,
-    language: str | None = None,
+    prepared_segments: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """DiariZen activity -> existing aligned transcript.
+    """Cluster the final source audio clips without modifying their boundaries."""
+    from workers.speaker_pipeline import assign_interval, run_speaker_job
 
-    ``audio`` is now the dialogue WAV path, never a WhisperX numpy array.
-    Model failure is explicit and cannot publish stale or single-speaker labels.
-    """
-    from workers.speaker_pipeline import assign_transcript, run_speaker_job
-
-    original = copy.deepcopy(aligned_result.get("segments") or [])
+    original = aligned_result.get("segments") or []
+    normalized = (copy.deepcopy(prepared_segments) if prepared_segments is not None
+                  else normalize_segments(original, semantic_cuts=frozenset()))
     if evidence_context is not None:
         evidence_context.update(raw_segments=copy.deepcopy(original), diarization_spans=[],
-                                exclusive_spans=[], fallback_reason=None,
-                                diarization_backend="diarizen")
+                                exclusive_spans=[], fallback_reason=None, diarization_backend="diarizen")
     if skip_diarization:
         if evidence_context is not None:
             evidence_context["fallback_reason"] = "diarization_skipped"
-        return _unknown_speaker_segments(original, "diarization_skipped", language=language)
-    _log("Stage3", f"DiariZen Large v2 (device={device})")
-    result = run_speaker_job(Path(audio), _speaker_settings(device))
+        for part in normalized:
+            part.update(speaker="UNKNOWN", speaker_needs_review=True, speaker_fallback_reason="diarization_skipped")
+            for word in part["words"]:
+                word["speaker"] = None
+        return normalized
+
+    if audio is None:
+        raise ValueError("DiariZen clustering requires the source dialogue audio")
+    _log("Stage3", f"DiariZen 声纹聚类 (device={device})")
+    settings = _speaker_settings(device)
+    units = {part["id"]: {
+        "id": part["id"],
+        "start": part["source_audio_start"] if part.get("source_audio_start") is not None else part["start"],
+        "end": part["source_audio_end"] if part.get("source_audio_end") is not None else part["end"],
+    } for part in normalized}
+    settings["dialogue_units"] = list(units.values())
+    result = run_speaker_job(audio, settings)
     spans = result["diarization_spans"]
-    if evidence_context is not None:
-        evidence_context.update(diarization_spans=spans, device=device,
-                                diarization_revision=result.get("model_revision"),
-                                speaker_scope=f"sha256:{result.get('source_audio_sha256')}:whole_recording")
-    # Retain original and recording-scoped DiariZen labels for audit.
-    report = Path(audio).parent / "speaker_analysis.json"
+    assignments = {row["id"]: row for row in result["dialogue_assignments"]}
+    if assignments.keys() != units.keys() or len(result["dialogue_assignments"]) != len(units):
+        raise RuntimeError("DiariZen did not return one assignment per dialogue unit")
+
+    for part in normalized:
+        unit, assignment = units[part["id"]], assignments[part["id"]]
+        speaker = assignment["speaker"]
+        _, coverage_issue = assign_interval(unit["start"], unit["end"], spans)
+        reason = assignment.get("reason") or coverage_issue
+        if not reason and part["alignment_needs_review"]:
+            reason = "dialogue_alignment_needs_review"
+        part.update(speaker=speaker, speaker_needs_review=bool(reason), speaker_fallback_reason=reason)
+        for word in part["words"]:
+            word["speaker"] = speaker if not reason and word["start"] is not None and word["end"] is not None else None
+
+    report = audio.parent / "speaker_analysis.json"
     report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     if evidence_context is not None:
-        evidence_context["speaker_analysis_path"] = str(report)
-    assigned = assign_transcript(original, spans)
-    normalized = _review_assigned_speakers(assigned, language=language)
-    # Normalization may split words at a real speaker change; reassess each output range.
-    from workers.speaker_pipeline import assign_interval
-    for part in normalized:
-        label, reason = assign_interval(part["start"], part["end"], spans)
-        part["speaker"] = label
-        part["speaker_needs_review"] = bool(reason) or not part.get("words") or any(
-            w.get("speaker") is None for w in part.get("words", []))
-        part.pop("speaker_fallback_reason", None)
-        if reason or part["speaker_needs_review"]:
-            part["speaker_fallback_reason"] = reason or "word_speaker_missing"
+        evidence_context.update(
+            diarization_spans=spans, device=device, diarization_revision=result.get("model_revision"),
+            diarization_input=result.get("clustering_input"), speaker_analysis_path=str(report),
+            speaker_scope=f"sha256:{result.get('source_audio_sha256')}:whole_recording",
+        )
     return normalized
 
 
@@ -751,8 +700,8 @@ def _build_and_save_script(
                                            "fallback_reason": evidence_context.get("fallback_reason"),
                                            "speaker_scope": evidence_context.get("speaker_scope"),
                                            "speaker_analysis_path": evidence_context.get("speaker_analysis_path"),
-                                           "timestamp_correction_policy": "intersect_frame_activity_with_source_bounds",
-                                           "activity_kind": "diarizer_activity"}),
+                                           "timestamp_correction_policy": "fixed_dialogue_clip_ranges",
+                                           "activity_kind": "dialogue_unit_cluster"}),
         ]
         evidence = build_source_evidence(
             evidence_context.get("raw_segments") or [], evidence_context.get("diarization_spans") or [],
@@ -859,6 +808,10 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             whisper_model=getattr(args, "whisper_model", "large-v3"),
             device=device,
         )
+        from workers.dialogue_segmentation import resolve_dialogue_boundaries
+
+        prepared = resolve_dialogue_boundaries(aligned_result, lambda message: _log("Stage3", message))
+        _log("Stage3", f"切分完成，共 {len(prepared)} 段，开始人物聚类")
         evidence_context: Dict[str, Any] = {}
         raw_segments = _stage_diarize(
             audio=vocals_wav,
@@ -866,7 +819,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             device=device,
             skip_diarization=args.skip_diarization,
             evidence_context=evidence_context,
-            language=detected_lang,
+            prepared_segments=prepared,
         )
         review_count = sum(seg["alignment_needs_review"] or seg["speaker_needs_review"] for seg in raw_segments)
         if review_count:

@@ -13,11 +13,10 @@ import importlib
 import json
 import math
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WORKER = ROOT / "workers" / "diarization_worker.py"
+WORKER = Path(__file__).with_name("diarization_worker.py")
 
 
 def evaluate_der(result: dict, gold_rttm: Path | None, *, uri: str,

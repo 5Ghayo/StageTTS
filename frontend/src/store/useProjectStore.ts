@@ -254,6 +254,8 @@ function applyPatchToSegments(
       }
       if (cleanFields.start !== seg.start || cleanFields.end !== seg.end) {
         timingChanged = true;
+        cleanFields.source_audio_start = null;
+        cleanFields.source_audio_end = null;
       }
     }
     if (cleanFields.speaker !== undefined) {
@@ -733,6 +735,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const leftSeg = invalidateAudio({
       ...seg,
       end: candidate,
+      source_audio_start: null,
+      source_audio_end: null,
       orig_text: leftOrig,
       target_text: leftTarget || seg.target_text,
       words: leftWords,
@@ -742,6 +746,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ...seg,
       id: newId,
       start: candidate,
+      source_audio_start: null,
+      source_audio_end: null,
       orig_text: rightOrig,
       target_text: rightTarget || "（续）",
       words: rightWords,
@@ -782,6 +788,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ...curr,
       start: Number(Math.min(curr.start, next.start).toFixed(2)),
       end: Number(Math.max(curr.end, next.end).toFixed(2)),
+      source_audio_start: null,
+      source_audio_end: null,
       orig_text: joinSegmentText(curr.orig_text, next.orig_text),
       target_text: joinSegmentText(curr.target_text, next.target_text),
       words: [...curr.words, ...next.words],

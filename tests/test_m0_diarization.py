@@ -22,9 +22,11 @@ def source_segments():
     ]
 
 
-def worker_result(spans):
-    return {"status": "completed", "diarization_spans": spans, "model_revision": "fixed-model",
-            "source_audio_sha256": "fixture"}
+def worker_result(spans, assignments=None):
+    if assignments is None:
+        assignments = [{"id": index, "speaker": row["speaker"]} for index, row in enumerate(spans)]
+    return {"status": "completed", "diarization_spans": spans, "dialogue_assignments": assignments,
+            "model_revision": "fixed-model", "source_audio_sha256": "fixture"}
 
 
 class DiarizationFallbackTest(unittest.TestCase):
@@ -72,7 +74,8 @@ class DiarizationFallbackTest(unittest.TestCase):
         self.assertFalse((self.audio.parent / "speaker_analysis.json").exists())
 
     def test_empty_activity_remains_unknown_and_is_saved(self):
-        with patch("workers.speaker_pipeline.run_speaker_job", return_value=worker_result([])):
+        with patch("workers.speaker_pipeline.run_speaker_job", return_value=worker_result(
+            [], [{"id": index, "speaker": "UNKNOWN", "reason": "speaker_assignment_missing"} for index in range(2)])):
             result = parse_worker._stage_diarize(self.audio, {"segments": source_segments()}, "cpu", False)
         self.assert_saved_unknown(result, "speaker_assignment_missing")
 
@@ -88,14 +91,15 @@ class DiarizationFallbackTest(unittest.TestCase):
         self.assertEqual(raw, untouched)
         self.assertTrue((self.audio.parent / "speaker_analysis.json").is_file())
 
-    def test_aligned_words_split_a_real_speaker_change_without_losing_text(self):
+    def test_speaker_evidence_never_splits_final_text(self):
         raw = {"segments": [{"start": 0, "end": 2, "text": "Wait here.", "words": [
             {"word": "Wait", "start": 0, "end": 1}, {"word": "here.", "start": 1, "end": 2}]}]}
         spans = [{"start": 0, "end": 1, "speaker": "A"}, {"start": 1, "end": 2, "speaker": "B"}]
-        with patch("workers.speaker_pipeline.run_speaker_job", return_value=worker_result(spans)):
+        worker = worker_result(spans, [{"id": 0, "speaker": "A"}])
+        with patch("workers.speaker_pipeline.run_speaker_job", return_value=worker):
             result = parse_worker._stage_diarize(self.audio, raw, "cpu", False)
-        self.assertEqual([s["speaker"] for s in result], ["A", "B"])
-        self.assertEqual([s["orig_text"] for s in result], ["Wait", "here."])
+        self.assertEqual([s["orig_text"] for s in result], ["Wait here."])
+        self.assertTrue(result[0]["speaker_needs_review"])
 
     def test_unknown_cannot_be_confirmed_by_schema_or_saved_mutation(self):
         seg = Segment(id=0, start=0, end=1, speaker="UNKNOWN", speaker_needs_review=False)

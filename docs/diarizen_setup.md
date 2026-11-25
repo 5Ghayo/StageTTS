@@ -1,6 +1,6 @@
 # DiariZen Large v2 说话人分离
 
-应用固定使用 Banquet 四轨分离 → WhisperX 转写和词级对齐 → DiariZen 说话人时间段 → 人工审校 / 翻译 / GPT-SoVITS。训练语料入口使用 Emilia-Pipe，其中说话人分段同样调用独立 DiariZen。
+应用固定使用 Banquet 四轨分离 → WhisperX 转写和对齐 → SaT 和 WhisperX VAD 复查切点 → DiariZen 声纹聚类 → 人工审校 / 翻译 / GPT-SoVITS。训练语料入口使用 Emilia-Pipe 的 Silero VAD 提供片段，再交给独立 DiariZen 聚类。
 
 ## 固定模型与独立环境
 
@@ -32,10 +32,11 @@ Windows 解释器路径使用 `Scripts/python.exe`。修改后重启后端。解
 
 ## 身份与时间证据
 
+- DiariZen 按最终原声试听范围逐条提取 WeSpeaker 声纹（段首去空白，段尾保留），再把有效声纹按原时间顺序交给一次 VBx 聚类。调用方必须提供片段，工作进程只加载声纹模型、VBx 和 PLDA 参数。AHC 阈值固定为 `0.35`。
 - 直接保留 DiariZen 的说话人分组，不再做额外音色聚类。
 - `speaker_analysis.json` 保留原始活动时间段、来源音频哈希和原始到录音内角色编号的映射；编号带来源哈希，跨录音同号不自动认定为同角色。
 - 转写区间必须由一个说话人至少覆盖 80%，同时不能存在其他说话人的重叠活动。重叠、多说话人或覆盖不足保留 UNKNOWN。
-- WhisperX 只有真实词级时间才参与词级分配，不能按字数比例编造时间。DiariZen 的帧尾越界显式裁到音频边界，并保留原始时间段与审校原因。
+- WhisperX 提供词级时间。补切后落在新片段外的词时间会置空并标为待审。
 - 文字与词级对齐完整匹配、时间有序且不重叠时，输出片段首尾贴合首词和末词的真实时间，避免 ASR 窗口首尾的空白或其他人物活动影响归属。原始 ASR 窗口仍保留在来源证据中。跨说话人边界的词、真实重叠或缺失对齐继续待审，不按多数覆盖强行归类。
 - 本次代码检查验证接口与证据逻辑；动漫识别、分离与配音质量需用实际素材验收。
 
@@ -51,14 +52,25 @@ Windows 解释器路径使用 `Scripts/python.exe`。修改后重启后端。解
 }
 ```
 
-Emilia 保留其 UVR、Silero VAD、Whisper 与 DNSMOS；包装器只替换旧的说话人模型及令牌门槛，训练切段只使用无重叠的说话人区间。旧 `diarization_worker.py` 仅用于隔离的基线实验。
+Emilia 保留其 UVR、Silero VAD、Whisper 与 DNSMOS；包装器只替换旧的说话人模型及令牌门槛，训练切段只使用无重叠的说话人区间。旧版基线工人移到 `experiments/`，供离线对照使用。
 
 ## 音频来源与细切
 
 识别、分段和翻译只使用音频，不读取内嵌 / 外挂字幕或 OCR 结果。原文由音频 ASR 生成，再由 LLM 翻译为中文；生成后的文字预览与字幕导出不受影响。
 
-本次适配已在 WhisperX 3.4.5 验证。WhisperX 复用其原有 Pyannote VAD 权重和最低语音分数切点，将连续语音窗口控制在约 8 秒，保留至少 250 毫秒的停顿作为片段边界，不再跨这些停顿拼成 30 秒窗口。相邻片段最多各补 30 毫秒上下文，且不互相覆盖。短应答保留，不为凑时长重新合并。对齐后遇到句末标点、可靠停顿或说话人变化继续拆句。
+WhisperX 3.4.5 首轮固定用 `vad_onset = 0.65`、`vad_offset = 0.65`，连续语音窗口约 8 秒，250 毫秒以上停顿保留为首轮片段边界。SaT 评分超过 0.25 的内部句界在前后各 1 秒内复查。复查使用同一份 WhisperX VAD 帧分数和 `0.80 / 0.80` 阈值，检测到至少 200 毫秒的停顿时切在停顿正中。SaT 不可用时会记录日志并保留首轮结果。
+
+原声试听从 WhisperX VAD 检测到的语音起点开始，去掉段首留白；段尾保留到相邻语音之间的停顿中点。最后一条有可用余量时保留最多 250 毫秒的源音频。词级对齐时间继续用于配音时间轴。
 
 这是语音片段细切，不保证每一段恰好对应完整语法句。无停顿的长句可能在 VAD 低分点分开；连读、抢话、ASR 漏字和错误的日语词级对齐仍需要审校。输入字幕不再是补写或纠错来源。
 
-2026-11-25 在同一份 Banquet 对白轨的 3651–3771 秒做 CUDA 对照，WhisperX 3.4.5 / Whisper medium 与日语对齐模型的 revision、输入音频哈希保持一致。旧方式为 5 段（最长 27.692 秒、中位 26.493 秒），音频细切后为 24 段（最长 6.582 秒、中位 2.203 秒）。这验证分块行为生效，不代表识别准确率、人物归属或每句完整性已经人工验收；该对照没有运行字幕输入、翻译或 TTS。
+### 本地 SaT
+
+```sh
+uv venv .venv-sat
+uv pip install --python .venv-sat/bin/python 'wtpsplit[onnx-cpu]==2.2.2' 'transformers<5'
+.venv-sat/bin/hf download segment-any-text/sat-3l-sm model_optimized.onnx config.json --revision 137da05 --local-dir .cache/sat/model
+.venv-sat/bin/hf download FacebookAI/xlm-roberta-base tokenizer.json tokenizer_config.json config.json --revision e73636d --local-dir .cache/sat/tokenizer
+```
+
+Windows 使用 `.venv-sat/Scripts/` 下的解释器和 `hf`。可通过 `SAT_PYTHON` 和 `SAT_ASSET_DIR` 指定其他安装目录。模型下载后在本地离线处理原文。

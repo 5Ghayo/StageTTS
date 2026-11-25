@@ -5,16 +5,40 @@ import json
 import math
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
-from workers.diarizen_worker import run_request, scope_activity, source_activity, validate_request
+from workers.diarizen_worker import _load_diarizen, run_request, scope_activity, source_activity, validate_request
 from workers.speaker_pipeline import assign_interval, assign_transcript, run_speaker_job, validate_spans
 
 
 def span(start, end, speaker):
     return {"start": start, "end": end, "speaker": speaker}
+
+
+def test_model_loader_overrides_checkpoint_clustering_defaults(tmp_path):
+    model_config = {
+        "clustering": {"args": {"ahc_criterion": "distance", "ahc_threshold": 0.6,
+                                "Fa": 0.07, "Fb": 0.8, "lda_dim": 128, "max_iters": 20}},
+    }
+    clustering = Mock()
+    embedding = Mock(metric="cosine")
+    modules = {
+        "toml": SimpleNamespace(load=Mock(return_value=model_config)),
+        "torch": SimpleNamespace(device=str),
+        "pyannote.audio.pipelines.clustering": SimpleNamespace(VBxClustering=clustering),
+        "pyannote.audio.pipelines.speaker_verification": SimpleNamespace(
+            PretrainedSpeakerEmbedding=Mock(return_value=embedding)),
+    }
+    with patch.dict(sys.modules, modules):
+        loaded = _load_diarizen({"model_path": str(tmp_path), "embedding_path": "wespeaker.bin"})
+
+    assert loaded == (embedding, clustering.return_value)
+    clustering.return_value.instantiate.assert_called_once_with(
+        {"ahc_criterion": "distance", "ahc_threshold": 0.35, "Fa": 0.07, "Fb": 0.8},
+    )
 
 
 def test_assignment_uses_union_coverage_and_never_nearest_or_majority():
@@ -61,6 +85,17 @@ def test_worker_rejects_missing_models_without_importing_or_downloading():
     assert "absolute local" in result["reason"]
     with pytest.raises(ValueError):
         validate_request({"protocol_version": "2.0"})
+
+
+def test_worker_rejects_segmentation_requests(tmp_path):
+    (tmp_path / "plda").mkdir()
+    for asset in ("config.toml", "plda/plda.npz", "plda/xvec_transform.npz", "embedding.bin", "input.wav"):
+        (tmp_path / asset).touch()
+    result = run_request({"protocol_version": "1.0", "model_path": str(tmp_path),
+                          "embedding_path": str(tmp_path / "embedding.bin"),
+                          "audio_path": str(tmp_path / "input.wav")})
+    assert result["status"] == "error"
+    assert "audio segmentation is disabled" in result["reason"]
 
 
 def test_orchestrator_runs_the_selected_interpreter_and_validates_response(tmp_path):

@@ -23,7 +23,8 @@ class ParseEvidenceTest(unittest.TestCase):
         original = copy.deepcopy(raw)
         rows = [{"start": 0, "end": 2, "speaker": "A"}, {"start": 0.5, "end": 1.5, "speaker": "B"}]
         context = {}
-        result = {"diarization_spans": rows, "model_revision": "fixture", "source_audio_sha256": "fixture"}
+        result = {"diarization_spans": rows, "dialogue_assignments": [{"id": 0, "speaker": "A"}],
+                  "model_revision": "fixture", "source_audio_sha256": "fixture"}
         with tempfile.TemporaryDirectory() as temporary, \
              patch("workers.speaker_pipeline.run_speaker_job", return_value=result):
             audio = Path(temporary) / "dialogue.wav"
@@ -84,29 +85,7 @@ class ParseEvidenceTest(unittest.TestCase):
             self.assertEqual(script.segments[0].speaker, "UNKNOWN")
             self.assertEqual(script.segments[0].speaker_fallback_reason, "diarization_skipped")
 
-    def test_sequential_activity_is_not_overlap_and_duplicate_same_speaker_is_not_overlap(self):
-        segment = {"start": 0, "end": 2, "speaker_needs_review": False}
-        rows = [{"start": 0, "end": 1, "speaker": "A"}, {"start": 1, "end": 2, "speaker": "B"}]
-        parse_worker._mark_overlapping_activity([segment], rows)
-        self.assertFalse(segment["speaker_needs_review"])
-        parse_worker._mark_overlapping_activity([segment], [{"start": 0, "end": 2, "speaker": "A"}] * 2)
-        self.assertFalse(segment["speaker_needs_review"])
-
-    def test_detected_language_reaches_success_and_fallback_normalization(self):
-        raw = {"segments": [{"start": 0, "end": 1, "text": "待って。",
-                             "words": [{"word": "待って。", "start": 0, "end": 1}]}]}
-        real_normalize = parse_worker.normalize_segments
-        with patch.object(parse_worker, "normalize_segments", wraps=real_normalize) as normalize:
-            parse_worker._stage_diarize(None, raw, "cpu", True, {}, language="ja")
-            self.assertEqual(normalize.call_args.kwargs["language"], "ja")
-        result = {"diarization_spans": [{"start": 0, "end": 1, "speaker": "A"}]}
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch("workers.speaker_pipeline.run_speaker_job", return_value=result), \
-             patch.object(parse_worker, "normalize_segments", wraps=real_normalize) as normalize:
-            parse_worker._stage_diarize(Path(temporary) / "audio.wav", raw, "cpu", False, {}, language="ja")
-            self.assertEqual(normalize.call_args.kwargs["language"], "ja")
-
-    def test_production_pipeline_passes_detected_language_and_snapshot_context(self):
+    def test_production_pipeline_passes_prepared_segments_and_snapshot_context(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.wav"
@@ -124,7 +103,8 @@ class ParseEvidenceTest(unittest.TestCase):
                  patch.object(parse_worker, "_build_and_save_script", return_value=output / "script.json") as save, \
                  patch.object(parse_worker, "_cleanup_stale_cinematic_dirs"):
                 parse_worker.run_pipeline(args)
-            self.assertEqual(diarize.call_args.kwargs["language"], "ja")
+            self.assertEqual(diarize.call_args.kwargs["prepared_segments"], [])
+            self.assertEqual(save.call_args.kwargs["detected_lang"], "ja")
             self.assertIs(diarize.call_args.kwargs["evidence_context"], save.call_args.kwargs["evidence_context"])
 
 

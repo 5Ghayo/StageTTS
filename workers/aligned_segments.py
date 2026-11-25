@@ -10,6 +10,7 @@ from typing import Any
 
 from workers.semantic_boundaries import (
     BoundaryCandidate,
+    BoundaryPlan,
     BoundarySelector,
     TokenizerAdapter,
     generate_boundary_plan,
@@ -43,12 +44,31 @@ def _word_offsets(text: str, words: list[dict]) -> list[int] | None:
     cursor = 0
     offsets = []
     for word in words:
-        token = "".join(word["word"].split())
+        token = "".join(str(word.get("word") or "").split())
         if not token or not compact.startswith(token, cursor):
             return None
         offsets.append(letters[cursor][0])
         cursor += len(token)
     return offsets if cursor == len(compact) else None
+
+
+def aligned_cut_indices(raw: dict) -> list[int]:
+    """Return word indices that can start an evidence-backed second line."""
+    words = raw.get("words") or []
+    start, end = _time(raw.get("start")), _time(raw.get("end"))
+    if start is None or end is None or not _word_offsets(str(raw.get("text") or "").strip(), words):
+        return []
+    times = [(_time(w.get("start")), _time(w.get("end"))) for w in words]
+    if any(a is None or b is None or not start <= a < b <= end for a, b in times):
+        return []
+    if any(left[1] > right[0] for left, right in zip(times, times[1:])):
+        return []
+    # Reject single-frame fragments and implausibly stretched boundary words.
+    return [
+        i for i, (left, right) in enumerate(zip(times, times[1:]), 1)
+        if left[1] - start >= 0.15 and end - right[0] >= 0.15
+        and left[1] - left[0] <= 1.0 and right[1] - right[0] <= 1.0
+    ]
 
 
 def _split_segment(
@@ -57,6 +77,7 @@ def _split_segment(
     boundary_selector: BoundarySelector | None = None,
     trim_to_aligned_words: bool = False,
     split_sentences: bool = False,
+    semantic_cuts: frozenset[int] | None = None,
 ) -> list[dict]:
     text = str(raw.get("text") or "").strip()
     if not text:
@@ -89,7 +110,7 @@ def _split_segment(
         and words[i - 1]["end"] <= words[i]["start"]
     ] if offsets else []
 
-    plan = generate_boundary_plan(
+    plan = BoundaryPlan(()) if semantic_cuts is not None else generate_boundary_plan(
         text, words, language=language, tokenizer=tokenizer, pause_seconds=PAUSE_SECONDS,
     )
     review_reasons = list(plan.review_reasons)
@@ -133,15 +154,25 @@ def _split_segment(
             boundary_review_reasons=list(review_reasons),
         )
 
-    speaker_cuts = {i for i in cuts if speaker_at(i - 1) and speaker_at(i) and speaker_at(i - 1) != speaker_at(i)}
+    # A missing word label is a review signal rather than a speaker transition.
+    # Otherwise gaps in diarization can isolate individual aligned characters.
+    speaker_cuts = set()
+    for i in cuts:
+        previous, current = words[i - 1]["speaker"], words[i]["speaker"]
+        if previous not in {None, UNKNOWN_SPEAKER} and current not in {None, UNKNOWN_SPEAKER} and previous != current:
+            speaker_cuts.add(i)
     sentence_cuts = {i for i in cuts if i in semantic} if split_sentences else set()
-    forced = sorted(speaker_cuts | sentence_cuts)
+    if semantic_cuts is None:
+        forced = sorted(speaker_cuts | sentence_cuts)
+    else:
+        speaker_cuts.clear()
+        forced = sorted(semantic_cuts.intersection(aligned_cut_indices(raw)))
     for index in forced:
         candidate = semantic.get(index) or BoundaryCandidate(
             id=f"boundary:{source_text_sha256[:16]}:{offsets[index]}:{words[index - 1]['end']:.6f}:{words[index]['start']:.6f}",
             word_index=index, char_offset=offsets[index],
             left_end=words[index - 1]["end"], right_start=words[index]["start"],
-            reasons=("speaker_change",),
+            reasons=("semantic_sentence_boundary",) if semantic_cuts is not None else ("speaker_change",),
         )
         chosen[index] = record(candidate)
         if index in speaker_cuts and "speaker_change" not in chosen[index]["reasons"]:
@@ -151,7 +182,7 @@ def _split_segment(
     for right in [*forced, len(words)]:
         part_start = words[left]["start"] if left else start
         part_end = words[right - 1]["end"] if right < len(words) else end
-        while part_end - part_start > MAX_SECONDS:
+        while semantic_cuts is None and part_end - part_start > MAX_SECONDS:
             available = [
                 candidate for candidate in plan.candidates
                 if left < candidate.word_index < right
@@ -270,14 +301,16 @@ def normalize_segments(
     boundary_selector: BoundarySelector | None = None,
     trim_to_aligned_words: bool = False,
     split_sentences: bool = False,
+    semantic_cuts: frozenset[int] | None = None,
 ) -> list[dict]:
     segments = [part for raw in raw_segments for part in _split_segment(
         raw, diarized, language=language, tokenizer=tokenizer, boundary_selector=boundary_selector,
         trim_to_aligned_words=trim_to_aligned_words,
         split_sentences=split_sentences,
+        semantic_cuts=semantic_cuts,
     )]
     segments.sort(key=lambda item: (item["start"], item["end"]))
-    if not split_sentences:
+    if not split_sentences and semantic_cuts is None:
         segments = _merge_short_segments(segments, diarized=diarized)
     segments.sort(key=lambda item: (item["start"], item["end"]))
     return [dict(segment, id=index) for index, segment in enumerate(segments)]
