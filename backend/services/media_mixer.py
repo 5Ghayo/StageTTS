@@ -95,12 +95,13 @@ def _build_vocal_track(
 
     with tempfile.TemporaryDirectory(prefix="stagetts_mix_") as tmp_name:
         tmp_dir = Path(tmp_name)
-        for seg in sorted(script.segments, key=lambda item: item.start):
-            pos_ms = max(0, round(seg.start * 1000))
+        for seg in sorted(script.segments, key=lambda item: item.dub_start):
+            pos_ms = max(0, round(seg.dub_start * 1000))
             if seg.keep_original:
                 if vocals_audio is None:
                     continue
-                end_ms = min(len(vocals_audio), max(pos_ms, int(seg.end * 1000)))
+                speech_end = seg.speech_cue.speech_end if seg.speech_cue else seg.end
+                end_ms = min(len(vocals_audio), max(pos_ms, int(speech_end * 1000)))
                 if end_ms <= pos_ms:
                     continue
                 clip = vocals_audio[pos_ms:end_ms]
@@ -123,7 +124,7 @@ def _build_vocal_track(
                 # 旧项目的 WAV 仍沿用导出时变速。
                 speed = seg.speed_factor
                 raw_sec = len(raw_clip) / 1000.0
-                slot_sec = max(0.05, seg.end - seg.start)
+                slot_sec = max(0.05, seg.dub_end - seg.dub_start)
                 if abs(speed - 1.0) < 0.01 and slot_sec * 1.02 < raw_sec <= slot_sec * config.MAX_GENTLE_SPEED:
                     speed = min(config.MAX_GENTLE_SPEED, round(raw_sec / slot_sec, 3))
                 if abs(speed - 1.0) >= 0.02:
@@ -131,16 +132,18 @@ def _build_vocal_track(
                     with adjusted_path.open("rb") as source:
                         clip = AudioSegment.from_wav(source)
 
-            clip_end = seg.start + clip.frame_count() / clip.frame_rate
+            clip_end = seg.dub_start + clip.frame_count() / clip.frame_rate
             if clip_end > timeline_duration + 0.000001:
                 raise RuntimeError(
                     f"片段 #{seg.id} 导出待审核：完整配音超过媒体结尾 "
                     f"{clip_end - timeline_duration:.3f} 秒，不能截尾。"
                 )
-            if clip_end > seg.end:
+            if seg.speech_cue and clip_end > seg.dub_end + 0.001:
+                raise RuntimeError(f"片段 #{seg.id} 超出配音允许时间窗，请调整后导出。")
+            if not seg.speech_cue and clip_end > seg.end:
                 collision = next((
                     other for other in script.segments
-                    if other.id != seg.id and other.start < clip_end and other.end > seg.end
+                    if other.id != seg.id and other.dub_start < clip_end and other.dub_end > seg.end
                 ), None)
                 if collision is not None:
                     raise RuntimeError(

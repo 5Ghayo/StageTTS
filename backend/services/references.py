@@ -64,8 +64,10 @@ def store_reference_audio(project_id: str, source: BinaryIO) -> str:
 def _whole_timing_confirmed(seg: Segment) -> bool:
     # Old reviewed JSON keeps its historical eligibility. New segment-only
     # confirmation permits whole audio, never invented word-level crops.
-    return (not seg.segment_timing_needs_review
-            or (not seg.alignment_needs_review and _verified_word_offsets(seg) is not None))
+    return not seg.training_excluded and (
+        not seg.segment_timing_needs_review
+        or (not seg.alignment_needs_review and _verified_word_offsets(seg) is not None)
+    )
 
 
 def _candidate_clips(script: ProjectScript, speaker: str) -> list[list[Segment]]:
@@ -133,7 +135,7 @@ def _trimmed_transcript(seg: Segment, start: float, end: float) -> str | None:
 
 
 def _long_reference_window(script: ProjectScript, seg: Segment) -> tuple[float, float, str, list[int]] | None:
-    if (seg.alignment_needs_review or seg.speaker_needs_review
+    if (seg.training_excluded or seg.alignment_needs_review or seg.speaker_needs_review
             or seg.end - seg.start <= MAX_REFERENCE_SECONDS
             or _verified_word_offsets(seg) is None):
         return None

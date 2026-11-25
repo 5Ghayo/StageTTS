@@ -217,6 +217,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/subtitle-reference/{language}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload Subtitle Reference */
+        post: operations["upload_subtitle_reference_api_projects__project_id__subtitle_reference__language__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/parse/status": {
         parameters: {
             query?: never;
@@ -945,6 +962,32 @@ export interface components {
             projects: string[];
         };
         /**
+         * ModelParameters
+         * @description Optional project overrides. Empty values inherit the runtime defaults.
+         */
+        ModelParameters: {
+            /** Banquet Hop Seconds */
+            banquet_hop_seconds?: number | null;
+            /** Asr Vad Threshold */
+            asr_vad_threshold?: number | null;
+            /** Asr Recheck Vad Threshold */
+            asr_recheck_vad_threshold?: number | null;
+            /** Diarizen Ahc Threshold */
+            diarizen_ahc_threshold?: number | null;
+            /** Diarizen Fa */
+            diarizen_fa?: number | null;
+            /** Diarizen Fb */
+            diarizen_fb?: number | null;
+            /** Tts Temperature */
+            tts_temperature?: number | null;
+            /** Tts Top K */
+            tts_top_k?: number | null;
+            /** Tts Top P */
+            tts_top_p?: number | null;
+            /** Tts Repetition Penalty */
+            tts_repetition_penalty?: number | null;
+        };
+        /**
          * ProjectScript
          * @description 全链路唯一真相源：script.json 顶层契约模型。
          */
@@ -963,6 +1006,7 @@ export interface components {
             mode: "video_dubbing" | "virtual_stage";
             /** @default gpt_sovits_v5 */
             tts_engine: "gpt_sovits_v5" | "gpt_sovits_v2";
+            model_parameters?: components["schemas"]["ModelParameters"] | null;
             media: components["schemas"]["MediaInfo"];
             /** Source Lang */
             source_lang?: string | null;
@@ -1006,6 +1050,7 @@ export interface components {
             mode: "video_dubbing" | "virtual_stage";
             /** @default gpt_sovits_v5 */
             tts_engine: "gpt_sovits_v5" | "gpt_sovits_v2";
+            model_parameters?: components["schemas"]["ModelParameters"] | null;
             media: components["schemas"]["MediaInfo"];
             /** Source Lang */
             source_lang?: string | null;
@@ -1206,6 +1251,26 @@ export interface components {
          * Segment
          * @description 时间轴单句台词片段。
          */
+        Body_upload_subtitle_reference_api_projects__project_id__subtitle_reference__language__post: {
+            /** File */
+            file: string;
+        };
+        SpeechCue: {
+            /** Speech Start */
+            speech_start: number;
+            /** Speech End */
+            speech_end: number;
+            /** Latest End */
+            latest_end: number;
+            /** Rms Dbfs */
+            rms_dbfs?: number | null;
+            /** Reference Ja */
+            reference_ja?: string | null;
+            /** Reference Zh */
+            reference_zh?: string | null;
+            /** Corrected Source Text */
+            corrected_source_text?: string | null;
+        };
         Segment: {
             /**
              * Id
@@ -1226,6 +1291,11 @@ export interface components {
             source_audio_start?: number | null;
             /** @description 原声试听结束时间（秒） */
             source_audio_end?: number | null;
+            speech_cue?: components["schemas"]["SpeechCue"] | null;
+            overlap_status?: "unchecked" | "clear" | "detected";
+            overlap_turns?: { start: number; end: number; speaker: string }[];
+            training_excluded?: boolean;
+            training_exclusion_reasons?: string[];
             /**
              * Speaker
              * @description 关联 characters 的说话人 Key
@@ -1281,6 +1351,8 @@ export interface components {
              * @default true
              */
             speaker_needs_review: boolean;
+            /** Speaker Reviewed By User */
+            speaker_reviewed_by_user?: boolean | null;
             /**
              * Speaker Fallback Reason
              * @description 说话人证据缺失或聚类回退原因；UNKNOWN 仅为待确认占位，不代表同一人
@@ -2217,6 +2289,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UploadResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_subtitle_reference_api_projects__project_id__subtitle_reference__language__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                language: "ja" | "zh";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_subtitle_reference_api_projects__project_id__subtitle_reference__language__post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: number;
+                    };
                 };
             };
             /** @description Validation Error */

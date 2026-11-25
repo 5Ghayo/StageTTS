@@ -8,6 +8,7 @@ import math
 import subprocess
 from pathlib import Path
 
+from backend.services.speech_loudness import measure_training_audio, training_loudness_reason
 from workers.research_training import file_path, output_directory, write_json
 
 
@@ -21,7 +22,9 @@ def local_asset(root: Path, relative: str) -> Path:
 def build_voice_corpus(args: argparse.Namespace) -> None:
     corpus = args.corpus.resolve()
     output = args.output.resolve()
-    rows = json.loads(file_path(corpus / "manifest.json").read_text(encoding="utf-8"))["clips"]
+    rows = [row for row in json.loads(file_path(corpus / "manifest.json").read_text(encoding="utf-8"))["clips"]
+            if not row.get("training_excluded") and row.get("overlap_status") != "detected"
+            and row.get("provenance", {}).get("origin") != "dialogue-sidon"]
     keys = [
         (row["provenance"]["source"], row["provenance"]["origin"],
          row["provenance"].get("track"), row["provenance"].get("start"), row.get("speaker"))
@@ -40,9 +43,12 @@ def build_voice_corpus(args: argparse.Namespace) -> None:
                 and args.min_clip_seconds <= durations[index] <= args.max_clip_seconds
                 and len(transcripts[index]) >= 2 and rows[index].get("language")
             ]
-            if len(candidates) < args.min_clips:
-                continue
-            selected = candidates
+            selected = []
+            for index in candidates:
+                row = rows[index]
+                dbfs = row["rms_dbfs"] if "rms_dbfs" in row else measure_training_audio(local_asset(corpus, row["audio"]))
+                if not training_loudness_reason(dbfs):
+                    selected.append(index)
             seconds = math.fsum(durations[index] for index in selected)
             if len(selected) < args.min_clips or seconds < args.min_seconds:
                 continue

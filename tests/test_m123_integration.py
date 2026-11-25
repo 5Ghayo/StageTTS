@@ -65,6 +65,26 @@ class M123IntegrationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json()['evidence'])
 
+    def test_human_role_review_persists_and_invalidates_the_previous_voice(self):
+        self.script.characters['B'] = CharacterConfig(display_name='B')
+        segment = self.script.segments[0]
+        segment.tts_wav = '/workspace/evidence-api/tts/seg_0000.wav'
+        segment.status = 'ready'
+        self.save(self.script)
+        payload = self.script.model_dump()
+        payload['segments'][0].update(speaker='B', speaker_reviewed_by_user=True)
+        with TestClient(app) as client:
+            saved = client.put('/api/projects/evidence-api/script', json=payload)
+            self.assertEqual(saved.status_code, 200, saved.text)
+        with TestClient(app) as new_client:
+            result = new_client.get('/api/projects/evidence-api/script')
+        row = result.json()['segments'][0]
+        self.assertEqual(row['speaker'], 'B')
+        self.assertTrue(row['speaker_reviewed_by_user'])
+        self.assertFalse(row['speaker_needs_review'])
+        self.assertEqual(row['status'], 'pending')
+        self.assertIsNone(row['tts_wav'])
+
     def test_real_prosody_subprocess_persists_rich_measurements_without_emotion(self):
         with TestClient(app) as client, patch.object(config, 'ENV_ANALYSIS_PYTHON', ''):
             response = client.post('/api/projects/evidence-api/analyze-performance', json={'segment_ids': [0]})

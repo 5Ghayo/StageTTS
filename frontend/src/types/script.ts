@@ -32,6 +32,7 @@ export type SegmentPatch = { id: Segment["id"] } & Partial<
     | "alignment_needs_review"
     | "segment_timing_needs_review"
     | "speaker_needs_review"
+    | "speaker_reviewed_by_user"
     | "target_text"
     | "target_lang"
     | "emotion"

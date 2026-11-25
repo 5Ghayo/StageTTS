@@ -37,7 +37,7 @@ def test_model_loader_overrides_checkpoint_clustering_defaults(tmp_path):
 
     assert loaded == (embedding, clustering.return_value)
     clustering.return_value.instantiate.assert_called_once_with(
-        {"ahc_criterion": "distance", "ahc_threshold": 0.35, "Fa": 0.07, "Fb": 0.8},
+        {"ahc_criterion": "distance", "ahc_threshold": 0.35, "Fa": 0.15, "Fb": 0.37},
     )
 
 

@@ -101,14 +101,10 @@ def test_prepare_preserves_native_clips_and_links_model_features(tmp_path):
 
     def model_job(_config, stage, job):
         stages.append(stage)
-        if stage == "dialogue-sidon":
-            assert job["mixtures"][0]["input"] == str(overlap)
-            for path in job["mixtures"][0]["outputs"]:
-                Path(path).touch()
-        else:
-            for clip in job["clips"]:
-                assert Path(clip["audio"]).is_file()
-                Path(clip["features"]).touch()
+        assert stage == "features"
+        for clip in job["clips"]:
+            assert Path(clip["audio"]).is_file()
+            Path(clip["features"]).touch()
 
     def emilia(_config, inputs, filters):
         assert filters["min_clip_seconds"] == 2.0
@@ -121,11 +117,19 @@ def test_prepare_preserves_native_clips_and_links_model_features(tmp_path):
             target.mkdir(parents=True)
             (target / f"{source.stem}.json").write_text(json.dumps([
                 {"start": 0, "end": 4, "text": "大丈夫。", "language": "ja", "dnsmos": 3.7},
+                {"start": 4.1, "end": 8, "text": "重疊", "language": "ja", "dnsmos": 3.7},
+                {"start": 8.1, "end": 10, "text": "小さな声", "language": "ja", "dnsmos": 3.7},
             ]), encoding="utf-8")
             (target / f"{source.stem}_0.mp3").touch()
+            (target / f"{source.stem}_1.mp3").touch()
+            (target / f"{source.stem}_2.mp3").touch()
 
     with (
         patch("workers.research_training.validate_emilia"),
+        patch("workers.overlap_scan.scan_speaker_activity", return_value=[
+            {"start": 0, "end": 11, "speaker": "A"}, {"start": 5, "end": 6, "speaker": "B"},
+        ]),
+        patch("workers.research_training.measure_training_audio", side_effect=[-45.0, -51.0]),
         patch("workers.research_training.run_job", side_effect=model_job),
         patch("workers.research_training.run_emilia", side_effect=emilia),
     ):
@@ -133,12 +137,13 @@ def test_prepare_preserves_native_clips_and_links_model_features(tmp_path):
                         emilia_filter={"fine_turns": True, "min_clip_seconds": 2.0, "min_dnsmos": 2.6})
 
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
-    assert stages == ["dialogue-sidon", "emilia", "features"]
+    assert stages == ["emilia", "features"]
     assert manifest["emilia_filter"] == {
         "fine_turns": True, "min_clip_seconds": 2.0, "min_dnsmos": 2.6,
     }
     assert not (output / "subtitle-boundaries.json").exists()
-    assert [row["provenance"].get("track") for row in manifest["clips"]] == [None, 1, 2]
+    assert [row["text"] for row in manifest["clips"]] == ["大丈夫。"]
+    assert len(list((output / "emilia_processed").rglob("*.mp3"))) == 1
     for clip in manifest["clips"]:
         assert clip["character_id"] is None
         assert (output / clip["audio"]).is_file()
@@ -153,11 +158,12 @@ def test_voice_corpus_uses_scoped_speaker_ids_without_feature_models(tmp_path):
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     rows = []
-    for i, (source, speaker) in enumerate([("one", "UNKNOWN"), ("one", "A"), ("one", "A"), ("two", "A")]):
+    for i, (source, speaker) in enumerate([("one", "UNKNOWN"), ("one", "A"), ("one", "A"), ("two", "A"),
+                                           ("two", "A")]):
         audio = corpus / f"{i}.wav"
         audio.touch()
         rows.append({"audio": audio.name, "start": 0, "end": 4, "speaker": speaker,
-                     "text": "はい。", "language": "ja",
+                     "text": "はい。", "language": "ja", "rms_dbfs": -60 if i == 4 else -30,
                      "provenance": {"source": source, "origin": "original"}})
     (corpus / "manifest.json").write_text(json.dumps({"clips": rows}))
     output = tmp_path / "voices"

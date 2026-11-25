@@ -42,6 +42,20 @@ export function getCacheBustedUrl(
 
 export type BackendStatus = "connecting" | "online" | "offline";
 
+export interface DubbingRange {
+  projectId: string;
+  start: number;
+  end: number;
+}
+
+export function segmentsInDubbingRange(script: ProjectScript, range: DubbingRange | null): Segment[] {
+  if (!range || range.projectId !== script.project_id) return script.segments;
+  return script.segments.filter((seg) =>
+    (seg.speech_cue?.speech_start ?? seg.start) < range.end &&
+    (seg.speech_cue?.speech_end ?? seg.end) > range.start,
+  );
+}
+
 export interface TrackStates {
   videoMuted: boolean;
   dubMuted: boolean;
@@ -55,6 +69,7 @@ interface ProjectState {
   mode: ProjectMode;
   selectedSegmentId: number | null;
   currentTime: number;
+  dubbingRange: DubbingRange | null;
   isPlaying: boolean;
   isLoading: boolean;
   isSynthesizing: boolean;
@@ -81,6 +96,7 @@ interface ProjectState {
   selectSegment: (segmentId: number | null) => void;
   stepSegment: (delta: -1 | 1) => void;
   setCurrentTime: (time: number) => void;
+  setDubbingRange: (range: DubbingRange | null) => void;
   setIsPlaying: (playing: boolean) => void;
   setTimelineZoom: (zoom: number) => void;
   toggleTrackState: (key: keyof TrackStates) => void;
@@ -99,6 +115,7 @@ interface ProjectState {
   restoreSnapshot: (snapshotId: string) => Promise<boolean>;
   updateBgmVolume: (volume: number) => void;
   setTTSEngine: (engine: ProjectScript["tts_engine"]) => void;
+  setModelParameters: (parameters: ProjectScript["model_parameters"]) => void;
   updateStemVolume: (stem: keyof StemVolumes, volume: number) => void;
   updateAutoDucking: (enabled: boolean) => void;
   updateCharacter: (speakerKey: string, patch: Partial<CharacterConfig>) => void;
@@ -107,7 +124,7 @@ interface ProjectState {
   updateTranslationSettings: (sourceLang: string | null, glossary: Record<string, string>) => void;
   retranslate: () => Promise<string>;
   loadProjectScript: (projectId: string) => Promise<void>;
-  saveProjectScript: () => Promise<void>;
+  saveProjectScript: () => Promise<boolean>;
   synthesizeSegment: (segmentIds?: number[]) => Promise<{
     simulated: boolean;
     message: string;
@@ -256,6 +273,7 @@ function applyPatchToSegments(
         timingChanged = true;
         cleanFields.source_audio_start = null;
         cleanFields.source_audio_end = null;
+        cleanFields.speech_cue = null;
       }
     }
     if (cleanFields.speaker !== undefined) {
@@ -266,11 +284,15 @@ function applyPatchToSegments(
       if (cleanFields.speaker !== "UNKNOWN") cleanFields.speaker_fallback_reason = null;
     }
     if (cleanFields.orig_text !== undefined && cleanFields.orig_text !== seg.orig_text) {
+      if (cleanFields.speech_cue !== null && seg.speech_cue) {
+        cleanFields.speech_cue = { ...seg.speech_cue, corrected_source_text: null };
+      }
       cleanFields.alignment_needs_review ??= true;
       cleanFields.segment_timing_needs_review = true;
     }
     if (cleanFields.speaker !== undefined && cleanFields.speaker !== seg.speaker) {
       cleanFields.segment_timing_needs_review = true;
+      cleanFields.speaker_reviewed_by_user ??= false;
     }
     const updated = { ...seg, ...cleanFields };
     const affectsAudio = resynthFields.some((key) => updated[key] !== seg[key]);
@@ -311,6 +333,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   mode: "video_dubbing",
   selectedSegmentId: null,
   currentTime: 0,
+  dubbingRange: null,
   isPlaying: false,
   isLoading: false,
   isSynthesizing: false,
@@ -564,6 +587,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setIsPlaying: (playing) => set({ isPlaying: playing }),
 
+  setDubbingRange: (dubbingRange) => set({ dubbingRange }),
+
   setTimelineZoom: (zoom) => set({ timelineZoom: Math.max(30, Math.min(180, Math.round(zoom))) }),
 
   toggleTrackState: (key) =>
@@ -737,9 +762,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       end: candidate,
       source_audio_start: null,
       source_audio_end: null,
+      speech_cue: null,
       orig_text: leftOrig,
       target_text: leftTarget || seg.target_text,
       words: leftWords,
+      speaker_reviewed_by_user: null,
       alignment_needs_review: true,
     });
     const rightSeg = invalidateAudio({
@@ -748,9 +775,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       start: candidate,
       source_audio_start: null,
       source_audio_end: null,
+      speech_cue: null,
       orig_text: rightOrig,
       target_text: rightTarget || "（续）",
       words: rightWords,
+      speaker_reviewed_by_user: null,
       alignment_needs_review: true,
     });
     const segments = script.segments
@@ -790,9 +819,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       end: Number(Math.max(curr.end, next.end).toFixed(2)),
       source_audio_start: null,
       source_audio_end: null,
+      speech_cue: null,
       orig_text: joinSegmentText(curr.orig_text, next.orig_text),
       target_text: joinSegmentText(curr.target_text, next.target_text),
       words: [...curr.words, ...next.words],
+      speaker_reviewed_by_user: null,
       alignment_needs_review: Boolean(curr.alignment_needs_review || next.alignment_needs_review),
       speaker_needs_review: Boolean(
         curr.speaker_needs_review || next.speaker_needs_review || curr.speaker !== next.speaker,
@@ -1038,6 +1069,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ? { script: { ...state.script, tts_engine: engine }, isDirty: true }
       : state),
 
+  setModelParameters: (model_parameters) =>
+    set((state) => state.script
+      ? { script: { ...state.script, model_parameters }, isDirty: true }
+      : state),
+
   updateBgmVolume: (volume) =>
     set((state) => {
       if (!state.script) {
@@ -1281,21 +1317,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   saveProjectScript: async () => {
     const { script, backendStatus } = get();
     if (!script) {
-      return;
+      return false;
     }
     if (backendStatus === "offline") {
       set({
         isDirty: false,
         lastSyncMessage: "已保存至本地会话",
       });
-      return;
+      return false;
     }
     set({ isLoading: true, error: null });
     try {
       const saved = await apiSaveProjectScript(script);
       if (get().script !== script) {
         set({ isLoading: false });
-        return;
+        return false;
       }
       set({
         script: saved,
@@ -1304,6 +1340,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         backendStatus: "online",
         lastSyncMessage: "已保存至后端剧本文件",
       });
+      return true;
     } catch (err) {
       if (err instanceof ApiError && err.isNetworkError) {
         set({
@@ -1312,12 +1349,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           isDirty: false,
           lastSyncMessage: "后端暂不可达，已暂存本地",
         });
-        return;
+        return false;
       }
       set({
         isLoading: false,
         error: err instanceof Error ? err.message : "保存失败",
       });
+      return false;
     }
   },
 
@@ -1329,7 +1367,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
 
     const targetIds =
-      segmentIds && segmentIds.length > 0
+      segmentIds !== undefined
         ? segmentIds
         : script.segments
             .filter((seg) => !seg.keep_original && seg.status !== "ready")

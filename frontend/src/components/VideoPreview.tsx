@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useProjectStore } from "../store/useProjectStore";
 import type { EmotionType } from "../types/script";
 import { normalizeSpeakerColor } from "../utils/speakerColor";
+import { DubbingRange } from "./DubbingRange";
 import { TimelineAudio, useDubClips, useSyncedMedia } from "./TimelineAudio";
 
 function formatSmpte(seconds: number, fps = 30): string {
@@ -178,6 +179,7 @@ export const VideoPreview: React.FC = () => {
         muteBgm={trackStates.dubSolo || trackStates.bgmMuted}
         bgmVolume={script?.media.bgm_volume}
       />
+      {script && <DubbingRange key={script.project_id} script={script} />}
 
       {/* 紧凑单色播控条 */}
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-t border-white/[0.06] bg-[#222222] pl-3.5 pr-4">

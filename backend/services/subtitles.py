@@ -109,7 +109,7 @@ def generate_ass_subtitles(
     ]
 
     events: list[str] = []
-    for seg in sorted(script.segments, key=lambda item: (item.start, item.id)):
+    for seg in sorted(script.segments, key=lambda item: (item.dub_start, item.id)):
         primary_raw = seg.target_text.strip() or seg.orig_text.strip()
         if not primary_raw:
             continue
@@ -117,8 +117,11 @@ def generate_ass_subtitles(
         if not escaped_primary:
             continue
 
-        start_sec = max(0.0, float(seg.start))
-        end_sec = max(start_sec + 0.05, float(seg.end))
+        start_sec = seg.dub_start
+        end_sec = seg.speech_cue.speech_end if seg.speech_cue else seg.end
+        if seg.speech_cue and seg.status == "ready" and not seg.keep_original and seg.actual_duration:
+            end_sec = min(seg.dub_end, start_sec + seg.actual_duration)
+        end_sec = max(start_sec + 0.05, end_sec)
         start_ts = _format_ass_time(start_sec)
         end_ts = _format_ass_time(end_sec)
 
@@ -129,7 +132,7 @@ def generate_ass_subtitles(
             (char.display_name if char else seg.speaker),
         ).strip() or seg.speaker
 
-        orig_raw = seg.orig_text.strip()
+        orig_raw = (seg.speech_cue.corrected_source_text or seg.orig_text).strip() if seg.speech_cue else seg.orig_text.strip()
         if layout == "bilingual" and orig_raw and orig_raw != primary_raw:
             escaped_orig = _escape_ass_text(orig_raw)
             text_body = rf"{escaped_primary}\N{{\rSecondary}}{escaped_orig}" if escaped_orig else escaped_primary

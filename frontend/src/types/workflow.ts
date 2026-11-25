@@ -8,7 +8,7 @@ export type WorkspacePreset = "editing" | "workflow" | "stage";
 
 export type CenterViewTab = "video" | "stage" | "graph";
 
-export type RightPanelTab = "inspector" | "agent" | "node" | "logs";
+export type RightPanelTab = "inspector" | "speakers" | "agent" | "node" | "logs";
 
 export type LeftDrawerTab = "none" | "characters" | "media";
 

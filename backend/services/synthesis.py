@@ -21,15 +21,20 @@ def _check_duration(seg: Segment) -> SegmentDurationCheck | None:
     - too_long：actual > slot * 1.15
     - too_short：actual < slot * 0.80（且槽位不小于 1 秒，避免把纯叹词强行扩写）
     """
-    slot = max(0.05, seg.end - seg.start)
+    slot = max(0.05, seg.dub_end - seg.dub_start)
+    speech_duration = seg.speech_cue.speech_end - seg.dub_start if seg.speech_cue else slot
     actual = seg.actual_duration
     if actual is None:
         return None
     fill = round(actual / slot, 3)
-    if fill > config.DURATION_OVERFLOW_RATIO:
+    overflow = actual > seg.dub_end - seg.dub_start + 1e-6 if seg.speech_cue else fill > config.DURATION_OVERFLOW_RATIO
+    if overflow:
         state = "too_long"
-    elif fill < config.DURATION_UNDERFLOW_RATIO and slot >= config.MIN_DURATION_REFLECTION_SECONDS:
+    elif (actual < speech_duration * config.DURATION_UNDERFLOW_RATIO
+          and speech_duration >= config.MIN_DURATION_REFLECTION_SECONDS):
         state = "too_short"
+        slot = speech_duration
+        fill = round(actual / slot, 3)
     else:
         return None
     return SegmentDurationCheck(

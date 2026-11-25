@@ -116,6 +116,15 @@ export function fetchProjectScript(projectId: string): Promise<ProjectScript> {
   );
 }
 
+export function uploadSubtitleReference(projectId: string, language: "ja" | "zh", file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return unwrap(apiClient.POST("/api/projects/{project_id}/subtitle-reference/{language}", {
+    params: { path: { project_id: projectId, language } },
+    body: form as unknown as components["schemas"]["Body_upload_subtitle_reference_api_projects__project_id__subtitle_reference__language__post"],
+  }));
+}
+
 export function saveProjectScript(script: ProjectScript): Promise<ProjectScript> {
   return unwrap(
     apiClient.PUT("/api/projects/{project_id}/script", {

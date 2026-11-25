@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 import torch
-import torchaudio
 from torch import nn
 from torch.nn import functional as F
 
 SAMPLE_RATE = 48_000
 # Embedding row order in banquet-split.ckpt, checked against isolated sources.
 STEMS = ("dialogue", "effects", "singing", "music")
+CHUNK_SECONDS = 300
+SEARCH_SECONDS = 30
+CONTEXT_SECONDS = 8
 
 
 def load_model(source_root: Path, checkpoint: Path, device: str) -> nn.Module:
@@ -54,16 +60,6 @@ def load_model(source_root: Path, checkpoint: Path, device: str) -> nn.Module:
     model = Banquet()
     model.load_state_dict({key[6:]: value for key, value in state.items() if key.startswith("model.")})
     return model.eval().to(device)
-
-
-@torch.inference_mode()
-def _normalize_peak(signal: torch.Tensor, limit: float = 0.99) -> torch.Tensor:
-    if signal.numel() == 0:
-        return signal
-    peak = float(signal.abs().max().item())
-    if peak > limit:
-        return signal * (limit / peak)
-    return signal
 
 
 @torch.inference_mode()
@@ -128,6 +124,97 @@ def separate(
     return estimates
 
 
+def chunk_boundaries(source: sf.SoundFile, target_seconds: float = CHUNK_SECONDS,
+                     search_seconds: float = SEARCH_SECONDS) -> list[int]:
+    """Find a low-energy seam close to each target on the source sample grid."""
+    rate, total = source.samplerate, source.frames
+    target, search = round(target_seconds * rate), round(search_seconds * rate)
+    hop = round(rate * 0.02)
+    points = [0]
+    while total - points[-1] > target + search:
+        nominal = points[-1] + target
+        first = max(points[-1] + hop, nominal - search)
+        # Avoid starting an almost empty final chunk.
+        last = min(nominal + search, total - min(target // 5, 60 * rate))
+        source.seek(first)
+        samples = source.read(last - first, dtype="float32", always_2d=True)
+        count = len(samples) // hop
+        if not count:
+            points.append(nominal)
+            continue
+        frames = samples[:count * hop].reshape(count, hop, source.channels)
+        # Take the louder channel so out-of-phase stereo does not appear silent.
+        energy = np.mean(np.square(frames), axis=1).max(axis=1)
+        quiet = energy <= 10 ** (-45 / 10)
+        edges = np.flatnonzero(np.diff(np.r_[False, quiet, False]))
+        centres = [first + (int(a) + int(b)) * hop // 2
+                   for a, b in edges.reshape(-1, 2) if (b - a) * hop >= 0.25 * rate]
+        if centres:
+            cut = min(centres, key=lambda point: abs(point - nominal))
+        else:
+            candidates = np.flatnonzero(energy == energy.min())
+            nearest = min(candidates, key=lambda index: abs(first + index * hop + hop // 2 - nominal))
+            cut = first + int(nearest) * hop + hop // 2
+        points.append(cut)
+    return [*points, total]
+
+
+def separate_file(model: nn.Module, input_path: Path, output_dir: Path, device: str,
+                  progress: Callable[[str], None], hop_seconds: float,
+                  target_seconds: float = CHUNK_SECONDS, search_seconds: float = SEARCH_SECONDS) -> None:
+    """Separate bounded chunks and write their non-overlapping cores back in order."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".banquet-", dir=output_dir) as directory:
+        temp = Path(directory)
+        if sf.info(input_path).samplerate != SAMPLE_RATE:
+            normalized = temp / "input.wav"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(input_path), "-vn",
+                            "-ar", str(SAMPLE_RATE), "-c:a", "pcm_f32le", str(normalized)], check=True)
+            input_path = normalized
+        with sf.SoundFile(input_path) as source, ExitStack() as stack:
+            if not source.frames:
+                raise ValueError("Banquet 输入音频为空。")
+            boundaries = chunk_boundaries(source, target_seconds, search_seconds)
+            total_chunks = len(boundaries) - 1
+            context = round(CONTEXT_SECONDS * SAMPLE_RATE)
+            hop_samples = max(1, round(hop_seconds * SAMPLE_RATE))
+            buffers = {stem: stack.enter_context(sf.SoundFile(
+                temp / f"{stem}-float.wav", mode="w", samplerate=SAMPLE_RATE,
+                channels=source.channels, subtype="FLOAT",
+            )) for stem in STEMS}
+            peaks = dict.fromkeys(STEMS, 0.0)
+            for index, (start, end) in enumerate(zip(boundaries, boundaries[1:]), start=1):
+                progress(f"分段 {index}/{total_chunks}：{start / SAMPLE_RATE:.2f}–{end / SAMPLE_RATE:.2f} 秒")
+                left = max(0, (start - context) // hop_samples * hop_samples)
+                right = min(source.frames, end + context)
+                source.seek(left)
+                samples = source.read(right - left, dtype="float32", always_2d=True)
+                estimates = separate(model, torch.from_numpy(samples.T), device, progress, hop_seconds)
+                if estimates.keys() != buffers.keys():
+                    raise RuntimeError("Banquet 输出轨道与对白、音效、歌声、音乐不一致。")
+                for stem in STEMS:
+                    signal = estimates[stem]
+                    core = signal[:, start - left:end - left].T.numpy()
+                    if len(core) != end - start or not np.isfinite(core).all():
+                        raise RuntimeError(f"Banquet 生成的 {stem} 分段无效。")
+                    peaks[stem] = max(peaks[stem], float(np.abs(core).max()))
+                    buffers[stem].write(core)
+                del estimates, signal, core, samples
+            channels, expected = source.channels, source.frames
+
+        progress("正在拼接并保存四轨 WAV 文件...")
+        for stem in STEMS:
+            gain = 0.99 / max(0.99, peaks[stem])
+            with sf.SoundFile(temp / f"{stem}-float.wav") as separated:
+                if separated.frames != expected:
+                    raise RuntimeError(f"Banquet 生成的 {stem} 轨长度与原音频不一致。")
+                with sf.SoundFile(temp / f"{stem}.wav", "w", SAMPLE_RATE, channels, "PCM_16") as output:
+                    for block in separated.blocks(blocksize=5 * SAMPLE_RATE, dtype="float32"):
+                        output.write(block * gain)
+        for stem in STEMS:
+            (temp / f"{stem}.wav").replace(output_dir / f"{stem}.wav")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
@@ -141,24 +228,9 @@ def main() -> None:
     def emit(message: str) -> None:
         print(f"[banquet] {message}", flush=True)
 
-    audio, sample_rate = sf.read(args.input, dtype="float32", always_2d=True)
-    if len(audio) == 0:
-        raise ValueError("Banquet 输入音频为空。")
-    waveform = torch.from_numpy(audio.T)
-    if sample_rate != SAMPLE_RATE:
-        waveform = torchaudio.functional.resample(waveform, sample_rate, SAMPLE_RATE)
-
     emit(f"加载 Banquet 模型 ({args.device})...")
     model = load_model(args.source_root, args.checkpoint, args.device)
-    estimates = separate(model, waveform, args.device, progress=emit, hop_seconds=args.hop_seconds)
-    emit("正在写入四轨 WAV 文件...")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    for stem, signal in estimates.items():
-        if not torch.isfinite(signal).all():
-            raise RuntimeError(f"Banquet 生成的 {stem} 轨包含非有限值。")
-        # Write 16-bit PCM WAV so dialogue works with stdlib wave and all stems play reliably in browsers.
-        normalized = _normalize_peak(signal)
-        sf.write(args.output_dir / f"{stem}.wav", normalized.T.numpy(), SAMPLE_RATE, subtype="PCM_16")
+    separate_file(model, args.input, args.output_dir, args.device, emit, args.hop_seconds)
 
 
 if __name__ == "__main__":

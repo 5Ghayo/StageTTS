@@ -11,16 +11,17 @@ ASR_SPEECH_PAD_SECONDS = 0.03
 ASR_VAD_THRESHOLD = 0.65
 RECHECK_VAD_THRESHOLD = 0.80
 PLAYBACK_TAIL_PAD_SECONDS = 0.25
+MAX_PLAYBACK_TAIL_SILENCE_SECONDS = 2.0
 
 
 def speech_playback_ranges(
     speech: list[tuple[float, float]], duration: float,
 ) -> list[tuple[float, float]]:
-    """Start at detected speech and keep the tail of each midpoint cut."""
+    """Start at detected speech and keep at most two seconds of midpoint tail."""
     bounds = [(start, min(duration, end + PLAYBACK_TAIL_PAD_SECONDS)) for start, end in speech]
     for i, ((_, left_end), (right_start, _)) in enumerate(zip(speech, speech[1:])):
         end = (left_end + right_start) / 2 if left_end <= right_start else left_end
-        bounds[i] = (bounds[i][0], end)
+        bounds[i] = (bounds[i][0], min(end, left_end + MAX_PLAYBACK_TAIL_SILENCE_SECONDS))
     return bounds
 
 
@@ -47,6 +48,7 @@ def attach_playback_ranges(
             playback_start = round(start, 3)
             segment["source_audio_start"] = playback_start if i == first and playback_start < playback_end else segment["start"]
             segment["source_audio_end"] = playback_end
+            segment["speech_end"] = round(speech[window][1], 3) if i == last else segment["end"]
 
 
 def speech_chunks(
@@ -94,7 +96,7 @@ def speech_chunks(
     return chunks
 
 
-def enable_sentence_vad(pipeline):
+def enable_sentence_vad(pipeline, recheck_threshold: float = RECHECK_VAD_THRESHOLD):
     """Reuse the loaded official Pyannote VAD model; replace only chunk merging."""
     from whisperx.vads.pyannote import Binarize, Pyannote
     from whisperx.vads.vad import Vad
@@ -123,7 +125,7 @@ def enable_sentence_vad(pipeline):
             self.last_chunks = speech_chunks(regions, max_seconds=chunk_size, duration=self.duration)
             # Reuse exactly the same WhisperX frame scores. Only nominated
             # dialogue cuts will consume the stricter VAD regions.
-            review = Binarize(onset=RECHECK_VAD_THRESHOLD, offset=RECHECK_VAD_THRESHOLD)(scores)
+            review = Binarize(onset=recheck_threshold, offset=recheck_threshold)(scores)
             self.recheck_regions = [
                 (float(turn.start), float(turn.end)) for turn in review.get_timeline()
             ]

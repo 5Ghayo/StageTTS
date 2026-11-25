@@ -117,19 +117,21 @@ export function useDubClips(time: number) {
       segments.flatMap((segment) => {
         if (segment.keep_original || segment.status !== "ready" || !segment.tts_wav) return [];
         const src = getCacheBustedUrl(segment.tts_wav, versions[segment.id]) ?? segment.tts_wav;
-        const slot = segment.end - segment.start;
+        const start = segment.speech_cue?.speech_start ?? segment.start;
+        const limit = segment.speech_cue?.latest_end ?? segment.end;
+        const slot = limit - start;
         const rate = segment.applied_speed_factor == null ? segment.speed_factor : 1;
         const audibleEnd = Math.min(
-          segment.end,
-          segment.start + (segment.actual_duration ?? slot) / rate,
+          limit,
+          start + (segment.actual_duration ?? slot) / rate,
         );
-        return [{ segment, src, rate, end: audibleEnd }];
+        return [{ segment, src, rate, start, end: audibleEnd }];
       }),
     [segments, versions],
   );
   return {
-    replacesSource: clips.some(({ segment, end }) => time >= segment.start && time < end),
-    upcomingClips: clips.filter(({ segment, end }) => time >= segment.start - 0.5 && time < end),
+    replacesSource: clips.some(({ start, end }) => time >= start && time < end),
+    upcomingClips: clips.filter(({ start, end }) => time >= start - 0.5 && time < end),
   };
 }
 
@@ -207,11 +209,11 @@ export function TimelineAudio({
           />
         )
       )}
-      {clips.map(({ segment, src, rate }) => (
+      {clips.map(({ segment, src, rate, start }) => (
         <PreviewAudio
           key={`${segment.id}:${src}`}
           src={src}
-          time={(time - segment.start) * rate}
+          time={(time - start) * rate}
           playing={playing}
           muted={dubMuted}
           rate={rate}

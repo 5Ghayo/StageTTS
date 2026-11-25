@@ -3,6 +3,7 @@ import type React from "react";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 import type { ProjectScript, StemVolumes, SubtitleBurnMode } from "../../types/script";
+import { ModelParameters } from "./ModelParameters";
 
 /**
  * 扁平化节点参数检查器（#222222 面板 + #181818 凹槽控件 + 极淡虚线分组）。
@@ -81,13 +82,14 @@ export const NodeInspectorPanel: React.FC = () => {
         </label>
       )}
 
-      {/* WhisperX / DiariZen runtime information */}
-      {selectedNode.id === "whisperx" && (
-        <div className="space-y-1 border-b border-dashed border-white/[0.08] pb-3 text-[11px]">
-          <div className="text-secondary">主识别模型</div>
-          <div className="text-primary">WhisperX + DiariZen Large v2</div>
-          <p className="text-secondary">WhisperX 提供原文和词级对齐；DiariZen 在独立环境中生成说话人时间段。重叠及不确定片段需要审校。</p>
-        </div>
+      {script && selectedNode.id === "banquet" && (
+        <ModelParameters key={`${script.project_id}-separation`} group="separation" script={script} />
+      )}
+      {script && selectedNode.id === "whisperx" && (
+        <ModelParameters key={`${script.project_id}-recognition`} group="recognition" script={script} />
+      )}
+      {script && selectedNode.id === "agent_tts" && (
+        <ModelParameters key={`${script.project_id}-synthesis`} group="synthesis" script={script} />
       )}
 
       {/* 混音与合规水印 */}

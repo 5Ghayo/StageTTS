@@ -204,6 +204,7 @@ function SpeakerEditor({
   const [emotion, setEmotion] = useState<EmotionType>("neutral");
   const [destination, setDestination] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
+  const videoDubbing = script.mode === "video_dubbing";
   const segments = script.segments.filter((seg) => seg.speaker === speaker);
   const ids = segments.filter((seg) => selected.includes(seg.id)).map((seg) => seg.id);
 
@@ -228,12 +229,13 @@ function SpeakerEditor({
       </label>
       <details className="space-y-2 border-t border-white/10 pt-2" open>
         <summary className="cursor-pointer text-primary">参考音与权重</summary>
+        {videoDubbing && <p className="text-[11px] text-secondary">该角色所有视频配音使用同一条参考音，优先使用默认参考音。</p>}
         {!Object.values(character.emotion_refs).some((ref) => ref?.wav && ref.text?.trim() && ref.lang?.trim()) && (
           <p className="text-[11px] leading-relaxed text-status-warning">
             尚未配置手动参考音，合成时会从已确认原文、时间和说话人的 3–10 秒句段中自动选取；也可上传参考音及对应原文逐字稿。
           </p>
         )}
-        <select
+        {!videoDubbing && <select
           className={field}
           aria-label="参考音情绪"
           value={emotion}
@@ -245,12 +247,12 @@ function SpeakerEditor({
               {character.emotion_refs[key as EmotionType] ? " · 已配置" : ""}
             </option>
           ))}
-        </select>
+        </select>}
         <ReferenceEditor
-          key={emotion}
+          key={videoDubbing ? "neutral" : emotion}
           script={script}
           speaker={speaker}
-          emotion={emotion}
+          emotion={videoDubbing ? "neutral" : emotion}
           character={character}
           busy={busy}
         />

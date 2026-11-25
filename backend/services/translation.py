@@ -14,7 +14,8 @@ from backend.schemas import ProjectScript, Segment
 
 EMOTIONS = {"neutral", "angry", "happy", "sad", "whisper"}
 CONTEXT_INSTRUCTIONS = (
-    "原文依据音频听力识别生成；不得读取或引用原片字幕、OCR，或用影视剧情记忆补写未识别的台词。"
+    "以音频听写为主，仅用当前时间戳匹配的 reference_ja、reference_zh 辅助校对。"
+    "不得从 OCR、未匹配的字幕或影视剧情记忆补写台词。"
     "先通读完整对白理解剧情、角色关系和前后语气，再按原句 id 还原译文。"
     "参照相邻台词、角色语气和术语表；术语出现时使用固定译法。"
     "忠实优先：不得摘要、概括、省略、删词或改成名词短语；min_units/max_units 只是软预算。"
@@ -94,18 +95,25 @@ class DialogueContext:
 
     def _line(self, seg: Segment) -> dict:
         character = self.script.characters.get(seg.speaker)
+        cue = seg.speech_cue
         return {
             "id": seg.id,
             "speaker": seg.speaker,
             "speaker_name": character.display_name if character else seg.speaker,
             "speaking_style": character.speaking_style if character else "",
             "orig_text": seg.orig_text,
+            **({
+                "speech_start": cue.speech_start, "speech_end": cue.speech_end,
+                "latest_end": cue.latest_end, "rms_dbfs": cue.rms_dbfs,
+                "reference_ja": cue.reference_ja, "reference_zh": cue.reference_zh,
+                "corrected_source_text": cue.corrected_source_text,
+            } if cue else {}),
             "target_text": seg.target_text if seg.target_text != seg.orig_text else "",
         }
 
     def entry(self, seg: Segment, *, actual_duration: float | None = None) -> dict:
         index = self.positions[seg.id]
-        slot = seg.end - seg.start
+        slot = seg.dub_end - seg.dub_start
         cjk = seg.target_lang.removeprefix("all_").split("-")[0] in {"zh", "ja", "yue", "ko"}
         budget = max(1, int(slot * (5.0 if cjk else 2.8)))
         if actual_duration is not None:
@@ -162,7 +170,7 @@ class DialogueContext:
                 "dialogue 仅作完整上下文，不翻译其中未列入 lines 的 id；"
                 "先理解整段对白，再逐条还原到 lines 中的 id；"
                 "只输出 JSON 数组，不输出完整译文正文；"
-                "每项必须包含 id、target_text、emotion、action、keep_original、self_check；"
+                "每项必须包含 id、corrected_source_text、target_text、emotion、action、keep_original、self_check；"
                 "self_check.omitted_info 为空且 semantic_complete=true，否则会被判为漏译。"
             ),
         })
@@ -195,9 +203,10 @@ def _fidelity_issues(
     glossary: dict[str, str] | None = None,
     *,
     include_length: bool = True,
+    corrected_source: str | None = None,
 ) -> list[str]:
     """Flag fidelity problems; length is a soft heuristic and can be disabled after repair."""
-    source = seg.orig_text.strip()
+    source = (corrected_source or seg.orig_text).strip()
     candidate = text.strip()
     issues: list[str] = []
     if include_length and len(source) >= 12 and len(candidate) <= max(2, int(len(source) * 0.25)):
@@ -229,6 +238,13 @@ def _fidelity_issues(
 def _is_suspicious(seg: Segment, text: str, glossary: dict[str, str] | None = None) -> bool:
     """Heuristic only: triggers one repair, never a hard rejection by itself."""
     return bool(_fidelity_issues(seg, text, glossary))
+
+
+def _corrected_source(seg: Segment, entry: dict) -> str | None:
+    value = entry.get("corrected_source_text")
+    if seg.speech_cue and isinstance(value, str) and 0 < len(value.strip()) <= max(256, 3 * len(seg.orig_text)):
+        return value.strip()
+    return None
 
 
 def _repair_entries(
@@ -273,6 +289,7 @@ def _repair_entries(
         repaired[seg_id] = {
             "id": seg_id,
             "target_text": text.strip(),
+            "corrected_source_text": entry.get("corrected_source_text"),
             # Keep the repair's self-check so a false/incomplete result cannot
             # bypass validation when it is applied.
             "self_check": entry.get("self_check"),
@@ -321,6 +338,8 @@ def _apply_translation(
 
     needs_resynth = (text, emotion, keep_original) != (seg.target_text, seg.emotion, seg.keep_original)
     seg.target_text = text
+    if corrected := _corrected_source(seg, entry):
+        seg.speech_cue.corrected_source_text = corrected
     seg.emotion = emotion
     seg.action = action
     seg.keep_original = keep_original
@@ -399,7 +418,9 @@ def translate_script(
 
             seg = next(segment for segment in batch if segment.id == seg_id)
             complete, omitted = _self_check_flags(entry)
-            if not complete or omitted or _is_suspicious(seg, text, script.glossary):
+            if not complete or omitted or _fidelity_issues(
+                seg, text, script.glossary, corrected_source=_corrected_source(seg, entry),
+            ):
                 suspicious.append((seg, entry))
                 continue
             if _apply_translation(seg, text, entry):
@@ -417,7 +438,10 @@ def translate_script(
         for seg, entry in suspicious:
             repair_entry = repaired.get(seg.id)
             text = repair_entry.get("target_text") if repair_entry else None
-            issues = _fidelity_issues(seg, text or "", script.glossary, include_length=False)
+            issues = _fidelity_issues(
+                seg, text or "", script.glossary, include_length=False,
+                corrected_source=_corrected_source(seg, repair_entry or {}),
+            )
             reasons = "、".join(issues) if text else "未返回修复结果"
             hard_issues = [issue for issue in issues if not issue.startswith("译文过短")]
             self_ok, self_note = _self_check_flags(repair_entry or {}, require=bool(repair_entry))

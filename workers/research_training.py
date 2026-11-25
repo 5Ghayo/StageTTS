@@ -12,6 +12,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
+from backend.services.speech_loudness import measure_training_audio, training_loudness_reason
 from workers.research_models import RELEASES
 
 MODEL_RUNNER = Path(__file__).with_name("research_models.py").resolve()
@@ -198,11 +199,22 @@ def pack_clips(config: dict, output: Path, inputs: list[Path]) -> None:
     """Extract representations from audio that has already passed corpus review."""
     with output_directory(output) as root:
         (root / "audio").mkdir()
+        from workers.overlap_scan import overlap_pairs, scan_speaker_activity
+
         rows = []
         for index, source in enumerate(inputs):
+            marker = source.parent / "overlap-derived.json"
+            if marker.is_file() and source.name in json.loads(marker.read_text(encoding="utf-8"))["tracks"]:
+                continue
+            activity = scan_speaker_activity(file_path(source))
+            if not activity or overlap_pairs(activity):
+                continue
+            dbfs = measure_training_audio(source)
+            if training_loudness_reason(dbfs):
+                continue
             audio = f"audio/{index:06}{source.suffix.lower()}"
             shutil.copyfile(file_path(source), root / audio)
-            rows.append({"audio": audio, "source": str(source), "character_id": None})
+            rows.append({"audio": audio, "source": str(source), "character_id": None, "rms_dbfs": dbfs})
         attach_features(config, root, rows)
         write_manifest(root, rows, ["emotion2vec", "facodec"])
 
@@ -267,51 +279,44 @@ def prepare_dataset(
         else:
             extract_audio(source, raw)
 
-        metadata = {"original": {"source": str(source), "origin": "original"}}
-        windows = overlap_windows(segments, duration)
-        mixtures = []
-        annotated_mixtures = []
-        for index, window in enumerate(windows):
-            wav = temp / f"window_{index:04}.wav"
-            extract_audio(dialogue_source or raw, wav, window["start"], window["end"])
-            annotated_mixtures.append((wav, {**window, "source": str(source)}))
-        annotated_mixtures += [(file_path(p), {"source": str(p)}) for p in overlaps]
-        for index, (wav, window) in enumerate(annotated_mixtures):
-            outputs = []
-            for channel in (1, 2):
-                stem = f"overlap_{index:04}_track_{channel}"
-                metadata[stem] = {**window, "origin": "dialogue-sidon", "track": channel}
-                outputs.append(str(inputs / f"{stem}.wav"))
-            mixtures.append({"input": str(wav), "outputs": outputs})
-        if mixtures:
-            run_job(config, "dialogue-sidon", {"mixtures": mixtures, "seed": 0})
-            for mixture in mixtures:
-                for track in mixture["outputs"]:
-                    file_path(Path(track))
-            models.append("dialogue-sidon")
+        from workers.overlap_scan import overlap_pairs, scan_speaker_activity
 
+        activity = scan_speaker_activity(dialogue_source or raw)
+        if not activity:
+            raise RuntimeError("pyannote returned no speech activity; refusing to publish training clips")
+        blocked = [(left, right) for left, right, _, _ in overlap_pairs(activity)]
+        blocked.extend((row["overlap_start"], row["overlap_end"]) for row in overlap_windows(segments, duration))
+        blocked.extend(
+            (row["source_audio_start"] if row.get("source_audio_start") is not None else row["start"],
+             row["source_audio_end"] if row.get("source_audio_end") is not None else row["end"])
+            for row in segments if row.get("training_excluded")
+        )
+        if overlaps:
+            print(f"Excluded {len(overlaps)} manually supplied overlap mixtures from training.")
         run_emilia(config, inputs, emilia_filter)
-        native = inputs.with_name("emilia_processed")
-        if not native.is_dir():
-            raise RuntimeError("Emilia-Pipe did not write its native output directory")
-        target = root / "emilia_processed"
-        shutil.move(native, target)
-        rows = []
-        for stem, provenance in metadata.items():
-            transcript = file_path(target / stem / f"{stem}.json")
-            for index, row in enumerate(json.loads(transcript.read_text(encoding="utf-8"))):
-                start, end = row["start"], row["end"]
-                if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
-                    raise ValueError(f"Invalid time range in Emilia-Pipe output: {transcript}")
-                origin = provenance["origin"]
-                audio = file_path(transcript.parent / f"{stem}_{index}.mp3")
-                rows.append({
-                    **row, "provenance": provenance, "audio": audio.relative_to(root).as_posix(),
-                    "character_id": (
-                        character_for_clip(segments, start, row.get("speech_end", end))
-                        if origin == "original" else None
-                    ),
-                })
+        native = inputs.with_name("emilia_processed") / "original"
+        transcript = file_path(native / "original.json")
+        target = root / "emilia_processed" / "original"
+        target.mkdir(parents=True)
+        provenance = {"source": str(source), "origin": "original"}
+        rows, accepted = [], []
+        for index, row in enumerate(json.loads(transcript.read_text(encoding="utf-8"))):
+            start, end = row["start"], row["end"]
+            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+                raise ValueError(f"Invalid time range in Emilia-Pipe output: {transcript}")
+            if (any(left < end and right > start for left, right in blocked)
+                    or not any(turn["start"] < end and turn["end"] > start for turn in activity)):
+                continue
+            clip = file_path(native / f"original_{index}.mp3")
+            dbfs = measure_training_audio(clip)
+            if training_loudness_reason(dbfs):
+                continue
+            audio = target / f"original_{len(accepted)}.mp3"
+            shutil.move(clip, audio)
+            accepted.append(row)
+            rows.append({**row, "rms_dbfs": dbfs, "provenance": provenance, "audio": audio.relative_to(root).as_posix(),
+                         "character_id": character_for_clip(segments, start, row.get("speech_end", end))})
+        write_json(target / "original.json", accepted)
         attach_features(config, root, rows)
         write_manifest(root, rows, models, emilia_filter=emilia_filter, transcription_backend="emilia")
 
@@ -386,6 +391,7 @@ def main() -> None:
                 run_job(config, "dialogue-sidon", {"mixtures": [mixture], "seed": 0})
                 for track in tracks:
                     file_path(track)
+                write_json(root / "overlap-derived.json", {"tracks": [track.name for track in tracks]})
     except (KeyError, ValueError, TypeError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"Training data preparation failed: {exc}\n")
 

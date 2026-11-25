@@ -60,7 +60,8 @@ def _resolve_ref_for_segment(
 ) -> tuple[EmotionRef, Path] | None:
     if character:
         refs = character.emotion_refs
-        for emotion in dict.fromkeys((segment.emotion, "neutral", *refs)):
+        preferred = "neutral" if script.mode == "video_dubbing" else segment.emotion
+        for emotion in dict.fromkeys((preferred, "neutral", *refs)):
             ref = refs.get(emotion)
             if ref and ref.text.strip() and ref.lang.strip():
                 try:
@@ -165,6 +166,7 @@ def _synthesize_single_line(
     ref_path: Path,
     out_wav: Path,
     glossary: dict[str, str] | None = None,
+    sampling: dict[str, int | float] | None = None,
 ) -> None:
     text_lang = normalize_tts_lang(seg.target_lang)
     prompt_lang = normalize_tts_lang(ref.lang)
@@ -182,6 +184,7 @@ def _synthesize_single_line(
         "seed": deterministic_seed(seg.id, seg.target_text, ref.text, ref_path.name),
         "parallel_infer": True,
         "repetition_penalty": 1.35,
+        **(sampling or {}),
     }
     try:
         resp = client.post(
@@ -216,7 +219,7 @@ def synthesize_segments_grouped(
     严格遵守 ARCHITECTURE.md 铁律：
     1. 过滤 keep_original == True 的片段；segment_ids 为 None 时合成全部非 ready 片段。
     2. 先按 speaker 分组，每个角色最多切换一次 GPT/SoVITS 权重。
-    3. 动态情绪参考音频路由 + 缺失时零样本截取 vocals.wav 兜底。
+    3. 视频配音每个角色使用同一条参考音；虚拟舞台按情绪选择参考音。
     4. 测量调速后的成品，成功后替换试听 WAV。
     """
     target_set = set(segment_ids) if segment_ids is not None else None
@@ -238,6 +241,12 @@ def synthesize_segments_grouped(
     tts_dir.mkdir(parents=True, exist_ok=True)
     synthesized_ids: List[int] = []
     errors: List[str] = []
+    parameters = script.model_parameters
+    sampling = {
+        key: value for key in ("temperature", "top_k", "top_p", "repetition_penalty")
+        if parameters is not None and (value := getattr(parameters, f"tts_{key}")) is not None
+    }
+    sampling_options = {"sampling": sampling} if sampling else {}
 
     # Validate references before loading GPU models. Missing references are
     # actionable project errors, not failures of the inference service.
@@ -250,7 +259,7 @@ def synthesize_segments_grouped(
                 seg.status = "error"
                 errors.append(f"片段 #{seg.id} 目标台词为空，跳过合成")
                 continue
-            key = (speaker, seg.emotion)
+            key = (speaker, "neutral" if script.mode == "video_dubbing" else seg.emotion)
             try:
                 if key not in resolved_refs:
                     resolved_refs[key] = _resolve_ref_for_segment(script, character, seg)
@@ -301,9 +310,11 @@ def synthesize_segments_grouped(
 
                     out_name = f"seg_{seg.id:04d}.wav"
                     try:
-                        ref_obj, ref_path = resolved_refs[(speaker, seg.emotion)]
+                        key = (speaker, "neutral" if script.mode == "video_dubbing" else seg.emotion)
+                        ref_obj, ref_path = resolved_refs[key]
                         raw_wav = tmp_dir / out_name
-                        _synthesize_single_line(session, seg, ref_obj, ref_path, raw_wav, script.glossary)
+                        _synthesize_single_line(session, seg, ref_obj, ref_path, raw_wav, script.glossary,
+                                                **sampling_options)
                         finished_wav = apply_gentle_tempo(raw_wav, seg.speed_factor, tmp_dir)
                         actual_duration = measure_wav_duration(finished_wav)
                         if actual_duration <= 0:

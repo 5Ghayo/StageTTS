@@ -115,6 +115,8 @@ def batch_update_segments(
             if "speaker" in patch_data:
                 if patch_data["speaker"] not in script.characters:
                     raise ValueError("请先新建要指派的角色")
+                if patch_data["speaker"] != seg.speaker:
+                    patch_data.setdefault("speaker_reviewed_by_user", None)
                 if patch_data["speaker"] == "UNKNOWN":
                     patch_data["speaker_needs_review"] = True
                 else:
@@ -136,6 +138,7 @@ def batch_update_segments(
                         needs_resynth = True
             validated = Segment.model_validate(seg.model_dump())
             seg.speaker_needs_review = validated.speaker_needs_review
+            seg.speaker_reviewed_by_user = validated.speaker_reviewed_by_user
             seg.speaker_fallback_reason = validated.speaker_fallback_reason
             updated_ids.append(seg.id)
             if needs_resynth:

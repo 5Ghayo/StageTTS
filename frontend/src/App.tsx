@@ -1,4 +1,4 @@
-import { Bot, Sliders, Terminal, Wrench } from "lucide-react";
+import { Bot, Sliders, Terminal, Users, Wrench } from "lucide-react";
 import type React from "react";
 import { useEffect } from "react";
 import { AgentChat } from "./components/AgentChat";
@@ -12,6 +12,7 @@ import { TopMenuBar } from "./components/layout/TopMenuBar";
 import { WelcomeCanvas } from "./components/layout/WelcomeCanvas";
 import { AssetBinPanel } from "./components/panels/AssetBinPanel";
 import { NodeInspectorPanel, PipelineLogsPanel } from "./components/panels/NodeInspectorPanel";
+import { SpeakerReviewPanel } from "./components/panels/SpeakerReviewPanel";
 import { PipelineGraph } from "./components/workflow/PipelineGraph";
 import { useProjectStore } from "./store/useProjectStore";
 import { useWorkflowStore } from "./store/useWorkflowStore";
@@ -158,11 +159,11 @@ export const App: React.FC = () => {
   };
 
   const renderEditingRightPanel = () => {
-    const activeTab = rightTab === "agent" ? "agent" : "inspector";
+    const activeTab = rightTab === "agent" || rightTab === "speakers" ? rightTab : "inspector";
     return (
       <div className="flex h-full flex-col bg-[#222222]">
         <div className="shrink-0 border-b border-white/[0.06] bg-[#222222] px-3 py-1.5">
-          <div className="grid h-7 grid-cols-2 gap-0.5 rounded-[4px] bg-[#181818] p-0.5 text-[12px]">
+          <div className="grid h-7 grid-cols-3 gap-0.5 rounded-[4px] bg-[#181818] p-0.5 text-[12px]">
             <button
               type="button"
               onClick={() => setRightTab("inspector")}
@@ -174,6 +175,11 @@ export const App: React.FC = () => {
             >
               <Sliders className="h-3.5 w-3.5" strokeWidth={1.5} />
               <span>精修</span>
+            </button>
+            <button type="button" onClick={() => setRightTab("speakers")}
+              className={`flex items-center justify-center gap-1.5 rounded-[3px] font-medium ${activeTab === "speakers" ? "bg-[#333333] text-white" : "text-secondary hover:text-primary"}`}>
+              <Users className="h-3.5 w-3.5" strokeWidth={1.5} />
+              <span>角色复核</span>
             </button>
             <button
               type="button"
@@ -191,7 +197,9 @@ export const App: React.FC = () => {
         </div>
 
         <div className="min-h-0 flex-1">
-          {activeTab === "agent" ? <AgentChat /> : <Inspector />}
+          {activeTab === "agent" && <AgentChat />}
+          {activeTab === "speakers" && script && <SpeakerReviewPanel key={script.project_id} script={script} />}
+          {activeTab === "inspector" && <Inspector />}
         </div>
       </div>
     );

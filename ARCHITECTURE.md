@@ -32,7 +32,7 @@
    │
    ▼  (独立推理服务 env_tts，按 speaker 分组切换权重)
 [离线合成与后期层]
-   ├── GPT-SoVITS (api_v2.py, 127.0.0.1:9880) ──▶ 动态情绪参考音频路由 + 分组批合成
+   ├── GPT-SoVITS (api_v2.py, 127.0.0.1:9880) ──▶ 角色共享参考音 + 分组批合成
    └── pydub + FFmpeg (6.x+)                   ──▶ 原声保留 + 毫秒拼轨 + 混音导出
    │
    ├──▶ [模式 A：video_dubbing]   FFmpeg 混入原 BGM 与原画面流，输出 output.mp4
@@ -60,9 +60,9 @@
 3. **按说话人（`speaker`）分组批量合成**
    - 调用 GPT-SoVITS 合成多个片段时，必须先按 `segment.speaker` 分组，在切换到下一个角色前完成该角色名下全部待合成片段，**每个角色最多触发一次权重切换**，严禁按时间顺序逐句来回切换 `gpt_weights` / `sovits_weights`。
 
-4. **动态情绪参考音频路由与零样本兜底**
-   - 合成前根据 `segment.emotion` 查询 `characters[speaker].emotion_refs[emotion]`；若目标情绪不存在，自动回退到 `emotion_refs["neutral"]`，再无则取任意可用参考音。
-   - 缺少可用情绪参考时，从本项目 `media.vocals_wav`（对白轨，兼容旧项目 `vocals.wav`）按同角色已对齐或人工确认的台词范围截取 3–10 秒，并使用对应原文。切换角色权重后恢复服务默认权重。
+4. **视频配音角色共享参考音**
+   - 每个角色优先使用其 `neutral` 参考音，所有台词和重配共用这一条。选择代表音时使用该角色已确认的无叠话原声，优先接近角色的基频中位数与有效语音 RMS 中位数，再考虑语音时长。参考音必须是 3–10 秒的完整原声，偏好较长的实际说话部分。
+   - 虚拟舞台的参考音按目标情绪、默认情绪、其他可用情绪依次选择。合成结束后恢复服务默认权重。
 
 5. **Agent 严禁裸写 FFmpeg 或 Shell 命令**
    - 大模型 Agent 只能通过 OpenAI Function Calling 调度后端封装好的 **5 个确定性原子工具**（`query_script`、`batch_update_segments`、`synthesize_segments`、`update_mix_settings`、`render_final_video`）。禁止让 LLM 生成并执行任意 FFmpeg 命令或 Python 代码。

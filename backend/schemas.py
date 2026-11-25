@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ProjectMode = Literal["video_dubbing", "virtual_stage"]
 TTSEngine = Literal["gpt_sovits_v5", "gpt_sovits_v2"]
@@ -285,6 +285,28 @@ class BoundaryEvidence(BaseModel):
         return self
 
 
+class SpeechCue(BaseModel):
+    """Audio-derived anchor and optional text evidence for one dubbing line."""
+
+    speech_start: float = Field(ge=0, allow_inf_nan=False)
+    speech_end: float = Field(gt=0, allow_inf_nan=False)
+    latest_end: float = Field(gt=0, allow_inf_nan=False)
+    rms_dbfs: float | None = Field(default=None, allow_inf_nan=False)
+    reference_ja: str | None = None
+    reference_zh: str | None = None
+    corrected_source_text: str | None = None
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> "SpeechCue":
+        if not self.speech_start < self.speech_end <= self.latest_end:
+            raise ValueError("Speech cue must have ordered speech and dubbing bounds")
+        return self
+
+
+class OverlapTurn(EvidenceRange):
+    speaker: str
+
+
 class Segment(BaseModel):
     """时间轴单句台词片段。"""
 
@@ -293,6 +315,11 @@ class Segment(BaseModel):
     end: float = Field(gt=0.0, description="结束时间（秒）")
     source_audio_start: float | None = Field(default=None, ge=0.0, description="原声试听起始时间（秒）")
     source_audio_end: float | None = Field(default=None, gt=0.0, description="原声试听结束时间（秒）")
+    speech_cue: SpeechCue | None = None
+    overlap_status: Literal["unchecked", "clear", "detected"] = "unchecked"
+    overlap_turns: List[OverlapTurn] = Field(default_factory=list)
+    training_excluded: bool = False
+    training_exclusion_reasons: List[str] = Field(default_factory=list)
     speaker: str = Field(description="关联 characters 的说话人 Key")
     orig_text: str = Field(default="", description="原片识别文本")
     words: List[AlignedWord] = Field(default_factory=list, json_schema_extra={"default": []})
@@ -308,6 +335,7 @@ class Segment(BaseModel):
     segment_timing_needs_review: bool = True
     alignment_needs_review: bool = True
     speaker_needs_review: bool = True
+    speaker_reviewed_by_user: Optional[bool] = None
     speaker_fallback_reason: str | None = Field(
         default=None, description="说话人证据缺失或聚类回退原因；UNKNOWN 仅为待确认占位，不代表同一人",
     )
@@ -326,13 +354,28 @@ class Segment(BaseModel):
     def _validate_time_range(self) -> "Segment":
         if self.end <= self.start:
             raise ValueError(f"Segment {self.id}: end ({self.end}) must be greater than start ({self.start})")
+        if self.overlap_status == "detected" or self.overlap_turns:
+            self.overlap_status = "detected"
+            self.training_excluded = True
         if self.speaker == "UNKNOWN":
             self.speaker_needs_review = True
+            self.speaker_reviewed_by_user = None
             self.speaker_fallback_reason = self.speaker_fallback_reason or "speaker_assignment_missing"
+        elif self.speaker_reviewed_by_user:
+            self.speaker_needs_review = False
+            self.speaker_fallback_reason = None
         elif not self.speaker_needs_review:
             # Explicitly confirmed ownership supersedes the previous fallback cause.
             self.speaker_fallback_reason = None
         return self
+
+    @property
+    def dub_start(self) -> float:
+        return self.speech_cue.speech_start if self.speech_cue else self.start
+
+    @property
+    def dub_end(self) -> float:
+        return self.speech_cue.latest_end if self.speech_cue else self.end
 
     def invalidate_audio(self) -> None:
         self.tts_wav = None
@@ -341,12 +384,36 @@ class Segment(BaseModel):
         self.status = "ready" if self.keep_original else "pending"
 
 
+class ModelParameters(BaseModel):
+    """Optional project overrides. Empty values inherit the runtime defaults."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    banquet_hop_seconds: float | None = Field(default=None, ge=0.25, le=4)
+    asr_vad_threshold: float | None = Field(default=None, gt=0, lt=1)
+    asr_recheck_vad_threshold: float | None = Field(default=None, gt=0, lt=1)
+    diarizen_ahc_threshold: float | None = Field(default=None, gt=0, le=1)
+    diarizen_fa: float | None = Field(default=None, gt=0, le=1)
+    diarizen_fb: float | None = Field(default=None, gt=0, le=1)
+    tts_temperature: float | None = Field(default=None, gt=0, le=2)
+    tts_top_k: int | None = Field(default=None, ge=1, le=100, strict=True)
+    tts_top_p: float | None = Field(default=None, gt=0, le=1)
+    tts_repetition_penalty: float | None = Field(default=None, ge=1, le=2)
+
+    @model_validator(mode="after")
+    def validate_vad_order(self) -> "ModelParameters":
+        if (self.asr_recheck_vad_threshold or 0.8) < (self.asr_vad_threshold or 0.65):
+            raise ValueError("复查 VAD 阈值须大于或等于初切 VAD 阈值")
+        return self
+
+
 class ProjectScript(BaseModel):
     """全链路唯一真相源：script.json 顶层契约模型。"""
 
     project_id: str = Field(min_length=1, description="项目唯一标识")
     mode: ProjectMode = Field(default="video_dubbing", description="工作模式")
     tts_engine: TTSEngine = "gpt_sovits_v5"
+    model_parameters: ModelParameters | None = None
     media: MediaInfo
     source_lang: str | None = None
     glossary: Dict[str, str] = Field(default_factory=dict, json_schema_extra={"default": {}})
@@ -481,6 +548,7 @@ class SegmentPatch(BaseModel):
     segment_timing_needs_review: Optional[bool] = None
     alignment_needs_review: Optional[bool] = None
     speaker_needs_review: Optional[bool] = None
+    speaker_reviewed_by_user: Optional[bool] = None
     target_text: Optional[str] = None
     target_lang: Optional[str] = None
     emotion: Optional[EmotionType] = None

@@ -27,7 +27,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -59,6 +59,7 @@ from backend.schemas import (  # noqa: E402
     CinematicStems,
     EvidenceProvenance,
     MediaInfo,
+    ModelParameters,
     ProjectScript,
     Segment,
 )
@@ -264,10 +265,10 @@ def _handle_sigterm(_signum: int, _frame: Any) -> None:
     raise SystemExit(143)
 
 
-def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
+def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str, *, hop_seconds: float | None = None) -> None:
     source_root, checkpoint = config.resolve_banquet_paths()
 
-    hop_raw = os.getenv("BANQUET_HOP_SECONDS", "").strip()
+    hop_raw = str(hop_seconds) if hop_seconds is not None else os.getenv("BANQUET_HOP_SECONDS", "").strip()
     hop_args: List[str] = []
     if hop_raw:
         try:
@@ -282,7 +283,7 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
     env.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
     env["PYTHONUTF8"] = "1"
     devices = ("cuda", "cpu") if device == "cuda" else ("cpu",)
-    deadline = time.monotonic() + 900
+    deadline = time.monotonic() + config.PARSE_TIMEOUT_SEC
 
     def _drain_banquet(stream: Any, lines: deque[str]) -> None:
         if stream is None:
@@ -299,7 +300,7 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
     for target_device in devices:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。")
+            raise RuntimeError(f"Banquet ({target_device}) 分离超时。")
         _log("Stage1", f"Banquet ({target_device}) 直接分离对白、歌声、音乐与音效")
         cmd = [
             sys.executable,
@@ -338,7 +339,7 @@ def _stage_banquet(extracted_wav: Path, output_dir: Path, device: str) -> None:
             except subprocess.TimeoutExpired as exc:
                 _kill_banquet_tree(proc)
                 reader.join(timeout=3)
-                raise RuntimeError(f"Banquet ({target_device}) 分离超时（>900s）。") from exc
+                raise RuntimeError(f"Banquet ({target_device}) 分离超时。") from exc
             except BaseException:
                 if proc.poll() is None:
                     _kill_banquet_tree(proc)
@@ -445,6 +446,9 @@ def _stage_whisperx_asr_align(
     compute_type: str,
     whisper_model: str,
     device: str,
+    source_lang: str | None = None,
+    vad_threshold: float | None = None,
+    recheck_threshold: float | None = None,
 ) -> Tuple[Any, Dict[str, Any], str]:
     """阶段 2：WhisperX 语音识别与词级时间戳对齐（含 CUDA OOM 自动降级 int8 / cpu）。"""
     _enable_pyannote_torch_load_compat()
@@ -453,6 +457,7 @@ def _stage_whisperx_asr_align(
     from workers.speech_segmentation import ASR_MAX_SPEECH_SECONDS, ASR_VAD_THRESHOLD, enable_sentence_vad
 
     audio = whisperx.load_audio(str(vocals_wav))
+    vad_threshold = vad_threshold if vad_threshold is not None else ASR_VAD_THRESHOLD
 
     candidates: List[Tuple[str, str, int]] = []
     if device == "cuda":
@@ -473,9 +478,11 @@ def _stage_whisperx_asr_align(
                 whisper_model,
                 device=dev,
                 compute_type=ctype,
-                vad_options={"vad_onset": ASR_VAD_THRESHOLD, "vad_offset": ASR_VAD_THRESHOLD},
+                language=source_lang,
+                vad_options={"vad_onset": vad_threshold, "vad_offset": vad_threshold},
             )
-            vad_adapter = enable_sentence_vad(model)
+            vad_adapter = (enable_sentence_vad(model) if recheck_threshold is None
+                           else enable_sentence_vad(model, recheck_threshold))
             result = model.transcribe(audio, batch_size=batch_size, chunk_size=ASR_MAX_SPEECH_SECONDS)
             used_device = dev
             _log(
@@ -549,6 +556,7 @@ def _stage_diarize(
     skip_diarization: bool,
     evidence_context: Optional[Dict[str, Any]] = None,
     prepared_segments: Optional[List[Dict[str, Any]]] = None,
+    clustering_parameters: dict[str, float] | None = None,
 ) -> List[Dict[str, Any]]:
     """Cluster the final source audio clips without modifying their boundaries."""
     from workers.speaker_pipeline import assign_interval, run_speaker_job
@@ -572,6 +580,8 @@ def _stage_diarize(
         raise ValueError("DiariZen clustering requires the source dialogue audio")
     _log("Stage3", f"DiariZen 声纹聚类 (device={device})")
     settings = _speaker_settings(device)
+    if clustering_parameters:
+        settings["clustering_parameters"] = clustering_parameters
     units = {part["id"]: {
         "id": part["id"],
         "start": part["source_audio_start"] if part.get("source_audio_start") is not None else part["start"],
@@ -588,7 +598,8 @@ def _stage_diarize(
         unit, assignment = units[part["id"]], assignments[part["id"]]
         speaker = assignment["speaker"]
         _, coverage_issue = assign_interval(unit["start"], unit["end"], spans)
-        reason = assignment.get("reason") or coverage_issue
+        reason = ("source_overlap" if part.get("overlap_status") == "detected"
+                  else assignment.get("reason") or coverage_issue)
         if not reason and part["alignment_needs_review"]:
             reason = "dialogue_alignment_needs_review"
         part.update(speaker=speaker, speaker_needs_review=bool(reason), speaker_fallback_reason=reason)
@@ -619,6 +630,7 @@ def _build_and_save_script(
     detected_lang: str,
     cinematic_stems: Optional[CinematicStems] = None,
     evidence_context: Optional[Dict[str, Any]] = None,
+    audio_samples: Any = None,
 ) -> Path:
     """组装并通过 Pydantic v2 强校验后落盘 workspace/{project_id}/script.json。"""
     project_id = args.project_id
@@ -674,6 +686,16 @@ def _build_and_save_script(
 
     max_seg_end = max((s.end for s in segments), default=0.0)
     final_duration = round(max(duration, max_seg_end), 3)
+    if audio_samples is not None:
+        from backend.services.dialogue_cues import (
+            attach_speech_cues,
+            exclude_quiet_training_clips,
+            load_subtitle_references,
+        )
+
+        attach_speech_cues(segments, raw_segments, audio_samples, final_duration)
+        exclude_quiet_training_clips(segments)
+        load_subtitle_references(segments, args.output_dir, None if is_audio_only else args.input)
 
     evidence = None
     if evidence_context is not None:
@@ -712,12 +734,34 @@ def _build_and_save_script(
             speaker_scope=evidence_context.get("speaker_scope"),
         )
 
+        if existing and existing.evidence and existing.evidence.source_id == source_id:
+            reviewed_by_text: dict[str, list[Segment]] = defaultdict(list)
+            for prior in existing.segments:
+                text = prior.orig_text.strip()
+                if prior.speaker_reviewed_by_user and prior.speaker in characters and text:
+                    reviewed_by_text[text].append(prior)
+            matches: list[tuple[Segment, Segment]] = []
+            for row in segments:
+                candidates = [prior for prior in reviewed_by_text.get(row.orig_text.strip(), [])
+                              if abs(prior.dub_start - row.dub_start) <= 0.15
+                              and abs(prior.end - row.end) <= 0.15]
+                if len(candidates) == 1:
+                    matches.append((row, candidates[0]))
+            counts = Counter(prior.id for _, prior in matches)
+            for row, prior in matches:
+                if counts[prior.id] == 1:
+                    row.speaker = prior.speaker
+                    row.speaker_reviewed_by_user = True
+                    row.speaker_needs_review = False
+                    row.speaker_fallback_reason = None
+
     script = ProjectScript(
         project_id=project_id,
         mode=args.mode,
         source_lang=getattr(args, "source_lang", None) or (existing.source_lang if existing else None) or detected_lang or None,
         glossary=existing.glossary if existing else {},
         tts_engine=existing.tts_engine if existing else "gpt_sovits_v5",
+        model_parameters=existing.model_parameters if existing else None,
         media=MediaInfo(
             source_video=source_video_url,
             vocals_wav=_project_media_url(vocals_wav, args.output_dir, project_id),
@@ -787,6 +831,9 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    saved_script = args.output_dir / "script.json"
+    saved_parameters = json.loads(saved_script.read_text(encoding="utf-8")).get("model_parameters") if saved_script.is_file() else None
+    parameters = ModelParameters.model_validate(saved_parameters or {})
     device = _resolve_device(args.device)
     _log("Init", f"project={args.project_id}, device={device}, WhisperX + DiariZen")
 
@@ -799,7 +846,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             if not getattr(args, "skip_diarization", False):
                 from workers.speaker_pipeline import run_speaker_job
                 run_speaker_job(None, _speaker_settings(device), preflight=True)
-            _stage_banquet(extracted_wav, cinematic_dir, device)
+            hop_options = ({"hop_seconds": parameters.banquet_hop_seconds} if parameters.banquet_hop_seconds is not None else {})
+            _stage_banquet(extracted_wav, cinematic_dir, device, **hop_options)
             vocals_wav, bgm_wav, cinematic_stems = _finish_four_stems(cinematic_dir, args.project_id)
 
         audio, aligned_result, detected_lang = _stage_whisperx_asr_align(
@@ -807,10 +855,28 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             compute_type=getattr(args, "compute_type", "float16"),
             whisper_model=getattr(args, "whisper_model", "large-v3"),
             device=device,
+            source_lang=getattr(args, "source_lang", None),
+            vad_threshold=parameters.asr_vad_threshold,
+            recheck_threshold=parameters.asr_recheck_vad_threshold,
         )
         from workers.dialogue_segmentation import resolve_dialogue_boundaries
 
         prepared = resolve_dialogue_boundaries(aligned_result, lambda message: _log("Stage3", message))
+        from workers.overlap_scan import annotate_overlaps, scan_speaker_activity
+
+        activity = None
+        if prepared:
+            try:
+                activity = scan_speaker_activity(vocals_wav, device)
+                if not activity:
+                    activity = None
+                    _log("Stage3", "pyannote 未返回说话人活动，片段标为未检查并禁止训练")
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                _log("Stage3", f"pyannote 叠话检查未完成，片段禁止训练：{exc}")
+        annotate_overlaps(prepared, activity)
+        if activity is not None:
+            count = sum(row["overlap_status"] == "detected" for row in prepared)
+            _log("Stage3", f"pyannote 发现 {count} 条叠话，已保存各说话人原片时间和禁训标记")
         _log("Stage3", f"切分完成，共 {len(prepared)} 段，开始人物聚类")
         evidence_context: Dict[str, Any] = {}
         raw_segments = _stage_diarize(
@@ -820,6 +886,11 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             skip_diarization=args.skip_diarization,
             evidence_context=evidence_context,
             prepared_segments=prepared,
+            clustering_parameters={key: value for key, value in {
+                "ahc_threshold": parameters.diarizen_ahc_threshold,
+                "Fa": parameters.diarizen_fa,
+                "Fb": parameters.diarizen_fb,
+            }.items() if value is not None},
         )
         review_count = sum(seg["alignment_needs_review"] or seg["speaker_needs_review"] for seg in raw_segments)
         if review_count:
@@ -833,6 +904,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             detected_lang=detected_lang,
             cinematic_stems=cinematic_stems,
             evidence_context=evidence_context,
+            audio_samples=audio,
         )
     except BaseException:
         shutil.rmtree(cinematic_dir, ignore_errors=True)

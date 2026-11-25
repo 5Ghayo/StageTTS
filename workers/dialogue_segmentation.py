@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from workers.aligned_segments import normalize_segments
-from workers.speech_segmentation import attach_playback_ranges
+from workers.speech_segmentation import MAX_PLAYBACK_TAIL_SILENCE_SECONDS, attach_playback_ranges
 
 ROOT = Path(__file__).resolve().parent.parent
 SAT_THRESHOLD = 0.25
@@ -105,7 +105,11 @@ def _split_at_vad_pause(row, probabilities, chunks, starts, pauses, middles, nex
             semantic_cuts=frozenset(),
         )
         part["source_audio_start"] = left["right_start"] if left else row.get("source_audio_start", start)
-        part["source_audio_end"] = stop if right else max(stop, row.get("source_audio_end", stop))
+        part["speech_end"] = right["left_end"] if right else row.get("speech_end", stop)
+        part["source_audio_end"] = (
+            min(stop, right["left_end"] + MAX_PLAYBACK_TAIL_SILENCE_SECONDS)
+            if right else max(stop, row.get("source_audio_end", stop))
+        )
         part["boundary_provenance"] = [boundary for boundary in (left, right) if boundary]
         output.append(part)
     return output

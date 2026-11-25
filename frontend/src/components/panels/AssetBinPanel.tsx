@@ -8,6 +8,7 @@ import type { StemVolumes, SubtitleLayout } from "../../types/script";
 import { isSegmentOverflow, isSegmentTooShort } from "../../utils/synthesisIssues";
 import { CharacterPanel } from "./CharacterPanel";
 import { TranslationSettings } from "./TranslationSettings";
+import { ModelParameters } from "./ModelParameters";
 
 type DrawerSegmentFilter = "all" | "review" | "pending" | "issue";
 
@@ -132,6 +133,12 @@ export const AssetBinPanel: React.FC = () => {
         ) : (
           <div>
             <TranslationSettings key={script.project_id} script={script} />
+            <details className="space-y-3 border-b border-white/[0.08] px-3.5 py-2">
+              <summary className="cursor-pointer text-primary">模型参数</summary>
+              {(["separation", "recognition", "synthesis"] as const).map((group) => (
+                <ModelParameters key={`${script.project_id}-${group}`} group={group} script={script} />
+              ))}
+            </details>
             <div className="divide-y divide-white/[0.05] border-b border-dashed border-white/[0.08]">
               {mediaRows.map((row) => (
                 <div key={row.label} className="flex h-8 items-center justify-between px-3.5">

@@ -123,7 +123,8 @@ export const Inspector: React.FC = () => {
 
   const speakers = Object.keys(script.characters);
   const editsDisabled = isLoading || isSynthesizing || pipelineRunning;
-  const slotDuration = Math.max(0.1, segment.end - segment.start);
+  const cue = segment.speech_cue;
+  const slotDuration = Math.max(0.1, cue ? cue.latest_end - cue.speech_start : segment.end - segment.start);
   const sourceStart = segment.source_audio_start ?? segment.start;
   const sourceEnd = segment.source_audio_end ?? segment.end;
   const targetLang = segment.target_lang.replace(/^all_/, "").split("-")[0];
@@ -369,6 +370,30 @@ export const Inspector: React.FC = () => {
             value={segment.orig_text}
             onChange={(e) => updateSegmentLocal({ id: segment.id, orig_text: e.target.value })}
           />
+          {cue && (
+            <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[11px] text-secondary">
+              <dt>起音 / 最晚结束</dt>
+              <dd>{cue.speech_start.toFixed(3)}–{cue.latest_end.toFixed(3)} 秒</dd>
+              {cue.rms_dbfs != null && <><dt>原声响度</dt><dd>{cue.rms_dbfs.toFixed(1)} dBFS</dd></>}
+              {cue.reference_ja && <><dt>日文字幕参考</dt><dd lang="ja">{cue.reference_ja}</dd></>}
+              {cue.reference_zh && <><dt>中文字幕参考</dt><dd>{cue.reference_zh}</dd></>}
+              {cue.corrected_source_text && <><dt>LLM 校对</dt><dd>{cue.corrected_source_text}</dd></>}
+            </dl>
+          )}
+          {segment.training_excluded && (
+            <div className="text-[11px] text-status-warning">
+              <p>禁止训练</p>
+              {segment.overlap_status === "detected" && <p>检测到叠话</p>}
+              {segment.overlap_status === "unchecked" && <p>叠话未核验</p>}
+              {segment.training_exclusion_reasons?.includes("low_rms_dbfs") && <p>原声音量低于训练阈值</p>}
+              {segment.training_exclusion_reasons?.includes("rms_unavailable") && <p>原声音量未测得</p>}
+              {segment.overlap_turns?.map((turn) => (
+                <p key={`${turn.speaker}:${turn.start}:${turn.end}`}>
+                  {turn.speaker} · {turn.start.toFixed(3)}–{turn.end.toFixed(3)} 秒
+                </p>
+              ))}
+            </div>
+          )}
           <p className="text-[11px] text-secondary">
             时间粒度：{segment.alignment_granularity === "word" ? "词级" : segment.alignment_granularity === "segment" ? "句段级" : "未声明"}
           </p>

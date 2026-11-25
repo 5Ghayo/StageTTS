@@ -93,19 +93,53 @@ class ParseEvidenceTest(unittest.TestCase):
             output = root / "output"
             args = Namespace(project_id="mock-pipeline", input=source, output_dir=output,
                              device="cpu", skip_diarization=False)
+            output.mkdir()
+            (output / "script.json").write_text(json.dumps({"model_parameters": {
+                "banquet_hop_seconds": 0.5, "asr_vad_threshold": 0.62,
+                "asr_recheck_vad_threshold": 0.84, "diarizen_fb": 0.41,
+            }}))
             with patch("workers.speaker_pipeline.run_speaker_job", return_value={}), \
                  patch.object(parse_worker, "_resolve_device", return_value="cpu"), \
                  patch.object(parse_worker, "_extract_wav_and_probe", return_value=1), \
-                 patch.object(parse_worker, "_stage_banquet"), \
+                 patch.object(parse_worker, "_stage_banquet") as banquet, \
                  patch.object(parse_worker, "_finish_four_stems", return_value=(source, None, None)), \
-                 patch.object(parse_worker, "_stage_whisperx_asr_align", return_value=(None, {"segments": []}, "ja")), \
+                 patch.object(parse_worker, "_stage_whisperx_asr_align", return_value=(None, {"segments": []}, "ja")) as asr, \
                  patch.object(parse_worker, "_stage_diarize", return_value=[]) as diarize, \
                  patch.object(parse_worker, "_build_and_save_script", return_value=output / "script.json") as save, \
                  patch.object(parse_worker, "_cleanup_stale_cinematic_dirs"):
                 parse_worker.run_pipeline(args)
             self.assertEqual(diarize.call_args.kwargs["prepared_segments"], [])
+            self.assertEqual(banquet.call_args.kwargs["hop_seconds"], 0.5)
+            self.assertEqual(asr.call_args.kwargs["vad_threshold"], 0.62)
+            self.assertEqual(asr.call_args.kwargs["recheck_threshold"], 0.84)
+            self.assertEqual(diarize.call_args.kwargs["clustering_parameters"], {"Fb": 0.41})
             self.assertEqual(save.call_args.kwargs["detected_lang"], "ja")
             self.assertIs(diarize.call_args.kwargs["evidence_context"], save.call_args.kwargs["evidence_context"])
+
+    def test_same_source_reparse_preserves_only_unambiguous_human_assignments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.wav"
+            source.write_bytes(b"fixture")
+            args = Namespace(project_id="review", input=source, output_dir=root,
+                             mode="video_dubbing", target_lang="zh", skip_llm=True)
+            row = {"id": 0, "start": 0.2, "end": 1.5, "orig_text": "Hello.", "speaker": "A"}
+            path = parse_worker._build_and_save_script(args, 4, source, None, [dict(row)], "en",
+                                                      evidence_context={})
+            saved = ProjectScript.model_validate_json(path.read_text())
+            saved.segments[0].speaker_reviewed_by_user = True
+            path.write_text(saved.model_dump_json())
+            changed = {**row, "speaker": "B", "id": 4, "start": 0.26, "end": 1.56}
+            repeated = {**row, "speaker": "B", "id": 6, "start": 2, "end": 3}
+            parse_worker._build_and_save_script(args, 4, source, None, [changed, repeated], "en",
+                                             evidence_context={})
+            parsed = ProjectScript.model_validate_json(path.read_text())
+            first, second = parsed.segments
+            self.assertEqual(first.id, 4)
+            self.assertEqual(first.speaker, "A")
+            self.assertTrue(first.speaker_reviewed_by_user)
+            self.assertEqual(second.speaker, "B")
+            self.assertIsNone(second.speaker_reviewed_by_user)
 
 
 if __name__ == "__main__":

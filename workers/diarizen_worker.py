@@ -23,7 +23,20 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
 from workers.speaker_pipeline import DIARIZEN_MODEL, DIARIZEN_REVISION, validate_spans
 
 AHC_THRESHOLD = 0.35
+VBX_FA = 0.15
+VBX_FB = 0.37
 CLUSTERING_ASSETS = ("config.toml", "plda/plda.npz", "plda/xvec_transform.npz")
+
+
+def clustering_parameters(request: dict) -> dict[str, float]:
+    defaults = {"ahc_threshold": AHC_THRESHOLD, "Fa": VBX_FA, "Fb": VBX_FB}
+    overrides = request.get("clustering_parameters", {})
+    if not isinstance(overrides, dict) or not overrides.keys() <= defaults.keys():
+        raise ValueError("Invalid clustering_parameters keys")
+    for key, value in overrides.items():
+        if type(value) not in (int, float) or not 0 < value <= 1:
+            raise ValueError(f"Invalid DiariZen clustering parameter {key}")
+    return {**defaults, **overrides}
 
 
 def validate_request(request: dict) -> None:
@@ -91,8 +104,7 @@ def _load_diarizen(request: dict):
     )
     clustering = VBxClustering(metric=embedding.metric, plda_dir=str(root / "plda"),
                                lda_dim=config["lda_dim"], maxIters=config["max_iters"])
-    clustering.instantiate({"ahc_criterion": config["ahc_criterion"], "ahc_threshold": AHC_THRESHOLD,
-                            "Fa": config["Fa"], "Fb": config["Fb"]})
+    clustering.instantiate({"ahc_criterion": config["ahc_criterion"], **clustering_parameters(request)})
     return embedding, clustering
 
 
@@ -203,6 +215,10 @@ def run_request(request: dict) -> dict:
                 for block in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(block)
             scope = digest.hexdigest()[:12]
+            parameters = clustering_parameters(request)
+            if parameters != clustering_parameters({}):
+                fingerprint = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+                scope = hashlib.sha256(f"{digest.hexdigest()}:{fingerprint}".encode()).hexdigest()[:12]
             spans, grouping = scope_activity(raw, scope)
             mapping = grouping["speaker_mapping"]
             result["dialogue_assignments"] = [
@@ -211,7 +227,7 @@ def run_request(request: dict) -> dict:
             result.update(status="completed", reason=None, diarization_spans=spans,
                           grouping=grouping, source_audio_sha256=digest.hexdigest(),
                           duration_seconds=duration, device=request.get("device", "cpu"),
-                          parameters={"ahc_threshold": AHC_THRESHOLD},
+                          parameters=parameters,
                           clustering_input="dialogue_units",
                           review_reasons=["no_speaker_activity_returned"] if not spans else [])
     except Exception as exc:

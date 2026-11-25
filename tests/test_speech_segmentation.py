@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from workers.aligned_segments import normalize_segments
-from workers.speech_segmentation import attach_playback_ranges, speech_chunks
+from workers.speech_segmentation import attach_playback_ranges, speech_chunks, speech_playback_ranges
 
 
 def test_real_pauses_separate_short_utterances_instead_of_merging_to_30_seconds():
@@ -36,6 +36,12 @@ def test_playback_trims_heads_and_keeps_midpoint_tails_without_moving_aligned_ti
         (1.0, 1.4), (1.5, 2.5), (3.0, 4.1),
     ]
     assert [(row["start"], row["end"]) for row in segments] == [(1.1, 1.4), (1.5, 1.8), (3.1, 3.8)]
+
+
+def test_playback_caps_only_long_midpoint_tails():
+    assert speech_playback_ranges([(1, 2), (8, 9), (11, 12)], 13) == [
+        (1, 4), (8, 10), (11, 12.25),
+    ]
 
 
 def test_no_evenly_spaced_cuts_are_invented_for_long_continuous_speech():

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { uploadSubtitleReference } from "../../services/api";
 import { useProjectStore } from "../../store/useProjectStore";
 import { useWorkflowStore } from "../../store/useWorkflowStore";
 import type { ProjectScript } from "../../types/script";
@@ -16,6 +17,19 @@ export function TranslationSettings({ script }: { script: ProjectScript }) {
   const [sourceLang, setSourceLang] = useState("");
   const [terms, setTerms] = useState("");
   const [message, setMessage] = useState("");
+  const [uploadingSubtitle, setUploadingSubtitle] = useState(false);
+
+  async function uploadReference(language: "ja" | "zh", file: File) {
+    setUploadingSubtitle(true);
+    try {
+      const result = await uploadSubtitleReference(script.project_id, language, file);
+      setMessage(`参考字幕已保存（${result.cues} 条），解析或重译时会匹配原声台词。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "参考字幕上传失败");
+    } finally {
+      setUploadingSubtitle(false);
+    }
+  }
 
   useEffect(() => {
     setSourceLang(script.source_lang ?? "");
@@ -75,6 +89,22 @@ export function TranslationSettings({ script }: { script: ProjectScript }) {
           onChange={(e) => setTerms(e.target.value)}
         />
       </label>
+      {(["ja", "zh"] as const).map((language) => (
+        <label className="block space-y-1" key={language}>
+          <span>{language === "ja" ? "日文参考字幕" : "中文参考字幕"}</span>
+          <input
+            type="file"
+            accept=".srt,.vtt"
+            className={field}
+            disabled={offline || busy || pipelineRunning || uploadingSubtitle}
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) void uploadReference(language, file);
+            }}
+          />
+        </label>
+      ))}
       <div className="flex flex-wrap gap-1">
         <button
           className={button}
@@ -92,6 +122,7 @@ export function TranslationSettings({ script }: { script: ProjectScript }) {
           disabled={
             offline ||
             busy ||
+            uploadingSubtitle ||
             pipelineRunning ||
             !script.segments.some((seg) => seg.orig_text.trim())
           }

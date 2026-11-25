@@ -10,7 +10,7 @@ import shutil
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import AsyncIterator, Dict, List
+from typing import AsyncIterator, Dict, List, Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -259,10 +259,19 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
                     segment.timing_source = "unknown"
                     segment.segment_timing_needs_review = True
                     segment.source_audio_start = segment.source_audio_end = None
+                    segment.speech_cue = None
+                    segment.overlap_status = "unchecked"
+                    segment.overlap_turns = []
+                    segment.training_excluded = True
+                    segment.training_exclusion_reasons = []
                     continue
                 # Source capabilities come from parsing, not a client-side claim.
                 segment.alignment_granularity = before.alignment_granularity
                 segment.timing_source = before.timing_source
+                segment.overlap_status = before.overlap_status
+                segment.overlap_turns = before.overlap_turns
+                segment.training_excluded = before.training_excluded
+                segment.training_exclusion_reasons = before.training_exclusion_reasons.copy()
                 if (segment.start, segment.end, payload.media.vocals_wav) == (
                     before.start, before.end, previous.media.vocals_wav
                 ):
@@ -270,10 +279,20 @@ def put_project_script(project_id: str, payload: ProjectScript) -> ProjectScript
                     segment.source_audio_end = before.source_audio_end
                 else:
                     segment.source_audio_start = segment.source_audio_end = None
+                    segment.speech_cue = None
+                    if payload.media.vocals_wav != previous.media.vocals_wav:
+                        segment.overlap_turns = []
+                    if not segment.overlap_turns:
+                        segment.overlap_status = "unchecked"
+                    segment.training_excluded = True
+                if segment.speech_cue and segment.orig_text != before.orig_text:
+                    segment.speech_cue.corrected_source_text = None
                 if (segment.orig_text, segment.start, segment.end, segment.speaker) != (
                     before.orig_text, before.start, before.end, before.speaker
                 ) or payload.media.vocals_wav != previous.media.vocals_wav:
                     segment.segment_timing_needs_review = True
+                if segment.speaker != before.speaker:
+                    segment.invalidate_audio()
                 if (segment.orig_text, segment.start, segment.end) != (before.orig_text, before.start, before.end):
                     segment.alignment_needs_review = True
         save_project_script(payload)
@@ -317,6 +336,9 @@ def retranslate_project(project_id: str, req: TranslationRequest | None = None) 
         # Translate an isolated candidate. A language override must not relabel
         # failed rows or leave old TTS audio attached to the wrong language.
         candidate = script.model_copy(deep=True)
+        from backend.services.dialogue_cues import load_subtitle_references
+
+        load_subtitle_references(candidate.segments, config.WORKSPACE_DIR / safe_id)
         target_lang = req.target_lang.lower() if req is not None and req.target_lang is not None else None
         if target_lang is not None:
             for seg in candidate.segments:
@@ -336,6 +358,7 @@ def retranslate_project(project_id: str, req: TranslationRequest | None = None) 
             result = candidates[seg.id]
             before_audio = (seg.target_text, seg.target_lang, seg.emotion, seg.keep_original)
             seg.target_text = result.target_text
+            seg.speech_cue = result.speech_cue
             seg.target_lang = result.target_lang
             seg.emotion = result.emotion
             seg.action = result.action
@@ -404,6 +427,29 @@ def upload_project_media(
         "media_url": media_url,
         "duration": duration,
     }
+
+
+@app.post("/api/projects/{project_id}/subtitle-reference/{language}")
+def upload_subtitle_reference(project_id: str, language: Literal["ja", "zh"], file: UploadFile = File(...)) -> dict[str, int]:
+    from tempfile import TemporaryDirectory
+
+    from backend.services.dialogue_cues import SUBTITLE_MAX_BYTES, parse_subtitle_cues, subtitle_path
+
+    safe_id = _validate_project_id(project_id)
+    if Path(file.filename or "").suffix.lower() not in {".srt", ".vtt"}:
+        raise ValueError("参考字幕需为 SRT 或 WebVTT 文件")
+    raw = file.file.read(SUBTITLE_MAX_BYTES + 1)
+    cues = parse_subtitle_cues(raw)
+    if not cues:
+        raise ValueError("字幕文件没有有效的时间轴条目")
+    with project_task_guard(safe_id):
+        load_project_script(safe_id)
+        path = subtitle_path(config.WORKSPACE_DIR / safe_id, language)
+        with TemporaryDirectory(dir=path.parent) as temp:
+            draft = Path(temp) / path.name
+            draft.write_bytes(raw)
+            draft.replace(path)
+    return {"cues": len(cues)}
 
 
 @app.get("/api/projects/{project_id}/parse/status", response_model=ParseStatusResponse)
